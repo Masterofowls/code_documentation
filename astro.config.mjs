@@ -2,8 +2,19 @@
 
 import markdoc from '@astrojs/markdoc';
 import starlight from '@astrojs/starlight';
+import swup from '@swup/astro';
 import AstroPWA from '@vite-pwa/astro';
 import { defineConfig } from 'astro/config';
+import embed from 'astro-embed/integration';
+// import htmx from 'astro-htmx'; // Disabled - causes build issues with process export
+import mermaid from 'astro-mermaid';
+import purgecss from 'astro-purgecss';
+// Astro integrations
+import robotsTxt from 'astro-robots-txt';
+import sitemap from 'astro-sitemap';
+import typograf from 'astro-typograf';
+// Starlight plugins
+import starlightBlog from 'starlight-blog';
 import starlightCodeblockFullscreen from 'starlight-codeblock-fullscreen';
 import starlightCoolerCredit from 'starlight-cooler-credit';
 import starlightGiscus from 'starlight-giscus';
@@ -12,16 +23,108 @@ import starlightHeadingBadges from 'starlight-heading-badges';
 import starlightImageZoom from 'starlight-image-zoom';
 import starlightKbd from 'starlight-kbd';
 import starlightLlmsTxt from 'starlight-llms-txt';
+import starlightMarkdown from 'starlight-markdown';
 import starlightPageActions from 'starlight-page-actions';
 import { starlightIconsPlugin } from 'starlight-plugin-icons';
 import starlightSidebarTopics from 'starlight-sidebar-topics';
 import starlightTags from 'starlight-tags';
+import starlightVideos from 'starlight-videos';
+import AutoImport from 'unplugin-auto-import/astro';
+import biomePlugin from 'vite-plugin-biome';
 
 // https://astro.build/config
 export default defineConfig({
   site: 'https://code-documentation.vercel.app',
+  compressHTML: true,
+  build: {
+    inlineStylesheets: 'auto',
+    assets: '_assets',
+    format: 'file',
+  },
+  prefetch: {
+    prefetchAll: false,
+    defaultStrategy: 'viewport',
+  },
+  vite: {
+    plugins: [
+      biomePlugin({
+        mode: 'check',
+        applyFixes: true,
+      }),
+    ],
+    build: {
+      cssCodeSplit: true,
+      minify: 'esbuild',
+      sourcemap: false,
+      reportCompressedSize: false,
+      chunkSizeWarningLimit: 1000,
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            'vendor-core': ['astro:content'],
+            'vendor-starlight': ['@astrojs/starlight'],
+          },
+          assetFileNames: (assetInfo) => {
+            const name = assetInfo.name || '';
+            if (/\.(woff2?|ttf|eot|otf)$/i.test(name)) {
+              return '_assets/fonts/[name]-[hash][extname]';
+            }
+            if (/\.(png|jpe?g|gif|svg|webp|avif|ico)$/i.test(name)) {
+              return '_assets/images/[name]-[hash][extname]';
+            }
+            if (/\.css$/i.test(name)) {
+              return '_assets/css/[name]-[hash][extname]';
+            }
+            return '_assets/[name]-[hash][extname]';
+          },
+          chunkFileNames: '_assets/js/[name]-[hash].js',
+          entryFileNames: '_assets/js/[name]-[hash].js',
+        },
+      },
+    },
+    css: {
+      devSourcemap: false,
+    },
+    optimizeDeps: {
+      include: ['mermaid'],
+      exclude: ['@astrojs/starlight'],
+    },
+    esbuild: {
+      legalComments: 'none',
+      treeShaking: true,
+    },
+  },
   integrations: [
     markdoc(),
+    AutoImport({
+      include: [/\.[tj]sx?$/, /\.astro$/],
+      imports: [],
+      dts: './src/auto-imports.d.ts',
+    }),
+    robotsTxt({
+      sitemap: true,
+      policy: [{ userAgent: '*', allow: '/' }],
+    }),
+    sitemap(),
+    embed(),
+    swup({
+      theme: 'fade',
+      animationClass: 'transition-',
+      containers: ['main'],
+      cache: true,
+      preload: true,
+      accessibility: true,
+      progress: true,
+      smoothScrolling: true,
+    }),
+    purgecss({
+      safelist: [/^astro/, /^starlight/, /^sl-/],
+    }),
+    // htmx(), // Disabled - causes build issues
+    typograf({
+      locale: ['en-US'],
+    }),
+    mermaid(),
     starlight({
       title: 'Code Documentation',
       description:
@@ -54,6 +157,14 @@ export default defineConfig({
         starlightCodeblockFullscreen(),
         starlightLlmsTxt(),
         starlightIconsPlugin(),
+        starlightBlog({
+          title: 'Blog',
+          prefix: 'blog',
+          postCount: 5,
+          recentPostCount: 10,
+        }),
+        starlightMarkdown(),
+        starlightVideos(),
         starlightKbd({
           types: [
             { id: 'mac', label: 'macOS', default: true },
@@ -375,11 +486,31 @@ export default defineConfig({
       ],
     }),
     AstroPWA({
-      mode: 'production',
       base: '/',
       scope: '/',
       includeAssets: ['favicon.svg', 'icons/*.png'],
       registerType: 'autoUpdate',
+      injectRegister: false,
+      selfDestroying: true,
+      workbox: {
+        globDirectory: 'dist',
+        globPatterns: ['**/*.{html,css,js,ico,png,svg,woff2}'],
+        navigateFallback: null,
+        runtimeCaching: [
+          {
+            urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'google-fonts-cache',
+              expiration: { maxEntries: 10, maxAgeSeconds: 60 * 60 * 24 * 365 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+        ],
+      },
+      devOptions: {
+        enabled: false,
+      },
       manifest: {
         name: 'Code Documentation',
         short_name: 'CodeDocs',
@@ -418,21 +549,6 @@ export default defineConfig({
             name: 'JavaScript Docs',
             url: '/web/javascript/',
             icons: [{ src: '/icons/pwa-192x192.png', sizes: '192x192' }],
-          },
-        ],
-      },
-      workbox: {
-        globPatterns: ['**/*.{html,css,js,ico,png,svg,woff2}'],
-        navigateFallback: '/404',
-        runtimeCaching: [
-          {
-            urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'google-fonts-cache',
-              expiration: { maxEntries: 10, maxAgeSeconds: 60 * 60 * 24 * 365 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
           },
         ],
       },

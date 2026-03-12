@@ -1,102 +1,77 @@
 ---
-title: Bash Getting Started
-description: Running scripts, script structure, variables, arithmetic, quoting, word splitting, special variables, and PATH management.
+title: Getting Started with Bash
+description: Running scripts, variables, quotes, arithmetic, command substitution, and special variables in Bash.
 sidebar:
   order: 2
 tags: [cli, shell, scripting]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-# Bash Getting Started
+# Getting Started with Bash
 
 ## Running Scripts
 
 ```bash
-# Method 1: Pass script to bash interpreter
+# Method 1: Pass to bash interpreter
 bash script.sh
-bash -x script.sh          # debug mode: print each command
+bash -x script.sh   # with xtrace (prints each command)
 
-# Method 2: Make executable and run directly
+# Method 2: Make executable and run directly (requires shebang line)
 chmod +x script.sh
-./script.sh                # ./ is required (not just script.sh)
+./script.sh          # ./ required because . (current dir) is not in PATH
 
-# Method 3: Source the script (runs in current shell, not subshell)
-source script.sh           # changes affect current shell
-. script.sh                # POSIX equivalent (dot command)
+# Method 3: Source — runs in CURRENT shell (affects current environment)
+source script.sh
+. script.sh         # same thing — POSIX form
 
-# Method 4: Run with explicit path
-/path/to/script.sh
-
-# Check exit code of last command
-echo $?                    # 0 = success, non-zero = error
+# When to use source:
+# - Loading environment variables into current shell
+# - Activating virtual environments (source venv/bin/activate)
+# - Reloading shell configuration (source ~/.bashrc)
+# When NOT to source: most scripts — they modify your current shell state
 ```
-
-:::tip[Why ./script.sh and not script.sh?]
-The current directory `.` is NOT in `$PATH` by default (for security). You must explicitly reference the path. Without `./`, bash searches `$PATH` and won't find your script unless it's in a PATH directory.
-:::
 
 ## Script Structure
 
 ```bash
 #!/usr/bin/env bash
-# ────────────────────────────────────────────────
-# deploy.sh — Deploy application to target environment
-# Usage: ./deploy.sh [--env ENVIRONMENT] [--dry-run]
+# ============================================================
+# script-name.sh — Brief description
+# Usage: ./script-name.sh [options] <arguments>
 # Author: Your Name
-# ────────────────────────────────────────────────
-
+# ============================================================
 set -euo pipefail
 
-# ── Constants ──────────────────────────────────
+# Constants (uppercase by convention)
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_NAME="$(basename "$0")"
-readonly LOG_FILE="/var/log/deploy.log"
+readonly LOG_FILE="/tmp/${SCRIPT_NAME}.log"
 
-# ── Default configuration ──────────────────────
-ENV="production"
+# Global variables
+VERBOSE=false
 DRY_RUN=false
 
-# ── Logging ────────────────────────────────────
-log_info()  { echo "[INFO]  $(date '+%Y-%m-%d %H:%M:%S') $*" | tee -a "$LOG_FILE"; }
-log_error() { echo "[ERROR] $(date '+%Y-%m-%d %H:%M:%S') $*" | tee -a "$LOG_FILE" >&2; }
-
-# ── Cleanup ────────────────────────────────────
-cleanup() {
-  local exit_code=$?
-  if [[ $exit_code -ne 0 ]]; then
-    log_error "Script failed with exit code $exit_code"
-  fi
-  # Remove temp files, release locks, etc.
-  rm -f /tmp/deploy.lock
-}
-trap cleanup EXIT
-
-# ── Functions ──────────────────────────────────
+# Functions defined before main()
 usage() {
   cat <<EOF
-Usage: $SCRIPT_NAME [OPTIONS]
+Usage: ${SCRIPT_NAME} [OPTIONS] <input-file>
 
 Options:
-  --env ENV       Target environment (default: production)
-  --dry-run       Print actions without executing
-  -h, --help      Show this help
+  -v, --verbose    Enable verbose output
+  -n, --dry-run    Show what would be done without doing it
+  -h, --help       Show this help message
+
+Examples:
+  ${SCRIPT_NAME} data.csv
+  ${SCRIPT_NAME} -v --dry-run input.txt
 EOF
 }
 
-# ── Main ───────────────────────────────────────
 main() {
   parse_args "$@"
-  validate_environment
-  deploy_application
-  log_info "Deployment complete"
+  validate_inputs
+  do_the_work
 }
 
 # Entry point
@@ -106,299 +81,262 @@ main "$@"
 ## Comments
 
 ```bash
-# Single line comment
+# Single-line comment — everything after # is ignored
 
-# Multi-line: just use multiple # lines
-# This is a
-# multi-line comment
+echo "hello"  # inline comment
 
-: '
-This is also a multi-line comment using the null command (:)
-with a here-string. It executes : which does nothing.
-This approach can break set -e in some cases.
-'
+# Multi-line comment (using : command + heredoc trick)
+: <<'COMMENT'
+This is a multi-line comment.
+None of this is executed.
+Use this sparingly — prefer single # on each line.
+COMMENT
 
-# Inline comment
-ls -la  # list all files with details
+# Block of commented-out code
+# echo "disabled line 1"
+# echo "disabled line 2"
 ```
 
 ## echo and printf
 
 ```bash
-# echo — simple output
+# echo — simple, but behavior varies across systems
 echo "Hello, World!"
-echo -n "No newline"            # -n suppresses newline
-echo -e "Tab:\there\nNewline"   # -e enables escape sequences
-echo Hello World                # works without quotes (word split)
+echo -n "no newline"      # -n flag: no trailing newline (not POSIX)
+echo -e "tab:\there"      # -e flag: interpret escape sequences (not POSIX)
 
-# printf — portable and more powerful
+# printf — portable, consistent, preferred in scripts
 printf "Hello, %s!\n" "World"
-printf "%-20s %5d\n" "item" 42      # left-align string, right-align int
-printf "%05.2f\n" 3.14159           # 03.14
-printf "Hex: %x  Oct: %o\n" 255 255 # ff  377
+printf "%-20s %5d\n" "item" 42     # left-aligned, right-aligned with width
+printf "%05.2f\n" 3.1415           # 03.14 — zero-padded, 2 decimal places
+printf "Line 1\nLine 2\n"
+printf "%s\n" "$@"                  # print each argument on its own line
 
-# printf to variable (no subshell)
-printf -v my_var "Value is %d" 42
-echo "$my_var"   # Value is 42
-
-# Print to stderr
-echo "Error message" >&2
-printf "Error: %s\n" "something failed" >&2
+# Writing to stderr
+echo "Error: file not found" >&2
+printf "Error: %s\n" "file not found" >&2
 ```
-
-:::tip[printf over echo]
-Prefer `printf` in scripts for predictable behavior. `echo` behavior differs between systems for options like `-e` and `-n`. `printf` is POSIX-defined and consistent.
-:::
 
 ## Variables
 
 ```bash
-# Assignment — NO spaces around = (spaces are syntax errors)
+# Assignment: no spaces around =
 name="Alice"
 count=42
 pi=3.14159
-empty=""
 
-# Wrong: creates three separate commands
-# name = "Alice"  ← syntax error
+# Reading variables
+echo "$name"          # always quote variables to prevent word splitting
+echo "${name}"        # braces explicit: useful before letters/numbers
+echo "Hello, ${name}!"
 
-# Reading a variable
-echo "$name"          # Always quote variable expansions!
-echo "Hello, ${name}!"  # Braces for disambiguation
+# Avoid:
+echo $name            # dangerous: word splits on spaces, glob expands
+echo Hello, $name!    # ! at end starts history expansion in interactive shell
 
-# Unset variable
+# Variable naming conventions
+MY_CONSTANT="readonly value"
+local_variable="mutable"
+_internal_var="underscore prefix for private-ish"
+
+# Unset a variable
 unset name
-echo "${name}"        # empty string (with set -u: would error)
-```
 
-### readonly and export
-
-```bash
-# readonly: cannot be changed or unset
-readonly MAX_RETRIES=3
-readonly DB_NAME="myapp"
-# MAX_RETRIES=5  ← error: readonly variable
-
-# export: make available to child processes (environment variables)
-export PATH="$HOME/.local/bin:$PATH"
-export EDITOR=vim
-export -n EDITOR    # unexport (remove from environment, keep as shell var)
-
-# readonly + export combined
-readonly -x API_URL="https://api.example.com"
-
-# List all exported variables
-export
-env
-printenv
+# Check if set
+if [[ -v name ]]; then echo "set"; fi       # bash 4.2+
+if [[ -n "${name+x}" ]]; then echo "set"; fi  # portable
 ```
 
 ## Command Substitution
 
 ```bash
-# Modern syntax (preferred): $()
-current_date=$(date +%Y-%m-%d)
-file_count=$(ls -1 | wc -l)
-hostname=$(hostname -f)
+# Modern form: $() — preferred (nestable, readable)
+today=$(date +%Y-%m-%d)
+files=$(ls -1 *.txt 2>/dev/null)
+count=$(wc -l < /etc/passwd)
+user_home=$(eval echo "~$username")
+
+# Legacy form: backticks `` — avoid (hard to read, hard to nest)
+today=`date +%Y-%m-%d`   # works but prefer $()
 
 # Nested command substitution
-parent_dir=$(dirname "$(readlink -f "$0")")
+archive_name=$(date +%Y%m%d)_$(hostname)_backup.tar.gz
+lines=$(wc -l < "$(find . -name '*.log' | head -1)")
 
-# Legacy syntax: backticks (avoid)
-old_style=`date`   # hard to nest, hard to read
-
-# Capture both stdout and exit code
-output=$(some_command 2>/dev/null) || handle_error
+# Capturing exit code
+output=$(some-command); exit_code=$?
 ```
 
 ## Arithmetic
 
 ```bash
-# $(( )) — arithmetic expansion (integers only)
-sum=$(( 3 + 5 ))
-echo $(( 10 * 5 + 2 ))   # 52
-echo $(( 2 ** 8 ))        # 256 (exponentiation)
-echo $(( 17 / 3 ))        # 5 (integer division)
-echo $(( 17 % 3 ))        # 2 (modulo)
+# $(( )) — arithmetic expansion (integer only)
+result=$((2 + 3))        # 5
+result=$((10 / 3))       # 3 (integer division, truncates)
+result=$((10 % 3))       # 1 (modulus)
+result=$((2 ** 8))       # 256 (exponentiation)
+
+# Variable arithmetic
+x=10
+y=3
+echo $((x * y))          # 30
+echo $((x > y ? x : y))  # 10 (ternary operator)
 
 # Increment/decrement
-(( count++ ))
-(( count-- ))
-(( count += 5 ))
+((count++))
+((count--))
+((count += 5))
+((count *= 2))
 
-# Bitwise
-echo $(( 0xFF & 0x0F ))    # 15
-echo $(( 1 << 4 ))         # 16
+# let command (older style)
+let result=2+3
+let "result = 10 / 3"
 
-# let command (similar to (( )))
-let "a = 5 + 3"
-let "b = a * 2"
+# Floating-point arithmetic with bc
+pi=$(echo "scale=4; 4*a(1)" | bc -l)   # 3.1415
+result=$(echo "scale=2; 10 / 3" | bc)  # 3.33
+area=$(echo "scale=4; 3.14159 * 5^2" | bc)  # 78.5397
 
-# expr — POSIX, slower, awkward (use only for POSIX portability)
-sum=$(expr 3 + 5)
-
-# Floating point — requires bc or awk
-result=$(echo "scale=4; 22/7" | bc)         # 3.1428
-result=$(awk 'BEGIN { printf "%.4f\n", 22/7 }')  # 3.1429
+# Check if number
+if [[ "$var" =~ ^-?[0-9]+$ ]]; then echo "integer"; fi
+if [[ "$var" =~ ^-?[0-9]*\.?[0-9]+$ ]]; then echo "number"; fi
 ```
 
 ## Quoting
 
 ```bash
-# Single quotes: everything literal, no expansion
-echo '$PATH'            # outputs: $PATH
-echo 'Hello\nWorld'     # outputs: Hello\nWorld (no newline)
-echo '$(date)'          # outputs: $(date)
+# No quotes — word splitting + glob expansion happen
+files=*.txt
+echo $files          # expands glob
+echo "hello world"   # two args to echo without quotes
 
-# Double quotes: expand $variables, $(commands), \escapes; not * or ?
-name="Alice"
-echo "Hello, $name!"    # outputs: Hello, Alice!
-echo "Home: $HOME"      # expands variable
-echo "Date: $(date)"    # expands command substitution
-echo "Literal: \$name"  # escape the dollar sign
+# Single quotes — literal string, no expansion at all
+echo 'Hello $USER'   # prints: Hello $USER
+echo '*.txt'         # prints: *.txt
+echo 'it'\''s'       # workaround for single quote in single-quoted string
 
-# No quotes: subject to word splitting and glob expansion
-files=*.txt             # becomes array of matching files (or literal *.txt if none)
-echo $files             # word splits spaces in filenames
+# Double quotes — variable/command expansion, no word splitting or glob
+echo "Hello $USER"   # expands $USER
+echo "Today: $(date)"  # expands command substitution
+echo "*.txt"         # prints: *.txt (glob NOT expanded)
+echo "$files"        # expands variable, preserves spaces in value
 
-# ANSI-C quoting: $'' (interpret escape sequences)
-echo $'Tab:\there'      # actual tab character
-echo $'Newline:\nHere'  # actual newline
-echo $'\033[31mRed\033[0m'  # ANSI color codes
+# ANSI-C quoting $'...' — interprets escape sequences
+echo $'line1\nline2'     # actual newline
+echo $'tab\there'        # actual tab
+echo $'\x41\x42\x43'    # ABC (hex)
+newline=$'\n'            # store newline in variable
 
-# The quoting golden rule: ALWAYS double-quote variable expansions
-# "$var" not $var
-# "$@" not $@
-cp "$source" "$destination"   # ✅ handles spaces in paths
-cp $source $destination        # ❌ breaks on spaces
-```
-
-## Word Splitting and Globbing
-
-```bash
-# Word splitting: unquoted variables are split on IFS characters (default: space tab newline)
-files="file1.txt file2.txt file3.txt"
-for f in $files; do         # splits on spaces — 3 iterations
-  echo "$f"
-done
-for f in "$files"; do       # quoted — 1 iteration (entire string)
-  echo "$f"
-done
-
-# Globbing: unquoted * ? [...] are expanded by the shell
-for f in *.txt; do          # expands to matching files
-  echo "$f"
-done
-
-# Disable globbing (for pattern strings)
-set -f                      # disable glob expansion
-result=$(command --pattern "*.txt")   # * not expanded
-set +f                      # re-enable
-
-# Glob patterns
-echo *.txt                  # all .txt files
-echo file?.txt              # file1.txt, fileA.txt, etc.
-echo file[123].txt          # file1.txt, file2.txt, file3.txt
-echo **/*.sh                # all .sh files recursively (requires shopt -s globstar)
-shopt -s globstar
-for f in **/*.py; do echo "$f"; done
+# When to quote:
+# - ALWAYS quote variables: "$var" not $var
+# - ALWAYS quote command substitution: "$(cmd)" not $(cmd)
+# - EXCEPT inside [[ ]] and (( )) — no word splitting there
+# - EXCEPT when you WANT word splitting (passing array as multiple args)
 ```
 
 ## Special Variables
 
 ```bash
-$0                    # script name (or shell name if interactive)
-$1 $2 ... $9          # positional parameters (arguments)
-${10} ${11}           # 10th, 11th parameter (braces required for >9)
-$#                    # number of positional parameters
-$@                    # all positional parameters as separate words
-$*                    # all positional parameters as one word (IFS-joined)
-"$@"                  # all params, each properly quoted — ALWAYS use this
-"$*"                  # all params as single quoted string
-$?                    # exit code of last command
-$$                    # PID of current shell process
-$!                    # PID of last background process
-$-                    # current shell option flags (e.g., himBHs)
-$_                    # last argument of previous command
-$BASH_SOURCE          # array of source file names in call stack
-${BASH_SOURCE[0]}     # current script's path (more reliable than $0)
-$LINENO               # current line number
-$FUNCNAME             # array of function names in call stack
-$BASH_VERSION         # version string
-$BASH_PID             # PID of current bash process (4.0+)
-$PPID                 # PID of parent process
-$HOSTNAME             # system hostname
-$PWD                  # current directory (same as `pwd`)
-$OLDPWD               # previous directory (cd -)
-$HOME                 # home directory
-$USER / $LOGNAME      # current username
-$IFS                  # Internal Field Separator
-$PATH                 # command search path
-$PS1                  # primary prompt
-$RANDOM               # random integer 0-32767
-$SECONDS              # seconds since shell started
-$LINENO               # current line number in script
-```
+# Positional parameters
+$0          # script name (or bash if sourced)
+$1, $2...   # first, second argument
+${10}       # 10th argument (braces required for double digits)
+$#          # number of arguments
+$@          # all arguments as separate quoted strings (preferred)
+$*          # all arguments as a single word (IFS-joined)
 
-```bash
-# Practical usage
-script_dir="${BASH_SOURCE[0]%/*}"   # directory containing the script
-script_name="${BASH_SOURCE[0]##*/}" # filename only
+# Process variables
+$$          # PID of current shell
+$!          # PID of most recently backgrounded process
+$?          # exit status of last command
+$-          # current shell options (e.g., "himBHs" for interactive)
+$_          # last argument of previous command
 
-# Shift positional parameters
-echo "First: $1"
-shift            # remove $1, shift others down ($2 becomes $1, etc.)
-echo "Was second, now first: $1"
-shift 2          # shift by 2
+# Script location (important for finding files relative to script)
+${BASH_SOURCE[0]}   # path to current script (even when sourced)
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+# Arguments usage examples
+process_files() {
+  local count=$#
+  echo "Processing $count files"
+
+  for file in "$@"; do   # always use $@ for argument lists
+    echo "  → $file"
+  done
+}
+
+# Shift: consume positional parameters
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -v) VERBOSE=true ;;
+    *)  break ;;
+  esac
+  shift   # consume $1, shift $2 to $1, $3 to $2, etc.
+done
 ```
 
 ## PATH Management
 
 ```bash
-# Add directory to PATH (append)
-export PATH="$PATH:/usr/local/myapp/bin"
+# Add directory to PATH (prepend = higher priority)
+export PATH="$HOME/.local/bin:$PATH"
+export PATH="$HOME/bin:$PATH"
 
-# Add directory to PATH (prepend — takes priority)
-export PATH="/usr/local/myapp/bin:$PATH"
+# Add to end of PATH (lower priority)
+export PATH="$PATH:/opt/custom/bin"
 
-# Add only if not already in PATH (idempotent)
-add_to_path() {
-  local dir="$1"
-  case ":$PATH:" in
-    *":$dir:"*) ;;           # already present
-    *)  export PATH="${dir}:${PATH}" ;;
-  esac
-}
+# View current PATH (one directory per line)
+echo "$PATH" | tr ':' '\n'
 
-# Find executable location
-which bash          # shows first in PATH
-type bash           # shows type (builtin, function, alias, or file)
-type -a ls          # show all locations of ls
-command -v python3  # POSIX-compatible, returns path or empty
-
-# Check if command exists
-if command -v docker &>/dev/null; then
-  echo "Docker is installed"
-fi
+# Find where a command lives
+which bash          # /bin/bash (finds first in PATH)
+which -a python     # shows all matches
+type bash           # bash is /bin/bash (also handles builtins/functions)
+type ll             # ll is aliased to `ls -la` (shows if it's an alias)
+command -v git      # portable: returns path if found, empty if not
 ```
 
-## env Command
+## readonly and export
 
 ```bash
-# Print all environment variables
+# readonly: prevent variable from being modified or unset
+readonly API_KEY="secret-key-123"
+readonly MAX_RETRIES=3
+# API_KEY="other"   # would fail: readonly variable
+
+# export: make variable available to child processes
+export DATABASE_URL="postgres://localhost/mydb"
+export NODE_ENV="production"
+
+# Combined
+readonly export VERSION="1.0.0"
+declare -rx VERSION="1.0.0"   # same thing with declare
+
+# printenv: show exported variables
+printenv | grep "^MY_"
+
+# env: run a command with modified environment
+env DATABASE_URL="postgres://test/mydb" ./run-tests.sh
+env -i PATH="$PATH" HOME="$HOME" bash --noprofile --norc  # clean environment
+```
+
+## The env Command
+
+```bash
+# Display all environment variables
 env
-printenv
 
-# Print specific variable
-printenv HOME
-printenv PATH
+# Run command with specific environment
+env VAR1=val1 VAR2=val2 command
 
-# Run command with modified environment
-env DATABASE_URL="postgres://..." node server.js
+# Clear environment and run command
+env -i command
 
-# Run command with clean environment
-env -i PATH=/usr/bin:/bin bash   # only PATH set
+# Used in shebang to find interpreter in PATH
+#!/usr/bin/env python3     # finds python3 in PATH
+#!/usr/bin/env node        # finds node in PATH
 
-# Run command with variable set
-DATABASE_URL="postgres://..." node server.js  # same as env but shorter syntax
+# Useful for testing scripts with different environments
+env DATABASE_URL="postgres://test/db" bash ./my-script.sh
 ```

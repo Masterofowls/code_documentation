@@ -1,174 +1,135 @@
 ---
-title: Kubernetes Storage
-description: Persist data in Kubernetes with PersistentVolumes, PersistentVolumeClaims, StorageClasses, CSI drivers, StatefulSet volumes, and snapshots.
+title: Storage in Kubernetes
+description: PersistentVolumes, PersistentVolumeClaims, StorageClasses, CSI drivers, StatefulSet storage, volume snapshots, and popular storage solutions.
 sidebar:
   order: 6
 tags: [devops, kubernetes]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-# Kubernetes Storage
+# Storage in Kubernetes
 
-Kubernetes provides a rich storage subsystem that abstracts underlying storage infrastructure behind a uniform API. Understanding the PV/PVC model is essential for running stateful workloads.
+Kubernetes decouples storage provisioning from consumption. Administrators create PersistentVolumes (PVs) or configure dynamic provisioning via StorageClasses. Developers request storage with PersistentVolumeClaims (PVCs).
 
-## The PV/PVC Model
+## Volume Types Overview
 
-```
-StorageClass ──► PersistentVolume (PV)
-                       ▲
-                       │ bound
-                 PersistentVolumeClaim (PVC)
-                       ▲
-                       │ uses
-                     Pod
-```
+| Volume Type | Lifetime | Shared | Use Case |
+|---|---|---|---|
+| `emptyDir` | Pod lifetime | Between containers in same pod | Scratch space, caches, sidecar sharing |
+| `hostPath` | Node lifetime | Pods on same node | DaemonSets, node-level data |
+| `configMap` | K8s object | All pods mounting it | Configuration files |
+| `secret` | K8s object | All pods mounting it | Credentials, certificates |
+| `persistentVolumeClaim` | PV lifetime | Access mode dependent | Databases, stateful apps |
+| `nfs` | NFS server | All pods | Shared read/write storage |
+| `csi` | Driver-defined | Driver-defined | Cloud disks, SAN, distributed storage |
 
-- **PersistentVolume (PV)** — a piece of storage provisioned by an admin or dynamically. Lives independently of pods.
-- **PersistentVolumeClaim (PVC)** — a request for storage by a user. Specifies size and access mode.
-- **StorageClass** — defines how dynamic PVs are provisioned (which provisioner, performance tier, reclaim policy).
+## emptyDir
 
-## StorageClass
-
-StorageClasses enable **dynamic provisioning** — PVs are created automatically when a PVC is submitted.
+An `emptyDir` volume is created when a Pod starts and deleted when it stops. Containers in the same Pod can share it.
 
 ```yaml
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: fast-ssd
-  annotations:
-    storageclass.kubernetes.io/is-default-class: 'true' # make default
+spec:
+  containers:
+    - name: app
+      volumeMounts:
+        - name: cache
+          mountPath: /app/cache
+        - name: shared-logs
+          mountPath: /var/log/app
 
-# AWS EBS (gp3)
-provisioner: ebs.csi.aws.com
-parameters:
-  type: gp3
-  iops: '3000'
-  throughput: '125'
-  encrypted: 'true'
-  kmsKeyId: arn:aws:kms:us-east-1:123456:key/...
+    - name: log-shipper
+      volumeMounts:
+        - name: shared-logs
+          mountPath: /var/log/app
+          readOnly: true
 
-reclaimPolicy: Delete # Delete | Retain
-volumeBindingMode: WaitForFirstConsumer # Immediate | WaitForFirstConsumer
-allowVolumeExpansion: true
-mountOptions:
-  - debug
+  volumes:
+    - name: cache
+      emptyDir:
+        sizeLimit: 1Gi          # optional size limit
+        medium: ""              # "" = disk, "Memory" = RAM (tmpfs)
+
+    - name: shared-logs
+      emptyDir: {}
+
+    # In-memory emptyDir (tmpfs)
+    - name: secure-tmp
+      emptyDir:
+        medium: Memory
+        sizeLimit: 128Mi
 ```
+
+## hostPath
+
+Mounts a file or directory from the host node. Use sparingly — it tightly couples the Pod to a specific node.
 
 ```yaml
-# GKE — standard persistent disk
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: standard
-provisioner: pd.csi.storage.gke.io
-parameters:
-  type: pd-ssd
-reclaimPolicy: Delete
-volumeBindingMode: WaitForFirstConsumer
-allowVolumeExpansion: true
+volumes:
+  - name: host-data
+    hostPath:
+      path: /var/lib/myapp/data
+      type: DirectoryOrCreate   # Directory | DirectoryOrCreate | File | FileOrCreate | Socket | CharDevice | BlockDevice
 ```
 
-```yaml
-# Azure Managed Disk
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: azure-ssd
-provisioner: disk.csi.azure.com
-parameters:
-  skuName: Premium_LRS
-  kind: Managed
-reclaimPolicy: Delete
-volumeBindingMode: WaitForFirstConsumer
-allowVolumeExpansion: true
-```
-
-### ReclaimPolicy
-
-| Policy    | Behaviour                                                                   |
-| --------- | --------------------------------------------------------------------------- |
-| `Delete`  | PV and underlying storage deleted when PVC is deleted (default for dynamic) |
-| `Retain`  | PV kept after PVC deletion; manual cleanup required; data preserved         |
-| `Recycle` | Deprecated — basic scrub and reuse                                          |
-
-### VolumeBindingMode
-
-| Mode                   | Behaviour                                                          |
-| ---------------------- | ------------------------------------------------------------------ |
-| `Immediate`            | PV provisioned immediately when PVC created (before pod scheduled) |
-| `WaitForFirstConsumer` | PV provisioned after pod scheduled (ensures same AZ as pod)        |
-
-:::tip[Use WaitForFirstConsumer]
-Always use `volumeBindingMode: WaitForFirstConsumer` for cloud volumes. `Immediate` may provision the volume in a different availability zone than where the pod is scheduled, causing mount failures.
+:::caution[hostPath security risk]
+`hostPath` volumes bypass container isolation and give the Pod direct access to the host filesystem. Prefer PersistentVolumes for stateful data. DaemonSets (e.g., log collectors) are the primary legitimate use case.
 :::
 
 ## PersistentVolume (PV)
 
-Usually created by dynamic provisioning, but can be pre-provisioned by an admin:
+A PersistentVolume is a piece of storage provisioned by an administrator or dynamically by a StorageClass. PVs exist independently of any Pod.
 
 ```yaml
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: manual-pv-001
-  labels:
-    type: local
+  name: manual-pv
 spec:
-  storageClassName: manual
   capacity:
-    storage: 100Gi
+    storage: 20Gi
+  volumeMode: Filesystem    # Filesystem | Block
   accessModes:
     - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-
-  # NFS example
+  persistentVolumeReclaimPolicy: Retain   # Retain | Delete | Recycle
+  storageClassName: manual
   nfs:
-    path: /exports/data
-    server: 192.168.1.100
-
-  # Local volume (node-specific)
-  local:
-    path: /mnt/data
-  nodeAffinity:
-    required:
-      nodeSelectorTerms:
-        - matchExpressions:
-            - key: kubernetes.io/hostname
-              operator: In
-              values: [node-01]
+    server: nfs.example.com
+    path: /exports/myapp
 ```
 
 ## PersistentVolumeClaim (PVC)
+
+A PVC is a request for storage by a user. Kubernetes binds it to a matching PV.
 
 ```yaml
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: postgres-data
-  namespace: production
-  labels:
-    app: postgres
+  namespace: myapp
 spec:
-  storageClassName: fast-ssd # omit to use default StorageClass
   accessModes:
     - ReadWriteOnce
+  storageClassName: fast    # "" = use default, "manual" = static PV
+  volumeMode: Filesystem
   resources:
     requests:
-      storage: 50Gi
-  # Optionally select a specific PV by label
-  selector:
-    matchLabels:
-      type: ssd
+      storage: 20Gi
 ```
+
+### Access Modes
+
+| Mode | Abbrev | Description |
+|---|---|---|
+| `ReadWriteOnce` | RWO | Single node read-write |
+| `ReadOnlyMany` | ROX | Many nodes read-only |
+| `ReadWriteMany` | RWX | Many nodes read-write |
+| `ReadWriteOncePod` | RWOP | Single pod read-write (K8s 1.22+) |
+
+:::tip[EBS only supports RWO]
+AWS EBS volumes only support `ReadWriteOnce`. For shared read-write storage on AWS, use EFS (NFS) or a distributed storage layer like Longhorn.
+:::
 
 ### Using PVC in a Pod
 
@@ -176,11 +137,10 @@ spec:
 spec:
   containers:
     - name: postgres
-      image: postgres:16
+      image: postgres:16-alpine
       volumeMounts:
         - name: data
           mountPath: /var/lib/postgresql/data
-
   volumes:
     - name: data
       persistentVolumeClaim:
@@ -188,279 +148,228 @@ spec:
         readOnly: false
 ```
 
-### Check PVC Status
+## StorageClass
 
-```bash
-# PVC lifecycle: Pending → Bound
-kubectl get pvc -n production
-kubectl describe pvc postgres-data -n production
+StorageClasses enable dynamic PV provisioning. When a PVC references a StorageClass, a PV is automatically created.
 
-# Check which PV is bound to the PVC
-kubectl get pvc postgres-data -o jsonpath='{.spec.volumeName}'
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: fast
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"   # set as default
+provisioner: ebs.csi.aws.com      # CSI driver
+reclaimPolicy: Delete             # Delete | Retain
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer   # Immediate | WaitForFirstConsumer
+parameters:
+  type: gp3
+  iops: "3000"
+  throughput: "125"
+  encrypted: "true"
 ```
 
-## Access Modes
+### volumeBindingMode
 
-| Mode               | Short | Multiple Nodes                   |
-| ------------------ | ----- | -------------------------------- |
-| `ReadWriteOnce`    | RWO   | One node reads/writes            |
-| `ReadOnlyMany`     | ROX   | Many nodes read                  |
-| `ReadWriteMany`    | RWX   | Many nodes read/write            |
-| `ReadWriteOncePod` | RWOP  | One pod reads/writes (K8s 1.22+) |
+| Mode | Behaviour |
+|---|---|
+| `Immediate` | PV provisioned as soon as PVC is created |
+| `WaitForFirstConsumer` | PV provisioned only when a Pod is scheduled — ensures same AZ |
 
-:::caution[RWX Storage]
-Most block storage (EBS, Azure Disk, GCE PD) only supports `ReadWriteOnce`. For `ReadWriteMany` (shared storage), you need NFS, CephFS, Azure Files, or a cloud-native shared filesystem.
+:::tip[Use WaitForFirstConsumer]
+`WaitForFirstConsumer` is almost always preferable for cloud environments. `Immediate` may provision the disk in a different availability zone than the pod, causing scheduling failures.
 :::
+
+```bash
+# List storage classes
+kubectl get storageclasses
+kubectl get sc
+
+# Get default storage class
+kubectl get sc -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}'
+
+# Check PVC status (Pending = not yet bound)
+kubectl get pvc -n myapp
+kubectl describe pvc postgres-data -n myapp
+```
+
+## Dynamic Provisioning Flow
+
+```
+Developer creates PVC
+        │
+        ▼
+Kubernetes finds matching StorageClass
+        │
+        ▼
+StorageClass provisioner called (e.g., EBS CSI driver)
+        │
+        ▼
+Cloud disk created and PV created
+        │
+        ▼
+PVC bound to PV (STATUS: Bound)
+        │
+        ▼
+Pod scheduled; disk attached to node and mounted
+```
 
 ## StatefulSet volumeClaimTemplates
 
-Each pod in a StatefulSet gets its own PVC via `volumeClaimTemplates`:
+Each StatefulSet replica gets its own PVC automatically from the template.
 
 ```yaml
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: postgres-cluster
+  name: mongo
 spec:
-  serviceName: postgres-headless
+  serviceName: mongo
   replicas: 3
   selector:
     matchLabels:
-      app: postgres
+      app: mongo
   template:
     metadata:
       labels:
-        app: postgres
+        app: mongo
     spec:
       containers:
-        - name: postgres
-          image: postgres:16
+        - name: mongo
+          image: mongo:7
           volumeMounts:
-            - name: data # references the volumeClaimTemplate name
-              mountPath: /var/lib/postgresql/data
+            - name: data
+              mountPath: /data/db
+            - name: config
+              mountPath: /data/configdb
 
+  # Kubernetes creates one PVC per replica
+  # PVCs: data-mongo-0, data-mongo-1, data-mongo-2
   volumeClaimTemplates:
     - metadata:
         name: data
       spec:
-        accessModes: [ReadWriteOnce]
-        storageClassName: fast-ssd
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: fast
         resources:
           requests:
-            storage: 20Gi
+            storage: 50Gi
+    - metadata:
+        name: config
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: standard
+        resources:
+          requests:
+            storage: 1Gi
 ```
-
-This creates PVCs: `data-postgres-cluster-0`, `data-postgres-cluster-1`, `data-postgres-cluster-2`
 
 ## CSI Drivers
 
-Container Storage Interface (CSI) is the standard for plugging storage into Kubernetes. Popular drivers:
+Container Storage Interface (CSI) is the standard plugin interface for storage systems.
 
-| Driver                       | Storage                     |
-| ---------------------------- | --------------------------- |
-| `ebs.csi.aws.com`            | AWS EBS                     |
-| `efs.csi.aws.com`            | AWS EFS (NFS, RWX)          |
-| `pd.csi.storage.gke.io`      | GCP Persistent Disk         |
-| `disk.csi.azure.com`         | Azure Managed Disk          |
-| `file.csi.azure.com`         | Azure Files (RWX)           |
-| `nfs.csi.k8s.io`             | NFS                         |
-| `driver.longhorn.io`         | Longhorn (Rancher, on-prem) |
-| `rook-ceph.rbd.csi.ceph.com` | Rook/Ceph (on-prem)         |
+| Driver | Provider | Volumes |
+|---|---|---|
+| `ebs.csi.aws.com` | AWS | EBS gp2/gp3/io1/st1 |
+| `efs.csi.aws.com` | AWS | EFS (NFS, RWX) |
+| `pd.csi.storage.gke.io` | GCP | Persistent Disk |
+| `disk.csi.azure.com` | Azure | Azure Disk |
+| `file.csi.azure.com` | Azure | Azure Files (NFS, RWX) |
+| `driver.longhorn.io` | Self-hosted | Distributed block |
+| `rook-ceph.rbd.csi.ceph.com` | Self-hosted | Ceph RBD block |
+| `rook-ceph.cephfs.csi.ceph.com` | Self-hosted | CephFS (RWX) |
+| `nfs.csi.k8s.io` | NFS server | NFS (RWX) |
 
-## Volume Types for Pods
+### Installing AWS EBS CSI Driver
 
-### emptyDir
-
-Ephemeral storage that lives as long as the pod. Shared between all containers in the pod.
-
-```yaml
-volumes:
-  - name: cache
-    emptyDir: {}
-
-  # Size-limited emptyDir (uses node storage)
-  - name: tmp
-    emptyDir:
-      sizeLimit: 1Gi
-
-  # Memory-backed (tmpfs) — fast but uses node RAM
-  - name: ramdisk
-    emptyDir:
-      medium: Memory
-      sizeLimit: 256Mi
-```
-
-Use cases:
-
-- Shared scratch space between containers in the same pod
-- Caching downloaded data
-- Checkpoint data during long computations
-
-### hostPath
-
-Mounts a directory from the host node's filesystem.
-
-```yaml
-volumes:
-  - name: docker-socket
-    hostPath:
-      path: /var/run/docker.sock
-      type: Socket
-
-  - name: host-proc
-    hostPath:
-      path: /proc
-      type: Directory
-```
-
-:::caution[hostPath Security Risk]
-`hostPath` mounts give containers direct access to the host filesystem — a major security risk. Avoid unless absolutely necessary (e.g., DaemonSet log collectors, privileged system agents). Kubernetes Pod Security Standards restrict `hostPath` in restricted mode.
-:::
-
-### ConfigMap and Secret as Volumes
-
-```yaml
-volumes:
-  - name: config
-    configMap:
-      name: app-config
-      defaultMode: 0644
-
-  - name: certs
-    secret:
-      secretName: tls-certs
-      defaultMode: 0400 # read-only by owner (important for TLS keys)
+```bash
+# Via Helm
+helm repo add aws-ebs-csi-driver https://kubernetes-sigs.github.io/aws-ebs-csi-driver
+helm upgrade --install aws-ebs-csi-driver aws-ebs-csi-driver/aws-ebs-csi-driver \
+  --namespace kube-system \
+  --set controller.serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=arn:aws:iam::ACCOUNT:role/EBSCSIRole
 ```
 
 ## Volume Snapshots
 
-Volume Snapshots provide point-in-time copies of PVCs.
+Volume snapshots allow point-in-time copies of PVCs.
 
 ```yaml
-# VolumeSnapshotClass — defines the snapshot driver
+# VolumeSnapshotClass
 apiVersion: snapshot.storage.k8s.io/v1
 kind: VolumeSnapshotClass
 metadata:
-  name: ebs-vsc
+  name: ebs-snapshots
 driver: ebs.csi.aws.com
-deletionPolicy: Delete # Delete | Retain
-```
+deletionPolicy: Delete
 
-```yaml
-# Create a snapshot from a PVC
+---
+# Create a snapshot of a PVC
 apiVersion: snapshot.storage.k8s.io/v1
 kind: VolumeSnapshot
 metadata:
-  name: postgres-snapshot-2024-01-15
+  name: postgres-snapshot-20240115
+  namespace: myapp
 spec:
-  volumeSnapshotClassName: ebs-vsc
+  volumeSnapshotClassName: ebs-snapshots
   source:
     persistentVolumeClaimName: postgres-data
-```
 
-```yaml
-# Restore from snapshot — create new PVC from snapshot
+---
+# Restore from snapshot into a new PVC
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: postgres-data-restored
+  name: postgres-restored
 spec:
-  storageClassName: fast-ssd
-  accessModes: [ReadWriteOnce]
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: fast
   resources:
     requests:
-      storage: 50Gi
+      storage: 20Gi
   dataSource:
-    name: postgres-snapshot-2024-01-15
+    name: postgres-snapshot-20240115
     kind: VolumeSnapshot
     apiGroup: snapshot.storage.k8s.io
 ```
 
 ```bash
-# Check snapshot status
-kubectl get volumesnapshot
-kubectl describe volumesnapshot postgres-snapshot-2024-01-15
-
-# Should show ReadyToUse: true when complete
+# List snapshots
+kubectl get volumesnapshots -n myapp
+kubectl describe volumesnapshot postgres-snapshot-20240115 -n myapp
 ```
 
 ## Expanding Volumes
 
-If `allowVolumeExpansion: true` in the StorageClass:
-
 ```bash
-# Edit the PVC to increase size
-kubectl edit pvc postgres-data
-# Change .spec.resources.requests.storage from 50Gi to 100Gi
-
-# Or patch directly
-kubectl patch pvc postgres-data -p '{"spec":{"resources":{"requests":{"storage":"100Gi"}}}}'
+# Edit PVC to request more storage (requires allowVolumeExpansion: true)
+kubectl edit pvc postgres-data -n myapp
+# Change: resources.requests.storage from 20Gi to 40Gi
 
 # Check expansion status
-kubectl get pvc postgres-data
-# CAPACITY column will show new size once complete (pod may need restart for filesystem expand)
+kubectl get pvc postgres-data -n myapp
+kubectl describe pvc postgres-data -n myapp | grep -A 5 "Conditions"
 ```
 
-## Longhorn (On-Premises Distributed Storage)
-
-Longhorn is a cloud-native distributed block storage system for Kubernetes, ideal for on-premises clusters.
-
-```bash
-# Install Longhorn
-kubectl apply -f https://raw.githubusercontent.com/longhorn/longhorn/v1.6.0/deploy/longhorn.yaml
-
-# Access dashboard
-kubectl port-forward -n longhorn-system svc/longhorn-frontend 8080:80
-```
+## ConfigMap and Secret as Volumes
 
 ```yaml
-# Longhorn StorageClass
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: longhorn
-provisioner: driver.longhorn.io
-parameters:
-  numberOfReplicas: '3' # data replicated across 3 nodes
-  staleReplicaTimeout: '2880'
-  fromBackup: ''
-reclaimPolicy: Delete
-volumeBindingMode: Immediate
-allowVolumeExpansion: true
-```
+volumes:
+  # ConfigMap as directory of files
+  - name: app-config
+    configMap:
+      name: app-config
+      defaultMode: 0444
 
-## Storage Capacity Tracking
-
-Kubernetes 1.24+ tracks available storage per node, helping the scheduler make better pod placement decisions:
-
-```bash
-# Check storage capacity per node
-kubectl get csistoragecapacities -A
-
-# Get storage class capacity info
-kubectl get csistoragecapacities -n kube-system \
-  -o custom-columns="CLASS:.storageClassName,CAPACITY:.capacity,NODE:.nodeTopology.matchLabels"
-```
-
-## Useful Storage Commands
-
-```bash
-# List all PVs in the cluster
-kubectl get pv
-kubectl get pv --sort-by=.spec.capacity.storage
-
-# List all PVCs in all namespaces
-kubectl get pvc -A
-
-# See which pods are using a PVC
-kubectl get pods -A -o json | jq '.items[] | select(.spec.volumes[]?.persistentVolumeClaim.claimName == "my-pvc") | .metadata.name'
-
-# Manually release a retained PV (to reuse it)
-kubectl patch pv my-pv -p '{"spec":{"claimRef":null}}'
-
-# Delete a stuck PVC (remove finalizer)
-kubectl patch pvc my-pvc -p '{"metadata":{"finalizers":null}}'
-
-# Force delete a stuck PV
-kubectl delete pv my-pv --grace-period=0 --force
+  # Secret as directory of files
+  - name: tls-certs
+    secret:
+      secretName: api-tls
+      defaultMode: 0400
+      items:
+        - key: tls.crt
+          path: server.crt
+        - key: tls.key
+          path: server.key
 ```

@@ -1,217 +1,193 @@
 ---
 title: Concurrency in C++
-description: std::thread, mutex types, lock guards, condition variables, atomics, std::async/future, thread pools, C++20 coroutines, jthread, semaphores, latches, barriers, and race conditions.
+description: std::thread, mutexes, condition variables, atomics, futures, coroutines (C++20), jthread, semaphores, race conditions, and thread pool patterns in C++.
 sidebar:
   order: 7
 tags: [systems, cpp, c]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
 # Concurrency in C++
+
+C++11 introduced a portable threading model directly in the standard library. C++20 extended it with coroutines, `jthread`, semaphores, latches, and barriers.
 
 ## std::thread
 
 ```cpp
 #include <thread>
 #include <iostream>
+#include <vector>
+#include <numeric>
 
-// Create a thread with a callable
-std::thread t1([]() {
-    std::cout << "Thread running\n";
-});
-
-// Thread with function and arguments
-void worker(int id, const std::string& task) {
-    std::cout << "Worker " << id << " doing: " << task << "\n";
-}
-std::thread t2(worker, 1, "computation");
-
-// Thread with member function
-class Processor {
-public:
-    void run(int iterations) { /* ... */ }
-};
-Processor proc;
-std::thread t3(&Processor::run, &proc, 100);  // &proc = this pointer
-
-// Thread management
-t1.join();     // wait for thread to finish (blocking)
-// OR
-t1.detach();   // let thread run independently (daemon thread)
-// join or detach MUST be called before thread object is destroyed!
-
-// std::thread::hardware_concurrency() — number of logical CPU cores
-unsigned cores = std::thread::hardware_concurrency();
-std::cout << "Logical cores: " << cores << "\n";  // e.g., 16
-
-// Thread-local storage
-thread_local int thread_id = 0;  // each thread has its own copy
-void set_id(int id) { thread_id = id; }
-```
-
-## Mutex Types
-
-```cpp
-#include <mutex>
-#include <shared_mutex>
-
-std::mutex              m1;  // standard mutex — non-recursive
-std::recursive_mutex    m2;  // can be locked multiple times by same thread
-std::timed_mutex        m3;  // supports try_lock_for / try_lock_until
-std::shared_mutex       m4;  // C++17: reader-writer lock (multiple readers OR one writer)
-
-// Manual lock/unlock (error-prone — prefer lock guards!)
-m1.lock();
-// ... critical section ...
-m1.unlock();  // must call even on exceptions!
-
-// try_lock — non-blocking: returns false if already locked
-if (m1.try_lock()) {
-    // ... got the lock ...
-    m1.unlock();
-} else {
-    // ... couldn't acquire lock ...
+void worker(int id, int start, int end, std::vector<int>& results) {
+    int sum = 0;
+    for (int i = start; i < end; i++) sum += i;
+    results[id] = sum;
 }
 
-// Timed locking
-if (m3.try_lock_for(std::chrono::milliseconds{100})) {
-    // acquired within 100ms
-    m3.unlock();
+int main() {
+    // Spawn a thread
+    std::thread t([]() {
+        std::cout << "Hello from thread " << std::this_thread::get_id() << '\n';
+    });
+
+    // Must either join (wait) or detach (let run independently)
+    t.join();   // blocks until thread finishes
+
+    // Hardware parallelism hint
+    unsigned n = std::thread::hardware_concurrency();  // logical CPU count
+
+    // Parallel sum example
+    std::vector<int> results(4);
+    std::vector<std::thread> threads;
+    int chunk = 1000 / 4;
+    for (int i = 0; i < 4; i++) {
+        threads.emplace_back(worker, i, i * chunk, (i + 1) * chunk, std::ref(results));
+    }
+    for (auto& th : threads) th.join();
+
+    int total = std::accumulate(results.begin(), results.end(), 0);
+    std::cout << "Sum: " << total << '\n';
+
+    // thread_local — each thread gets its own copy
+    thread_local int thread_id_counter = 0;
+    (void)thread_id_counter;
+
+    return 0;
 }
 ```
 
-## Lock Guards
+## Mutex and Lock Guards
 
 ```cpp
 #include <mutex>
+#include <shared_mutex>  // C++17
 
-std::mutex mtx;
-std::shared_mutex shared_mtx;
+std::mutex             g_mtx;
+std::recursive_mutex   g_rec_mtx;  // same thread can lock multiple times
+std::shared_mutex      g_rw_mtx;   // C++17: multiple readers OR one writer
 
-// lock_guard — simplest RAII lock, no manual unlock needed, not movable
+// std::lock_guard — simplest; non-movable
 {
-    std::lock_guard<std::mutex> lock{mtx};
-    // ... critical section ...
-}  // lock released automatically (even on exception)
+    std::lock_guard<std::mutex> lock(g_mtx);
+    // critical section
+}  // unlocked automatically
 
-// unique_lock — flexible: movable, can be unlocked/relocked manually
+// std::unique_lock — more flexible: deferred, timed, movable
 {
-    std::unique_lock<std::mutex> lock{mtx};
-    lock.unlock();                  // early unlock
-    // ... non-critical section ...
-    lock.lock();                    // reacquire
-    // ... critical section ...
+    std::unique_lock<std::mutex> lock(g_mtx);
+    lock.unlock();  // can unlock early
+    // ... non-critical work ...
+    lock.lock();    // re-lock
 }
 
-std::unique_lock<std::mutex> deferred{mtx, std::defer_lock};  // don't lock yet
-deferred.lock();  // lock when ready
-
-// scoped_lock (C++17) — lock multiple mutexes simultaneously (deadlock-free)
-std::mutex mtx_a, mtx_b;
+// std::scoped_lock (C++17) — lock multiple mutexes atomically (deadlock-free)
+std::mutex m1, m2;
 {
-    std::scoped_lock lock{mtx_a, mtx_b};  // acquires both in deadlock-safe order
-    // ... access both resources ...
+    std::scoped_lock lock(m1, m2);  // locks both in deadlock-free order
+    // critical section
 }
 
-// shared_lock — for shared_mutex, allows multiple concurrent readers
+// std::shared_lock — reader lock (C++17)
 {
-    std::shared_lock reader{shared_mtx};  // multiple readers can hold this simultaneously
-    // ... read-only access ...
+    std::shared_lock<std::shared_mutex> read_lock(g_rw_mtx);
+    // Multiple threads can hold shared_lock simultaneously
 }
 {
-    std::unique_lock writer{shared_mtx};  // exclusive write access
-    // ... write access ...
+    std::unique_lock<std::shared_mutex> write_lock(g_rw_mtx);
+    // Only one thread can hold unique_lock
 }
 ```
 
 ## Deadlock Prevention
 
 ```cpp
-// Deadlock: thread A holds mutex1, waits for mutex2
-//           thread B holds mutex2, waits for mutex1 → deadlock!
+#include <mutex>
+#include <thread>
 
-// Rule 1: Always acquire multiple mutexes in the same order
-// Rule 2: Use scoped_lock for multiple mutexes
-// Rule 3: Minimize time holding locks
+struct Account {
+    std::mutex mtx;
+    double balance;
+    int    id;
+};
 
-// std::lock + std::adopt_lock (pre-C++17 alternative)
-std::mutex m1, m2;
-std::lock(m1, m2);  // acquire both atomically (deadlock-free algorithm)
-std::lock_guard<std::mutex> lg1{m1, std::adopt_lock};  // take ownership
-std::lock_guard<std::mutex> lg2{m2, std::adopt_lock};  // take ownership
-// Both released at end of scope
+// WRONG — transfer(A, B) and transfer(B, A) can deadlock
+void transfer_bad(Account& from, Account& to, double amount) {
+    std::lock_guard lk1(from.mtx);  // thread 1 locks A, thread 2 locks B
+    std::lock_guard lk2(to.mtx);    // thread 1 waits for B, thread 2 waits for A → deadlock
+    from.balance -= amount;
+    to.balance   += amount;
+}
 
-// C++17 scoped_lock is simpler:
-std::scoped_lock lock{m1, m2};
+// CORRECT — std::lock acquires both atomically
+void transfer_good(Account& from, Account& to, double amount) {
+    // Lock both simultaneously — no deadlock
+    std::scoped_lock lk(from.mtx, to.mtx);  // C++17
+    from.balance -= amount;
+    to.balance   += amount;
+}
+
+// Consistent ordering — another deadlock prevention approach
+void transfer_ordered(Account& from, Account& to, double amount) {
+    Account* first  = (from.id < to.id) ? &from : &to;
+    Account* second = (from.id < to.id) ? &to   : &from;
+    std::scoped_lock lk(first->mtx, second->mtx);
+    from.balance -= amount;
+    to.balance   += amount;
+}
 ```
 
 ## Condition Variables
 
 ```cpp
-#include <condition_variable>
 #include <mutex>
+#include <condition_variable>
 #include <queue>
-#include <thread>
 
-// Classic producer-consumer with condition variable
-template <typename T>
-class ThreadSafeQueue {
+// Thread-safe queue using condition variable
+template<typename T>
+class BoundedQueue {
 public:
-    void push(T value) {
-        {
-            std::unique_lock<std::mutex> lock{mutex_};
-            queue_.push(std::move(value));
-        }
-        cond_.notify_one();  // wake one waiting consumer
+    explicit BoundedQueue(size_t cap) : capacity_(cap) {}
+
+    void push(T val) {
+        std::unique_lock lock(mtx_);
+        not_full_.wait(lock, [this] { return queue_.size() < capacity_; });
+        queue_.push(std::move(val));
+        lock.unlock();
+        not_empty_.notify_one();
     }
 
     T pop() {
-        std::unique_lock<std::mutex> lock{mutex_};
-        // wait() atomically:
-        //   1. Releases the lock
-        //   2. Blocks the thread until notified
-        //   3. Re-acquires the lock when unblocked
-        // The lambda is a PREDICATE — prevents spurious wakeups
-        cond_.wait(lock, [this]{ return !queue_.empty(); });
-        T value = std::move(queue_.front());
+        std::unique_lock lock(mtx_);
+        // Loop guards against spurious wakeups
+        not_empty_.wait(lock, [this] { return !queue_.empty(); });
+        T val = std::move(queue_.front());
         queue_.pop();
-        return value;
+        lock.unlock();
+        not_full_.notify_one();
+        return val;
     }
 
-    bool try_pop(T& out) {
-        std::unique_lock<std::mutex> lock{mutex_};
-        if (queue_.empty()) return false;
-        out = std::move(queue_.front());
+    // Timed wait
+    std::optional<T> try_pop(std::chrono::milliseconds timeout) {
+        std::unique_lock lock(mtx_);
+        if (!not_empty_.wait_for(lock, timeout, [this] { return !queue_.empty(); })) {
+            return std::nullopt;
+        }
+        T val = std::move(queue_.front());
         queue_.pop();
-        return true;
+        return val;
     }
 
 private:
-    std::mutex              mutex_;
-    std::condition_variable cond_;
     std::queue<T>           queue_;
+    size_t                  capacity_;
+    std::mutex              mtx_;
+    std::condition_variable not_empty_;
+    std::condition_variable not_full_;
 };
-
-// Wait with timeout
-std::unique_lock<std::mutex> lock{mutex_};
-if (cond_.wait_for(lock, std::chrono::seconds{5}, [&]{ return ready; })) {
-    // condition satisfied within 5 seconds
-} else {
-    // timed out
-}
-
-// notify_one vs notify_all
-// notify_one: wake exactly one waiter (efficient, but may starve others)
-// notify_all: wake all waiters (all re-check predicate, only one proceeds)
-// Use notify_all when: multiple consumers need to re-check (e.g., shutdown signal)
 ```
 
 ## std::async and std::future
@@ -220,161 +196,189 @@ if (cond_.wait_for(lock, std::chrono::seconds{5}, [&]{ return ready; })) {
 #include <future>
 #include <chrono>
 
-// std::async — run a function asynchronously, returns std::future
-auto future = std::async(std::launch::async, []() -> int {
-    // runs on a new thread
-    std::this_thread::sleep_for(std::chrono::milliseconds{100});
-    return 42;
-});
+int compute(int x) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    return x * x;
+}
 
-// ... do other work ...
+int main() {
+    // std::async — run function asynchronously
+    auto fut = std::async(std::launch::async, compute, 10);
 
-int result = future.get();  // blocks until result is available
-// get() can only be called ONCE — subsequent calls throw std::future_error
+    // Do other work while compute() runs in background
+    std::cout << "Computing...\n";
 
-// launch policies:
-// std::launch::async    — always create a new thread (eager)
-// std::launch::deferred — call function lazily (in future.get() on caller's thread)
-// std::launch::async | std::launch::deferred — implementation's choice (default)
+    // get() blocks until result available
+    int result = fut.get();  // 100
+    std::cout << "Result: " << result << '\n';
 
-// std::promise — manually set a future's value from any thread
-std::promise<int> promise;
-std::future<int>  future2 = promise.get_future();
+    // launch::deferred — run lazily (only when .get() called)
+    auto lazy = std::async(std::launch::deferred, compute, 5);
+    // compute(5) hasn't run yet
+    int lazy_result = lazy.get();  // runs now
 
-std::thread t([&promise]() {
-    // ... compute ...
-    promise.set_value(100);              // provide the result
-    // or: promise.set_exception(std::make_exception_ptr(std::runtime_error{"err"}));
-});
-t.join();
-int val = future2.get();  // 100
+    // std::promise — manually fulfil a future
+    std::promise<int> prom;
+    std::future<int>  fut2 = prom.get_future();
 
-// std::shared_future — can be copied, get() can be called multiple times
-std::shared_future<int> shared = future.share();
-auto copy = shared;  // both can call get()
+    std::thread([p = std::move(prom)]() mutable {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        p.set_value(42);  // fulfil the promise
+    }).detach();
 
-// std::packaged_task — wraps a callable, associates it with a future
-std::packaged_task<int(int, int)> task([](int a, int b){ return a + b; });
-std::future<int> sum_future = task.get_future();
-std::thread task_thread(std::move(task), 3, 4);
-task_thread.join();
-std::cout << sum_future.get() << "\n";  // 7
+    std::cout << fut2.get() << '\n';  // blocks until promise fulfilled
+
+    // std::packaged_task — wraps callable, provides future
+    std::packaged_task<int(int)> task(compute);
+    std::future<int> task_fut = task.get_future();
+    std::thread(std::move(task), 7).join();
+    std::cout << task_fut.get() << '\n';  // 49
+
+    return 0;
+}
 ```
 
-## C++20 Concurrency Primitives
-
-### jthread — Joinable Thread with Stop Token
+## C++20 jthread — Cooperative Cancellation
 
 ```cpp
-#include <stop_token>
 #include <thread>
+#include <stop_token>
+#include <chrono>
 
-// jthread (C++20) — auto-joins on destruction, supports cooperative cancellation
-std::jthread worker([](std::stop_token stoken) {
-    while (!stoken.stop_requested()) {
-        // ... do work ...
-        std::this_thread::sleep_for(std::chrono::milliseconds{10});
-    }
-    std::cout << "Worker stopping gracefully\n";
-});
+int main() {
+    // jthread joins automatically on destruction — no need to call join()
+    // Accepts stop_token as first parameter (optional)
+    std::jthread worker([](std::stop_token st) {
+        int count = 0;
+        while (!st.stop_requested()) {  // check cancellation
+            std::cout << "Working... " << count++ << '\n';
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+        std::cout << "Stopped gracefully\n";
+    });
 
-std::this_thread::sleep_for(std::chrono::seconds{1});
-worker.request_stop();  // sets stop token
-// worker.join() called automatically in ~jthread
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    worker.request_stop();  // signal cancellation
+    // worker destructor calls join() automatically
+
+    // stop_callback — called when stop is requested
+    std::stop_source source;
+    std::stop_callback cb(source.get_token(), []() {
+        std::cout << "Stop requested!\n";
+    });
+    source.request_stop();  // fires the callback
+
+    return 0;
+}
 ```
 
-### Semaphores
+## C++20 Semaphores, Latches, and Barriers
 
 ```cpp
 #include <semaphore>
-
-// counting_semaphore — can be acquired up to N times simultaneously
-std::counting_semaphore<10> sem{3};  // initial count = 3, max = 10
-sem.acquire();     // decrement count (blocks if 0)
-sem.release();     // increment count (wakes blocked threads)
-bool got = sem.try_acquire();          // non-blocking
-bool timed = sem.try_acquire_for(std::chrono::milliseconds{100});
-
-// binary_semaphore — special case: counting_semaphore<1>
-std::binary_semaphore signal{0};  // initially "not signaled"
-
-// Thread A:
-signal.release();  // signal thread B
-
-// Thread B:
-signal.acquire();  // wait for signal from thread A
-```
-
-### Latch and Barrier
-
-```cpp
 #include <latch>
 #include <barrier>
+#include <thread>
+#include <vector>
 
-// std::latch (C++20) — single-use countdown: wait until N threads have reached a point
-std::latch ready{4};  // wait for 4 threads
+void semaphore_example() {
+    // Binary semaphore (0 or 1) — like mutex but can release from different thread
+    std::binary_semaphore ready{0};
 
-// Each thread:
-ready.count_down();      // decrement counter
-ready.wait();            // block until counter reaches 0
-// Or atomic: ready.arrive_and_wait();  // decrement + wait in one call
+    std::thread producer([&] {
+        std::cout << "Producing...\n";
+        ready.release();  // signal consumer
+    });
+    ready.acquire();       // wait for signal
+    std::cout << "Consumer got signal\n";
+    producer.join();
 
-// std::barrier (C++20) — reusable synchronization point
-std::barrier sync_point{4, []() noexcept {
-    // Completion function runs once when all threads arrive
-    std::cout << "All threads reached barrier\n";
-}};
+    // Counting semaphore — limit concurrent access
+    std::counting_semaphore<4> pool{4};  // max 4 threads at once
+    std::vector<std::thread> workers;
+    for (int i = 0; i < 8; i++) {
+        workers.emplace_back([&, i] {
+            pool.acquire();             // enter critical section
+            std::cout << i << " working\n";
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            pool.release();             // leave critical section
+        });
+    }
+    for (auto& t : workers) t.join();
+}
 
-// Each thread (can pass multiple times):
-sync_point.arrive_and_wait();  // synchronize
-// All threads guaranteed to have reached this point
+void latch_example() {
+    // std::latch — count down once; threads wait until count reaches 0
+    std::latch done{4};  // wait for 4 threads
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 4; i++) {
+        threads.emplace_back([&, i] {
+            std::cout << "Thread " << i << " ready\n";
+            done.count_down();   // decrement
+        });
+    }
+    done.wait();  // block until count == 0
+    std::cout << "All threads ready\n";
+    for (auto& t : threads) t.join();
+}
+
+void barrier_example() {
+    // std::barrier — reusable synchronization point (unlike latch)
+    const int N = 4;
+    std::barrier sync(N, []() noexcept {
+        std::cout << "All threads reached barrier\n";
+    });
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < N; t++) {
+        threads.emplace_back([&, t] {
+            for (int phase = 0; phase < 3; phase++) {
+                std::cout << "Thread " << t << " phase " << phase << '\n';
+                sync.arrive_and_wait();  // wait for all threads
+            }
+        });
+    }
+    for (auto& t : threads) t.join();
+}
 ```
 
 ## Race Conditions and False Sharing
 
 ```cpp
-// Race condition: two threads access shared data, at least one writes, without synchronization
-int counter = 0;
-// Thread A: counter++;  // NOT atomic — read, increment, write: 3 operations!
-// Thread B: counter++;  // may interleave → lost update
+#include <atomic>
+#include <thread>
 
-// Fix: use std::atomic<int> or a mutex
+// Race condition — two threads modify shared data without synchronization
+int g_counter_bad = 0;  // data race if accessed concurrently!
 
-// False sharing: two different variables on the SAME cache line (64 bytes on x86)
-// Modifying one invalidates the other thread's cached copy → cache thrashing
+// Fix 1: atomic
+std::atomic<int> g_counter_atomic{0};
 
-// BAD: both in same cache line
-struct BadCounters {
-    std::atomic<int> counter_a;  // offset 0
-    std::atomic<int> counter_b;  // offset 4 — SAME cache line as counter_a!
+// Fix 2: mutex-protected
+struct ThreadSafeCounter {
+    std::mutex mtx;
+    int value = 0;
+    void increment() {
+        std::lock_guard lock(mtx);
+        ++value;
+    }
 };
-// Thread A writes counter_a, Thread B writes counter_b → cache ping-pong
 
-// GOOD: pad to separate cache lines
-struct alignas(64) GoodCounters {
-    std::atomic<int> counter_a;
-    char padding_[64 - sizeof(std::atomic<int>)];  // fill rest of cache line
+// False sharing — different variables in same cache line cause performance degradation
+struct FalseSharing {
+    int a;  // threads 0 touches this
+    int b;  // thread 1 touches this — BUT they share a 64-byte cache line!
 };
-struct alignas(64) OtherCounter {
-    std::atomic<int> counter_b;
+
+struct NoFalseSharing {
+    alignas(64) int a;  // each on its own 64-byte cache line
+    alignas(64) int b;
 };
-// Now modifying counter_a doesn't invalidate counter_b's cache line
 ```
 
-:::caution[Deadlock Detection]
-Use ThreadSanitizer (`-fsanitize=thread`) to detect data races and deadlocks at runtime. It adds ~10× overhead but catches subtle race conditions that are nearly impossible to find by inspection.
+:::caution[Thread Safety Rules]
+- **Data race = UB**: Any concurrent access where at least one is a write (without synchronization) is undefined behavior in C++.
+- **Atomics are NOT a silver bullet**: `std::atomic` prevents data races but doesn't prevent logical races (check-then-act issues).
+- **Lock-free ≠ wait-free**: Lock-free code has no deadlock but can still have starvation.
+- **Prefer higher-level abstractions**: Use `std::async`, `std::packaged_task`, or thread pools over raw `std::thread`.
 :::
-
-<CardGrid>
-  <Card title="Concurrency Guidelines" icon="warning">
-    Prefer immutable data shared between threads. Use message passing (queues)
-    over shared state. When you must share state, use the finest-grained locking
-    possible. Always prefer higher-level primitives (async, futures) over raw
-    threads.
-  </Card>
-  <Card title="Performance Notes" icon="rocket">
-    Mutex lock/unlock: ~20-100ns. Atomic fetch_add (seq_cst): ~10ns. Cache line
-    transfer between cores: ~50-200ns. Context switch: ~1-10μs. Contended mutex:
-    ~1-10μs. Design to minimize contention, not just protect access.
-  </Card>
-</CardGrid>

@@ -1,369 +1,393 @@
 ---
 title: Playwright Locators
-description: Find elements reliably with Playwright's locator API — getByRole, getByText, getByLabel, chaining, filtering, nth(), frameLocator, and locator.all() for lists.
+description: Find elements with Playwright's resilient, accessibility-first locators — getByRole, getByText, getByLabel, chaining, filtering, and best practices for maintainable selectors.
 sidebar:
   order: 3
 tags: [testing, javascript]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-Playwright's locator API is the foundation of reliable tests. Locators are **lazy** (they don't immediately query the DOM) and **auto-waiting** (every action on a locator waits for the element to be ready). A locator describes how to find an element; the actual DOM query happens at the moment of interaction.
+Locators are Playwright's way of finding elements on the page. Unlike Selenium's `findElement`, Playwright locators are **lazy** (they don't search the DOM until an action is performed) and have **auto-waiting** built in — they retry automatically until the element exists, is visible, is stable, and is actionable.
 
-## Locator Philosophy
+## The Locator Philosophy
 
-Playwright encourages **resilient locators** that reflect what users see and interact with, not implementation details like CSS classes or XPath positions.
+A good locator should:
+1. **Survive refactors** — changing CSS classes or internal structure shouldn't break tests
+2. **Reflect user experience** — if a user can't find the button, the test shouldn't either
+3. **Be accessible** — tests that use ARIA roles validate accessibility as a side effect
 
-```typescript
-// ❌ Fragile — breaks when CSS is refactored
-page.locator('.btn.btn-primary.submit-btn');
+Priority order (most preferred to least):
 
-// ❌ Fragile — breaks when DOM structure changes
-page.locator('div > form > div:nth-child(3) > button');
+| Priority | Locator | Resilience |
+|---|---|---|
+| 1 | `getByRole` | ⭐⭐⭐⭐⭐ — ARIA roles are semantic |
+| 2 | `getByLabel` | ⭐⭐⭐⭐⭐ — label association is semantic |
+| 3 | `getByPlaceholder` | ⭐⭐⭐⭐ — placeholder text is visible |
+| 4 | `getByText` | ⭐⭐⭐⭐ — visible text is user-facing |
+| 5 | `getByAltText` | ⭐⭐⭐⭐ — alt text is semantic |
+| 6 | `getByTitle` | ⭐⭐⭐ — title attribute may change |
+| 7 | `getByTestId` | ⭐⭐ — implementation detail, invisible to users |
+| 8 | `locator('css')` | ⭐ — last resort, breaks on refactoring |
+| 9 | `locator('xpath')` | ⭐ — last resort, very brittle |
 
-// ✅ Resilient — matches the visible accessible name
-page.getByRole('button', { name: 'Submit order' });
+## getByRole — ARIA Roles
 
-// ✅ Resilient — matches form label
-page.getByLabel('Email address');
-```
-
-Locators from semantic queries survive refactoring of CSS classes, DOM structure, and component internals.
-
-## getByRole — Preferred Locator
-
-`getByRole` queries elements by their ARIA role — the same way screen readers and accessibility tools navigate the page. This is the most accessible and most recommended query.
+`getByRole` is the most powerful and preferred locator. It mirrors how screen readers navigate the page:
 
 ```typescript
 // Buttons
-page.getByRole('button', { name: 'Submit' });
-page.getByRole('button', { name: /submit/i }); // regex — case-insensitive
-page.getByRole('button', { name: 'Save', exact: true });
+page.getByRole('button', { name: 'Submit' })
+page.getByRole('button', { name: /save/i })         // case-insensitive regex
+page.getByRole('button', { name: 'Delete', exact: true }) // exact match only
 
 // Links
-page.getByRole('link', { name: 'Home' });
-page.getByRole('link', { name: /learn more/i });
+page.getByRole('link', { name: 'Home' })
+page.getByRole('link', { name: /dashboard/i })
 
 // Headings
-page.getByRole('heading', { name: 'Dashboard' });
-page.getByRole('heading', { name: 'Sign up', level: 1 }); // h1 specifically
+page.getByRole('heading', { name: 'User Profile' })
+page.getByRole('heading', { level: 1 })             // h1 only
+page.getByRole('heading', { name: 'Settings', level: 2 }) // h2 named "Settings"
 
-// Form elements
-page.getByRole('textbox', { name: 'Email' });
-page.getByRole('textbox', { name: 'Search' });
-page.getByRole('checkbox', { name: 'Remember me' });
-page.getByRole('radio', { name: 'Monthly' });
-page.getByRole('combobox', { name: 'Country' }); // <select>
-page.getByRole('spinbutton', { name: 'Quantity' }); // <input type="number">
-page.getByRole('slider', { name: 'Volume' });
+// Form inputs
+page.getByRole('textbox', { name: 'Email' })        // <input type="text"> or type="email"
+page.getByRole('textbox', { name: /password/i })    // password field
+page.getByRole('checkbox', { name: 'Remember me' })
+page.getByRole('radio', { name: 'Monthly billing' })
+page.getByRole('combobox', { name: 'Country' })     // <select>
+page.getByRole('spinbutton', { name: 'Quantity' })  // <input type="number">
+page.getByRole('searchbox')                         // <input type="search">
 
-// Navigation / structure
-page.getByRole('navigation', { name: 'Main navigation' });
-page.getByRole('main');
-page.getByRole('banner');
-page.getByRole('contentinfo'); // <footer>
+// Status / feedback
+page.getByRole('alert')                             // error messages, warnings
+page.getByRole('status')                            // success messages
+page.getByRole('progressbar')                       // loading indicators
+page.getByRole('dialog')                            // modal dialogs
+page.getByRole('dialog', { name: 'Confirm Delete' })
 
-// Lists
-page.getByRole('list', { name: 'Search results' });
-page.getByRole('listitem');
-
-// Dialogs
-page.getByRole('dialog', { name: 'Confirm deletion' });
-page.getByRole('alertdialog');
+// Navigation / landmarks
+page.getByRole('navigation')
+page.getByRole('navigation', { name: 'Main navigation' })
+page.getByRole('main')
+page.getByRole('banner')                            // <header>
+page.getByRole('contentinfo')                       // <footer>
 
 // Tables
-page.getByRole('table', { name: 'Order history' });
-page.getByRole('row', { name: /Order #1042/ });
-page.getByRole('cell', { name: '$42.00' });
-page.getByRole('columnheader', { name: 'Amount' });
+page.getByRole('table')
+page.getByRole('row')
+page.getByRole('columnheader', { name: 'Price' })
+page.getByRole('cell', { name: '$9.99' })
 
-// Images
-page.getByRole('img', { name: 'Profile photo' });
+// Lists
+page.getByRole('list')
+page.getByRole('listitem')
 
-// Tabs
-page.getByRole('tab', { name: 'Settings' });
-page.getByRole('tabpanel', { name: 'Settings' });
+// Tabs and tab panels
+page.getByRole('tab', { name: 'Details' })
+page.getByRole('tabpanel', { name: 'Details' })
+
+// Menus
+page.getByRole('menu')
+page.getByRole('menuitem', { name: 'Edit' })
+page.getByRole('menuitemcheckbox', { name: 'Show sidebar' })
 ```
 
-### Common ARIA Roles Reference
+### Filtering by State
 
-| Role          | HTML elements                                 | Notes                        |
-| ------------- | --------------------------------------------- | ---------------------------- |
-| `button`      | `<button>`, `[role="button"]`                 | Also `<input type="submit">` |
-| `link`        | `<a href>`                                    | Must have `href` attribute   |
-| `heading`     | `<h1>`–`<h6>`                                 | Use `level` to specify h1–h6 |
-| `textbox`     | `<input type="text/email/...">`, `<textarea>` | Use for text input           |
-| `checkbox`    | `<input type="checkbox">`                     |                              |
-| `radio`       | `<input type="radio">`                        |                              |
-| `combobox`    | `<select>`, custom dropdowns                  |                              |
-| `listbox`     | Multi-select custom dropdowns                 |                              |
-| `option`      | `<option>` inside select                      |                              |
-| `img`         | `<img>` with `alt`                            | Must have non-empty `alt`    |
-| `dialog`      | `<dialog>`, `[role="dialog"]`                 |                              |
-| `alert`       | `[role="alert"]`                              | For error messages           |
-| `status`      | `[role="status"]`                             | For success messages         |
-| `progressbar` | `[role="progressbar"]`                        | Loading indicators           |
-| `menu`        | `[role="menu"]`                               | Dropdown menus               |
-| `menuitem`    | `[role="menuitem"]`                           | Menu items                   |
-| `tab`         | `[role="tab"]`                                | Tab navigation               |
-| `tabpanel`    | `[role="tabpanel"]`                           | Tab content                  |
+```typescript
+// Find checked/unchecked checkboxes
+page.getByRole('checkbox', { name: 'Accept terms', checked: true })
+page.getByRole('checkbox', { checked: false }) // any unchecked checkbox
+
+// Find disabled/enabled elements
+page.getByRole('button', { name: 'Submit', disabled: true })
+page.getByRole('textbox', { disabled: false })
+
+// Find selected option in listbox
+page.getByRole('option', { name: 'Canada', selected: true })
+
+// Find expanded/collapsed elements
+page.getByRole('button', { name: 'Menu', expanded: true })
+```
+
+:::tip[Finding the Right Role]
+Run `npx playwright codegen` and click through your app — Playwright codegen automatically generates `getByRole` locators. You can also use the Playwright Inspector (`--debug` flag) to inspect the accessibility tree.
+:::
 
 ## getByText
 
-Finds elements by their visible text content:
+`getByText` finds elements by their visible text content:
 
 ```typescript
-page.getByText('Welcome back!'); // exact string
-page.getByText(/welcome/i); // regex (case-insensitive)
-page.getByText('Price: $42', { exact: true }); // exact match (no substring)
-page.getByText('$42', { exact: false }); // substring (default)
+// Exact string match (default)
+page.getByText('Welcome back!')
+
+// Partial match
+page.getByText('Welcome')  // matches "Welcome back!" too
+
+// Exact match (override partial behavior)
+page.getByText('Welcome', { exact: true })  // only "Welcome" exactly
+
+// Case-insensitive regex
+page.getByText(/welcome back/i)
+
+// Regex with wildcards
+page.getByText(/order #\d+/)
 ```
 
 :::caution[getByText Matches All Elements]
-`getByText` matches any element containing that text — including parent elements. If multiple elements match, Playwright may throw. Use `getByRole` when possible for more precise matching.
+`getByText` searches all elements including `div`, `span`, `p`, etc. If multiple elements contain the same text, the locator will match multiple elements. Use `getByRole` with a name when possible for more specific targeting.
 :::
 
 ## getByLabel
 
-Finds form inputs by their associated `<label>` text (also matches `aria-label` and `aria-labelledby`):
+Finds form elements by their associated `<label>` text. Works with `for` attributes, `aria-label`, and wrapped labels:
 
 ```typescript
-page.getByLabel('Email address');
-page.getByLabel(/password/i);
-page.getByLabel('Date of birth', { exact: false });
+// Associated via for/id
+page.getByLabel('Email address')
+page.getByLabel('Email address', { exact: false }) // partial match
+
+// Works with aria-label too
+page.getByLabel('Search the site')
+
+// Case-insensitive
+page.getByLabel(/email/i)
 ```
 
-Works with:
+```html
+<!-- All of these are found by getByLabel('Email') -->
+<label for="email">Email</label><input id="email" type="email">
 
-- `<label for="id">` + `<input id="id">`
-- `<label><input /></label>` (implicit label)
-- `aria-label="Email address"`
-- `aria-labelledby="heading-id"`
+<label>Email <input type="email"></label>
+
+<input type="email" aria-label="Email">
+
+<input type="email" aria-labelledby="email-label">
+<span id="email-label">Email</span>
+```
 
 ## getByPlaceholder
 
-Finds inputs by their placeholder text:
-
 ```typescript
-page.getByPlaceholder('Enter your email');
-page.getByPlaceholder('Search...');
-page.getByPlaceholder(/yyyy-mm-dd/i);
+page.getByPlaceholder('Search...')
+page.getByPlaceholder(/enter your email/i)
+page.getByPlaceholder('mm/dd/yyyy', { exact: true })
 ```
 
 ## getByAltText
 
-Finds images by their alt text:
+Find images and inputs by their `alt` attribute:
 
 ```typescript
-page.getByAltText('Company logo');
-page.getByAltText(/user avatar/i);
-page.getByAltText('', { exact: true }); // decorative image with empty alt
+page.getByAltText('Company logo')
+page.getByAltText(/product image/i)
+
+// Also works for <input type="image" alt="...">
+page.getByAltText('Submit button')
 ```
 
 ## getByTitle
 
-Finds elements by their `title` attribute:
+Find elements by their `title` attribute (used for tooltips):
 
 ```typescript
-page.getByTitle('Close dialog');
-page.getByTitle(/delete/i);
+page.getByTitle('Close dialog')
+page.getByTitle(/help/i)
 ```
 
 ## getByTestId
 
-Finds elements by their `data-testid` attribute (or your configured attribute). Use as a **last resort** when no semantic locator is possible:
+Use only when no semantic locator is available:
 
 ```typescript
-page.getByTestId('user-avatar');
-page.getByTestId('price-display');
+// Requires data-testid attribute on the element
+page.getByTestId('user-avatar')
+page.getByTestId('nav-menu-toggle')
 ```
 
-Configure the attribute name in `playwright.config.ts`:
+Configure a custom attribute name:
 
 ```typescript
+// playwright.config.ts
 use: {
-  testIdAttribute: 'data-pw',  // use data-pw instead of data-testid
+  testIdAttribute: 'data-cy',  // use data-cy instead of data-testid
 }
 ```
 
-```html
-<!-- In your component -->
-<div data-pw="user-avatar">...</div>
-```
-
-:::tip[testId Usage]
-`data-testid` attributes are invisible to users and can be added to any element. They're especially useful for elements that lack an ARIA role — like custom UI components that don't expose semantic roles.
+:::tip[Strategic Use of data-testid]
+Reserve `data-testid` for elements that are genuinely impossible to identify with accessible queries — custom SVG icon buttons, canvas elements, or third-party component internals. Never add `data-testid` as a first resort.
 :::
 
-## locator() — CSS and XPath (Last Resort)
-
-Use `page.locator()` with CSS selectors or XPath as a last resort when no role-based or semantic locator is available:
+## CSS and XPath (Last Resort)
 
 ```typescript
-// CSS selectors
-page.locator('.user-card');
-page.locator('#main-content');
-page.locator('[data-status="active"]');
-page.locator('input[type="file"]');
+// CSS selector
+page.locator('div.user-card > h2.username')
+page.locator('#submit-btn')
+page.locator('[data-state="open"]')
 
 // XPath
-page.locator('xpath=//button[contains(@class, "primary")]');
-page.locator('//table//tr[3]//td[2]');
+page.locator('xpath=//button[@type="submit"]')
+page.locator('//div[@class="container"]//span')
 
-// Text selector (pseudo-class)
-page.locator('text=Submit');
-
-// CSS + text combination
-page.locator('button:has-text("Submit")');
-page.locator('li:has-text("Option A")');
+// CSS with :has, :not, :nth-child
+page.locator('ul > li:nth-child(2)')
+page.locator('form:has(input[name="email"])')
 ```
+
+:::caution[CSS Selectors Break on Refactoring]
+CSS selectors that reference class names (`div.btn-primary`) or DOM structure (`form > div > input`) will break whenever the implementation changes. They also provide no accessibility validation. Use them only when you have no alternative.
+:::
 
 ## Chaining Locators
 
-Locators can be chained to narrow the search scope:
+Scope locators to a parent element:
 
 ```typescript
-// Find a button inside a specific card
-const card = page.getByRole('article', { name: 'Premium Plan' });
-await card.getByRole('button', { name: 'Select plan' }).click();
+// Find the "Edit" button within the second user card
+const userCards = page.getByRole('article');
+const secondCard = userCards.nth(1);
+await secondCard.getByRole('button', { name: 'Edit' }).click();
 
-// Find a form field inside a dialog
-const dialog = page.getByRole('dialog', { name: 'Edit profile' });
-await dialog.getByLabel('Display name').fill('Alice');
-await dialog.getByRole('button', { name: 'Save changes' }).click();
+// Find elements within a specific section
+const sidebar = page.getByRole('complementary');
+await sidebar.getByRole('link', { name: 'Settings' }).click();
 
-// Deeply nested
-const sidebar = page.locator('[data-testid="sidebar"]');
-const nav = sidebar.getByRole('navigation');
-await nav.getByRole('link', { name: 'Settings' }).click();
+// Chain multiple locators
+const dialog = page.getByRole('dialog', { name: 'Edit User' });
+await dialog.getByLabel('Full Name').fill('Alice Johnson');
+await dialog.getByRole('button', { name: 'Save' }).click();
 ```
 
 ## Filtering Locators
 
-Use `.filter()` to narrow a broad locator to a specific element:
-
 ```typescript
-// Get all list items, then filter to those containing "Alice"
-const aliceItem = page.getByRole('listitem').filter({ hasText: 'Alice' });
+// Filter by text content
+page.getByRole('listitem').filter({ hasText: 'Alice' })
+page.getByRole('listitem').filter({ hasText: /alice/i })
 
-// Filter by a child locator
-const activeRow = page.getByRole('row').filter({
-  has: page.getByRole('cell', { name: 'Active' }),
-});
+// Filter by contained element
+page.getByRole('listitem').filter({
+  has: page.getByRole('img', { name: 'avatar' }),
+})
+
+// Filter by NOT containing text
+page.getByRole('listitem').filter({ hasNotText: 'Inactive' })
 
 // Combine filters
-const adminCard = page
-  .getByRole('article')
-  .filter({ hasText: 'Alice' })
-  .filter({ has: page.getByRole('img', { name: 'Admin badge' }) });
+page.getByRole('row')
+  .filter({ has: page.getByRole('cell', { name: 'Alice' }) })
+  .filter({ hasNot: page.getByText('Deactivated') })
 ```
 
 ## nth(), first(), last()
 
-When a locator matches multiple elements, use index selectors:
-
 ```typescript
-const rows = page.getByRole('row');
+// Get the first matching element
+page.getByRole('listitem').first()
 
-await rows.first().click(); // first matching element
-await rows.last().click(); // last matching element
-await rows.nth(2).click(); // 0-indexed: third row
-await rows.nth(-1).click(); // last row (negative index)
+// Get the last matching element
+page.getByRole('listitem').last()
 
-// Count matching elements
-const count = await rows.count();
-expect(count).toBe(10);
+// Get by zero-based index
+page.getByRole('listitem').nth(0)  // same as first()
+page.getByRole('listitem').nth(2)  // third item
+page.getByRole('listitem').nth(-1) // same as last()
 ```
 
-:::caution[nth() and Test Stability]
-`nth(3)` is fragile if the number of elements changes. Prefer `.filter({ hasText: 'specific content' })` to identify the specific element you mean, rather than relying on position.
-:::
+## locator.all() — Working with Lists
 
-## Frames — frameLocator
-
-To interact with elements inside an `<iframe>`, use `frameLocator`:
+`locator.all()` returns an array of all matching locators (bypasses auto-waiting — all elements must already exist):
 
 ```typescript
-// Target content inside an iframe
-const paymentFrame = page.frameLocator('iframe[title="Payment form"]');
-
-await paymentFrame.getByLabel('Card number').fill('4242424242424242');
-await paymentFrame.getByLabel('Expiry date').fill('12/26');
-await paymentFrame.getByLabel('CVV').fill('123');
-await paymentFrame.getByRole('button', { name: 'Pay now' }).click();
-
-// Nested iframes
-const nestedFrame = page
-  .frameLocator('#outer-frame')
-  .frameLocator('#inner-frame');
-
-await nestedFrame.getByRole('button', { name: 'Confirm' }).click();
-```
-
-## locator.all() — Lists
-
-`locator.all()` resolves a locator to an array of all matching elements at the current moment. Use for iterating over lists:
-
-```typescript
-// Get all product cards and check their prices
-const productCards = page.getByRole('article', { name: /product/i });
-const cards = await productCards.all();
-
-expect(cards.length).toBeGreaterThan(0);
-
-for (const card of cards) {
-  await expect(card.getByRole('heading')).toBeVisible();
-  await expect(card.getByText(/\$\d+\.\d{2}/)).toBeVisible();
+// Iterate over all matching elements
+const items = await page.getByRole('listitem').all();
+for (const item of items) {
+  console.log(await item.textContent());
 }
 
-// Extract all text content
-const links = await page.getByRole('link').all();
-const texts = await Promise.all(links.map((link) => link.textContent()));
-console.log(texts.filter(Boolean)); // ['Home', 'About', 'Contact']
+// Collect all text values
+const names = await page.getByRole('cell', { name: /^[A-Z]/ }).allTextContents();
+expect(names).toEqual(['Alice', 'Bob', 'Carol']);
+
+// Collect all inner texts
+const prices = await page.getByTestId('price').allInnerTexts();
+
+// Count elements
+const count = await page.getByRole('listitem').count();
+expect(count).toBeGreaterThan(0);
 ```
 
-:::caution[locator.all() is a Snapshot]
-`locator.all()` resolves the locator **once** — it doesn't auto-wait. If the list is populated asynchronously, wait for at least one item to be visible first:
+## frameLocator — Working with iFrames
 
 ```typescript
-await expect(page.getByRole('listitem').first()).toBeVisible();
-const items = await page.getByRole('listitem').all();
+// Locate the frame first, then query within it
+const frame = page.frameLocator('iframe[name="payment-frame"]');
+await frame.getByLabel('Card Number').fill('4111111111111111');
+await frame.getByLabel('Expiry').fill('12/26');
+await frame.getByLabel('CVV').fill('123');
+
+// Frame by URL pattern
+const adFrame = page.frameLocator('iframe[src*="ads.example.com"]');
+
+// Nested frames
+const innerFrame = page
+  .frameLocator('#outer-frame')
+  .frameLocator('#inner-frame');
 ```
 
-:::
+## Reusing Locators
 
-## Inspecting the Accessibility Tree
-
-Use Playwright's `accessibility.snapshot()` to understand what ARIA roles and names are available on a page:
-
-```bash
-# Open the page inspector to explore accessibility tree
-npx playwright open https://example.com
-```
-
-In a test:
+Store locators in variables to avoid repeating selectors:
 
 ```typescript
-test('accessibility snapshot', async ({ page }) => {
-  await page.goto('/dashboard');
+test('checks out successfully', async ({ page }) => {
+  await page.goto('/cart');
 
-  const snapshot = await page.accessibility.snapshot();
-  console.log(JSON.stringify(snapshot, null, 2));
-  // Shows the full ARIA tree — use to find the correct role/name for locators
+  // Store frequently used locators
+  const cartItems = page.getByRole('row').filter({ hasNot: page.getByRole('columnheader') });
+  const total = page.getByTestId('order-total');
+  const checkoutBtn = page.getByRole('button', { name: 'Proceed to checkout' });
+
+  // Use them multiple times
+  await expect(cartItems).toHaveCount(2);
+  await expect(total).toHaveText('$49.98');
+
+  await checkoutBtn.click();
+  await expect(page).toHaveURL('/checkout');
 });
 ```
 
-You can also use the Playwright Inspector (launched with `--debug`):
+:::tip[Locators Are Lazy]
+Locator definitions don't query the DOM. The DOM is only searched when you perform an action or assertion. This means you can define locators before navigating to the page.
+:::
+
+## Accessibility Tree Inspection
+
+Use the Playwright Inspector to explore the accessibility tree:
 
 ```bash
+# Launch in debug mode
 npx playwright test --debug
 ```
 
-The inspector shows a live highlight of locators as you type them, making it easy to verify your locator before committing to it.
+In the Inspector, click "Explore" and hover over elements to see:
+- Their computed ARIA role
+- Their accessible name
+- The recommended `getByRole` locator
+
+You can also use the `accessibility` API in tests:
+
+```typescript
+// Dump the full accessibility tree
+const snapshot = await page.accessibility.snapshot();
+console.log(JSON.stringify(snapshot, null, 2));
+
+// Find a node in the tree
+const loginHeading = snapshot?.children?.find(
+  (node) => node.role === 'heading' && node.name === 'Log In',
+);
+expect(loginHeading).toBeDefined();
+```

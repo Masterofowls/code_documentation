@@ -1,276 +1,249 @@
 ---
 title: Advanced SQL
-description: Transactions, isolation levels, views, stored procedures, triggers, EXPLAIN query plans, and database normalization.
+description: Master transactions, isolation levels, views, stored procedures, triggers, query optimization with EXPLAIN, and database normalization.
 sidebar:
   order: 6
 tags: [database, sql]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+This page covers the advanced SQL features needed for building production systems: transactions, isolation, views, procedural code, triggers, query planning, and normalization.
 
 ## Transactions
 
-A transaction is a unit of work that is atomic — either all statements succeed and are committed, or the entire unit is rolled back.
+A transaction groups multiple SQL statements into a single atomic unit of work.
+
+### Basic Transaction Syntax
 
 ```sql
--- Basic transaction
-BEGIN;
+-- PostgreSQL / MySQL / SQLite
+BEGIN;                     -- or: START TRANSACTION;
 
 UPDATE accounts SET balance = balance - 500 WHERE id = 1;
 UPDATE accounts SET balance = balance + 500 WHERE id = 2;
-INSERT INTO transfers (from_id, to_id, amount, created_at) VALUES (1, 2, 500, NOW());
 
-COMMIT;  -- permanently write all changes
+COMMIT;                    -- Make changes permanent
 
--- On error, roll back
-BEGIN;
-
-UPDATE accounts SET balance = balance - 500 WHERE id = 1;
--- If the next statement errors, nothing is written:
-UPDATE accounts SET balance = balance + 500 WHERE id = 99;  -- id 99 doesn't exist
-
-ROLLBACK;  -- undo all changes in this transaction
+-- OR to undo all changes:
+ROLLBACK;
 ```
 
 ### SAVEPOINT
 
-Savepoints let you partially roll back a transaction:
+Savepoints allow partial rollback within a transaction:
 
 ```sql
 BEGIN;
 
-INSERT INTO orders (customer_id, total) VALUES (42, 150.00);
-SAVEPOINT before_items;
+INSERT INTO orders (customer_id, total) VALUES (1, 150.00)
+RETURNING id INTO order_id;
 
-INSERT INTO order_items (order_id, product_id, quantity, unit_price)
-VALUES (currval('orders_id_seq'), 101, 2, 75.00);
+SAVEPOINT after_order;     -- Checkpoint
 
--- If item insert fails, rollback only to the savepoint
-ROLLBACK TO SAVEPOINT before_items;
+INSERT INTO order_items (order_id, product_id, quantity)
+VALUES (order_id, 5, 2);   -- This might fail
 
--- Try a different item
-INSERT INTO order_items (order_id, product_id, quantity, unit_price)
-VALUES (currval('orders_id_seq'), 102, 1, 150.00);
+-- If the above fails:
+ROLLBACK TO SAVEPOINT after_order;   -- Undo only the order_items insert
+-- order still exists; we can try a different product
 
-RELEASE SAVEPOINT before_items;  -- release the savepoint (optional, auto-released on COMMIT)
+RELEASE SAVEPOINT after_order;       -- Optional: remove the savepoint
+
 COMMIT;
 ```
-
-:::tip[Transactions in Application Code]
-Always use explicit transactions for multi-step operations in application code. Most database drivers start in auto-commit mode — each statement is its own transaction. Use `BEGIN`/`COMMIT` explicitly or your ORM's transaction API.
-:::
 
 ## Isolation Levels
 
-Isolation levels control how transactions interact with each other. Higher isolation = fewer anomalies but lower concurrency.
+Isolation levels control how much a transaction is isolated from the effects of concurrent transactions. Higher isolation = more consistency but more contention.
 
-### Isolation Level Phenomena
-
-| Phenomenon              | Description                                                                                          |
-| ----------------------- | ---------------------------------------------------------------------------------------------------- |
-| **Dirty Read**          | Reading uncommitted changes from another transaction                                                 |
-| **Non-repeatable Read** | Reading the same row twice yields different values (another transaction committed between reads)     |
-| **Phantom Read**        | A range query returns different rows when re-executed (rows inserted/deleted by another transaction) |
-
-### Isolation Level Comparison
-
-| Level            | Dirty Read | Non-repeatable Read | Phantom Read | Notes                  |
-| ---------------- | ---------- | ------------------- | ------------ | ---------------------- |
-| READ UNCOMMITTED | Possible   | Possible            | Possible     | Fastest, least safe    |
-| READ COMMITTED   | Prevented  | Possible            | Possible     | **PostgreSQL default** |
-| REPEATABLE READ  | Prevented  | Prevented           | Possible     | MySQL InnoDB default   |
-| SERIALIZABLE     | Prevented  | Prevented           | Prevented    | Slowest, safest        |
+### The Four Levels
 
 ```sql
--- Set isolation level for current transaction
-BEGIN;
-SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
--- ... your statements ...
-COMMIT;
+-- Set for current transaction
+BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED;
 
--- Set default for current session
+-- Or set as session default (PostgreSQL)
 SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE;
-
--- Serializable is needed for correctness-critical financial operations
-BEGIN ISOLATION LEVEL SERIALIZABLE;
-SELECT balance FROM accounts WHERE id = 1;  -- 1000
--- Another transaction cannot commit a change to this row before we commit
-UPDATE accounts SET balance = balance + 100 WHERE id = 1;
-COMMIT;
 ```
+
+| Level | Dirty Read | Non-Repeatable Read | Phantom Read |
+|---|---|---|---|
+| READ UNCOMMITTED | ✅ Possible | ✅ Possible | ✅ Possible |
+| READ COMMITTED | ❌ Prevented | ✅ Possible | ✅ Possible |
+| REPEATABLE READ | ❌ Prevented | ❌ Prevented | ✅ Possible |
+| SERIALIZABLE | ❌ Prevented | ❌ Prevented | ❌ Prevented |
+
+**Dirty Read**: Reading uncommitted changes from another transaction.
+
+**Non-Repeatable Read**: Re-reading a row within the same transaction gets different data because another transaction committed a change.
+
+**Phantom Read**: A query within a transaction returns different rows on re-execution because another transaction inserted or deleted rows.
+
+:::tip[PostgreSQL Default]
+PostgreSQL defaults to `READ COMMITTED`. Most applications work correctly with this level. Use `SERIALIZABLE` only for financial transactions or complex multi-step operations that require true isolation.
+:::
 
 ## Views
 
-Views are named queries stored in the database that behave like read-only (or sometimes writable) virtual tables.
+A view is a named, stored SELECT query that acts like a table.
 
 ### Creating Views
 
 ```sql
 -- Simple view
-CREATE VIEW active_users AS
-SELECT id, email, name, created_at
-FROM users
-WHERE is_active = true
-  AND deleted_at IS NULL;
+CREATE VIEW active_products AS
+SELECT id, sku, name, price, category_id
+FROM products
+WHERE status = 'active';
 
--- Complex view
+-- View with joins
 CREATE VIEW order_summary AS
 SELECT
-  o.id,
+  o.id            AS order_id,
   o.created_at,
-  c.name AS customer_name,
-  c.email,
-  COUNT(oi.id)                    AS item_count,
-  SUM(oi.quantity * oi.unit_price) AS subtotal,
+  o.status,
   o.total,
-  o.status
+  c.name          AS customer_name,
+  c.email         AS customer_email,
+  COUNT(oi.product_id) AS item_count
 FROM orders o
-JOIN customers c    ON c.id = o.customer_id
+JOIN customers c  ON c.id = o.customer_id
 JOIN order_items oi ON oi.order_id = o.id
-GROUP BY o.id, o.created_at, c.name, c.email, o.total, o.status;
+GROUP BY o.id, o.created_at, o.status, o.total, c.name, c.email;
 
--- Query views just like tables
-SELECT * FROM active_users WHERE email LIKE '%@example.com';
-SELECT * FROM order_summary WHERE status = 'pending' ORDER BY created_at;
+-- Replace an existing view
+CREATE OR REPLACE VIEW active_products AS
+SELECT id, sku, name, price, category_id, created_at
+FROM products
+WHERE status = 'active';
+
+-- Drop
+DROP VIEW IF EXISTS active_products;
 ```
 
 ### Updatable Views
 
-A view is automatically updatable if it satisfies certain conditions (single table, no GROUP BY, DISTINCT, aggregate functions, etc.):
+Simple views (single table, no GROUP BY, DISTINCT, aggregates, or joins) are automatically updatable:
 
 ```sql
--- This view is updatable
-CREATE VIEW public_users AS
-SELECT id, email, display_name, avatar_url
-FROM users
-WHERE is_public = true;
+CREATE VIEW active_customers AS
+SELECT id, name, email, country
+FROM customers
+WHERE status = 'active';
 
--- This UPDATE goes to the underlying table
-UPDATE public_users SET display_name = 'Alice' WHERE id = 42;
+-- This works because the view is simple
+UPDATE active_customers SET email = 'new@example.com' WHERE id = 1;
 
--- WITH CHECK OPTION prevents updates that would hide the row from the view
-CREATE VIEW active_products AS
-SELECT * FROM products WHERE is_active = true
+-- WITH CHECK OPTION prevents updates that would remove the row from the view
+CREATE VIEW active_customers AS
+SELECT id, name, email, country, status
+FROM customers
+WHERE status = 'active'
 WITH CHECK OPTION;
 
--- This would fail — setting is_active = false would make the row invisible to the view
-UPDATE active_products SET is_active = false WHERE id = 1;  -- ERROR
+-- This would fail: setting status = 'inactive' would make the row invisible in the view
+UPDATE active_customers SET status = 'inactive' WHERE id = 1;
 ```
 
 ### Materialized Views (PostgreSQL)
 
-Materialized views store the result set physically and must be refreshed:
+A materialized view stores the query result on disk — it's fast to read but must be refreshed.
 
 ```sql
--- Create materialized view
-CREATE MATERIALIZED VIEW monthly_revenue AS
+CREATE MATERIALIZED VIEW product_category_stats AS
 SELECT
-  DATE_TRUNC('month', created_at) AS month,
-  SUM(total)                       AS revenue,
-  COUNT(*)                         AS orders
-FROM orders
-WHERE status = 'delivered'
-GROUP BY DATE_TRUNC('month', created_at)
-WITH DATA;  -- populate immediately
+  c.id            AS category_id,
+  c.name          AS category_name,
+  COUNT(p.id)     AS product_count,
+  AVG(p.price)    AS avg_price,
+  MIN(p.price)    AS min_price,
+  MAX(p.price)    AS max_price
+FROM categories c
+LEFT JOIN products p ON p.category_id = c.id AND p.status = 'active'
+GROUP BY c.id, c.name;
 
--- Create unique index for CONCURRENTLY refresh
-CREATE UNIQUE INDEX idx_monthly_revenue_month ON monthly_revenue(month);
+-- Create index on the materialized view
+CREATE INDEX ON product_category_stats(category_id);
 
--- Refresh (blocks reads unless CONCURRENTLY)
-REFRESH MATERIALIZED VIEW monthly_revenue;
+-- Refresh the data (blocking)
+REFRESH MATERIALIZED VIEW product_category_stats;
 
--- Refresh without blocking reads (requires unique index)
-REFRESH MATERIALIZED VIEW CONCURRENTLY monthly_revenue;
-
--- Query it like a regular table (fast!)
-SELECT * FROM monthly_revenue WHERE month >= '2024-01-01';
+-- Refresh without blocking reads (requires UNIQUE index)
+CREATE UNIQUE INDEX ON product_category_stats(category_id);
+REFRESH MATERIALIZED VIEW CONCURRENTLY product_category_stats;
 ```
 
 ## Stored Procedures and Functions
 
-### PostgreSQL PL/pgSQL Functions
+### SQL Functions (Simple)
 
 ```sql
--- Function: returns a value
-CREATE OR REPLACE FUNCTION get_customer_lifetime_value(p_customer_id BIGINT)
+-- Scalar function: returns one value
+CREATE OR REPLACE FUNCTION calculate_tax(price NUMERIC, rate NUMERIC DEFAULT 0.10)
 RETURNS NUMERIC AS $$
-DECLARE
-  v_total NUMERIC;
-BEGIN
-  SELECT COALESCE(SUM(total), 0)
-  INTO v_total
+  SELECT ROUND(price * rate, 2);
+$$ LANGUAGE SQL IMMUTABLE;
+
+SELECT name, price, calculate_tax(price) AS tax FROM products;
+
+-- Table-returning function
+CREATE OR REPLACE FUNCTION get_customer_orders(p_customer_id BIGINT)
+RETURNS TABLE (order_id BIGINT, total NUMERIC, status TEXT, created_at TIMESTAMPTZ) AS $$
+  SELECT id, total, status, created_at
   FROM orders
   WHERE customer_id = p_customer_id
-    AND status = 'delivered';
+  ORDER BY created_at DESC;
+$$ LANGUAGE SQL STABLE;
 
-  RETURN v_total;
-END;
-$$ LANGUAGE plpgsql STABLE;
-
--- Call it:
-SELECT get_customer_lifetime_value(42);
-
--- Function: returns a table
-CREATE OR REPLACE FUNCTION get_top_customers(p_limit INTEGER DEFAULT 10)
-RETURNS TABLE(customer_id BIGINT, name TEXT, total_spent NUMERIC) AS $$
-BEGIN
-  RETURN QUERY
-    SELECT c.id, c.name, SUM(o.total)::NUMERIC
-    FROM customers c
-    JOIN orders o ON o.customer_id = c.id
-    WHERE o.status = 'delivered'
-    GROUP BY c.id, c.name
-    ORDER BY SUM(o.total) DESC
-    LIMIT p_limit;
-END;
-$$ LANGUAGE plpgsql STABLE;
-
--- Call it:
-SELECT * FROM get_top_customers(5);
+SELECT * FROM get_customer_orders(42);
 ```
 
-### Procedures (PostgreSQL 11+)
+### PL/pgSQL Functions (PostgreSQL)
 
 ```sql
--- Procedures: don't return values, can COMMIT/ROLLBACK
-CREATE OR REPLACE PROCEDURE archive_old_orders(p_days INTEGER DEFAULT 365)
-LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION transfer_funds(
+  p_from_id  BIGINT,
+  p_to_id    BIGINT,
+  p_amount   NUMERIC
+)
+RETURNS VOID AS $$
 DECLARE
-  v_count INTEGER;
+  v_from_balance NUMERIC;
 BEGIN
-  INSERT INTO orders_archive
-  SELECT * FROM orders
-  WHERE created_at < NOW() - (p_days || ' days')::INTERVAL
-    AND status IN ('delivered', 'cancelled');
+  -- Lock both rows to prevent concurrent modification
+  SELECT balance INTO v_from_balance
+  FROM accounts
+  WHERE id = p_from_id
+  FOR UPDATE;
 
-  GET DIAGNOSTICS v_count = ROW_COUNT;
+  IF v_from_balance < p_amount THEN
+    RAISE EXCEPTION 'Insufficient funds: balance % < amount %', v_from_balance, p_amount;
+  END IF;
 
-  DELETE FROM orders
-  WHERE created_at < NOW() - (p_days || ' days')::INTERVAL
-    AND status IN ('delivered', 'cancelled');
+  UPDATE accounts SET balance = balance - p_amount WHERE id = p_from_id;
+  UPDATE accounts SET balance = balance + p_amount WHERE id = p_to_id;
 
-  RAISE NOTICE 'Archived % orders', v_count;
+  INSERT INTO transfer_log (from_id, to_id, amount, transferred_at)
+  VALUES (p_from_id, p_to_id, p_amount, NOW());
+
+  RAISE NOTICE 'Transfer complete: % → % for %', p_from_id, p_to_id, p_amount;
 END;
-$$;
+$$ LANGUAGE plpgsql;
 
--- Call with CALL
-CALL archive_old_orders(365);
+-- Call it
+SELECT transfer_funds(1, 2, 100.00);
 ```
 
 ## Triggers
 
-Triggers automatically execute a function before or after DML events.
+Triggers execute stored code automatically when data changes.
+
+### PostgreSQL Trigger
 
 ```sql
--- Trigger function: automatically update updated_at column
-CREATE OR REPLACE FUNCTION set_updated_at()
+-- Trigger function (must return trigger)
+CREATE OR REPLACE FUNCTION update_updated_at()
 RETURNS TRIGGER AS $$
 BEGIN
   NEW.updated_at = NOW();
@@ -278,136 +251,167 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Apply to any table
-CREATE TRIGGER users_set_updated_at
-BEFORE UPDATE ON users
-FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+-- Attach trigger to a table
+CREATE TRIGGER trg_products_updated_at
+  BEFORE UPDATE ON products
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at();
 
 -- Audit log trigger
-CREATE TABLE audit_log (
-  id         BIGSERIAL PRIMARY KEY,
-  table_name TEXT NOT NULL,
-  operation  TEXT NOT NULL,
-  old_data   JSONB,
-  new_data   JSONB,
-  changed_by TEXT,
-  changed_at TIMESTAMPTZ DEFAULT NOW()
-);
-
 CREATE OR REPLACE FUNCTION audit_changes()
 RETURNS TRIGGER AS $$
 BEGIN
-  INSERT INTO audit_log (table_name, operation, old_data, new_data, changed_by)
-  VALUES (
-    TG_TABLE_NAME,
-    TG_OP,
-    CASE WHEN TG_OP = 'DELETE' THEN row_to_json(OLD)::jsonb ELSE NULL END,
-    CASE WHEN TG_OP != 'DELETE' THEN row_to_json(NEW)::jsonb ELSE NULL END,
-    current_user
-  );
-  RETURN COALESCE(NEW, OLD);
+  IF TG_OP = 'DELETE' THEN
+    INSERT INTO audit_log (table_name, operation, old_data, changed_by, changed_at)
+    VALUES (TG_TABLE_NAME, 'DELETE', row_to_json(OLD), current_user, NOW());
+    RETURN OLD;
+  ELSE
+    INSERT INTO audit_log (table_name, operation, old_data, new_data, changed_by, changed_at)
+    VALUES (TG_TABLE_NAME, TG_OP, row_to_json(OLD), row_to_json(NEW), current_user, NOW());
+    RETURN NEW;
+  END IF;
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER users_audit
-AFTER INSERT OR UPDATE OR DELETE ON users
-FOR EACH ROW EXECUTE FUNCTION audit_changes();
+CREATE TRIGGER trg_orders_audit
+  AFTER INSERT OR UPDATE OR DELETE ON orders
+  FOR EACH ROW
+  EXECUTE FUNCTION audit_changes();
 ```
 
-## EXPLAIN and Query Plans
+## EXPLAIN — Query Planning
+
+`EXPLAIN` shows how the database plans to execute a query without running it. `EXPLAIN ANALYZE` runs it and shows actual times.
 
 ```sql
--- Basic EXPLAIN (shows plan without executing)
+-- Show query plan (PostgreSQL)
 EXPLAIN SELECT * FROM orders WHERE customer_id = 42;
 
--- EXPLAIN ANALYZE (executes query and shows actual timing)
+-- Run and show actual performance
 EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
-SELECT o.id, c.name, o.total
+SELECT o.id, c.name, SUM(oi.unit_price * oi.quantity)
 FROM orders o
 JOIN customers c ON c.id = o.customer_id
-WHERE o.status = 'delivered'
-  AND c.country = 'US'
-ORDER BY o.total DESC
+JOIN order_items oi ON oi.order_id = o.id
+WHERE o.status = 'completed'
+GROUP BY o.id, c.name
+ORDER BY 3 DESC
 LIMIT 10;
 ```
 
-Key plan nodes to understand:
+### Reading EXPLAIN Output
 
-| Node               | Meaning                                            |
-| ------------------ | -------------------------------------------------- |
-| `Seq Scan`         | Full table scan — check if index would help        |
-| `Index Scan`       | Uses an index to find rows                         |
-| `Index Only Scan`  | All data from index — no heap access               |
-| `Bitmap Heap Scan` | Used when index finds many rows                    |
-| `Hash Join`        | Join using a hash table in memory                  |
-| `Merge Join`       | Join on sorted inputs                              |
-| `Nested Loop`      | For each outer row, scan inner — good with indexes |
+```
+Sort  (cost=1234.56..1234.78 rows=89 width=48) (actual time=12.34..12.45 rows=10 loops=1)
+  -> HashAggregate  (cost=1228.00..1230.00 rows=89 width=48)
+      -> Hash Join  (cost=45.00..900.00 rows=1200 width=40)
+          Hash Cond: (oi.order_id = o.id)
+          -> Seq Scan on order_items oi  (cost=0..800 rows=15000 width=24)
+          -> Hash  (cost=44.00..44.00 rows=89 width=28)
+              -> Index Scan using idx_orders_status on orders o  (cost=0.29..44 rows=89 width=28)
+                  Index Cond: (status = 'completed')
+```
+
+Key terms:
+- **Seq Scan**: Full table scan — may indicate a missing index
+- **Index Scan**: Using a B-tree index to find rows
+- **Index Only Scan**: All data served from the index (no table access)
+- **Bitmap Heap Scan**: Multiple index entries collected, then table accessed
+- **Hash Join**: Build hash table from smaller table, probe with larger
+- **Merge Join**: Both inputs sorted on join key; efficient for large sorted sets
+- **Nested Loop**: For each row in outer, scan inner — good for small inner tables
+- `cost=start..total`: Estimated cost (arbitrary units)
+- `actual time=start..end`: Measured time in milliseconds
+- `rows=N`: Number of rows returned
 
 ## Normalization
 
+Normalization organizes tables to reduce data redundancy and improve data integrity.
+
 ### First Normal Form (1NF)
 
-Every column contains atomic values; no repeating groups:
+**Rule**: Each column contains only atomic (indivisible) values; no repeating groups.
 
 ```sql
--- VIOLATES 1NF: storing multiple values in one column
--- BAD: phones = '555-1234, 555-5678'
--- GOOD: separate rows in a related table
-CREATE TABLE user_phones (
-  user_id    BIGINT REFERENCES users(id),
-  phone_type TEXT,     -- 'mobile', 'home', 'work'
-  phone_number TEXT NOT NULL,
-  PRIMARY KEY (user_id, phone_type)
+-- VIOLATES 1NF: phone_numbers is multi-valued
+CREATE TABLE contacts_bad (
+  id           INT PRIMARY KEY,
+  name         TEXT,
+  phone_numbers TEXT   -- "555-1234, 555-5678" — NOT atomic!
+);
+
+-- SATISFIES 1NF: separate table for phone numbers
+CREATE TABLE contacts (
+  id   INT PRIMARY KEY,
+  name TEXT NOT NULL
+);
+
+CREATE TABLE contact_phones (
+  contact_id   INT REFERENCES contacts(id),
+  phone_number VARCHAR(20) NOT NULL,
+  phone_type   TEXT,
+  PRIMARY KEY (contact_id, phone_number)
 );
 ```
 
 ### Second Normal Form (2NF)
 
-1NF + every non-key column depends on the **entire** primary key (no partial dependencies):
+**Rule**: 1NF + every non-key attribute is fully dependent on the entire primary key (no partial dependencies).
 
 ```sql
--- VIOLATES 2NF if PK is (order_id, product_id) but product_name only depends on product_id
--- BAD: order_items(order_id, product_id, quantity, product_name, product_price)
--- GOOD: separate products table
+-- VIOLATES 2NF: product_name depends only on product_id, not the full PK
+CREATE TABLE order_items_bad (
+  order_id     INT,
+  product_id   INT,
+  product_name TEXT,   -- Depends only on product_id — partial dependency!
+  quantity     INT,
+  PRIMARY KEY (order_id, product_id)
+);
+
+-- SATISFIES 2NF: move product_name to products table
+CREATE TABLE products    (id INT PRIMARY KEY, name TEXT NOT NULL);
 CREATE TABLE order_items (
-  order_id   BIGINT REFERENCES orders(id),
-  product_id BIGINT REFERENCES products(id),  -- product details in products table
-  quantity   INTEGER NOT NULL,
-  unit_price NUMERIC(10,2) NOT NULL,           -- snapshot price at time of order
+  order_id   INT REFERENCES orders(id),
+  product_id INT REFERENCES products(id),
+  quantity   INT NOT NULL,
   PRIMARY KEY (order_id, product_id)
 );
 ```
 
 ### Third Normal Form (3NF)
 
-2NF + no transitive dependencies (non-key columns must depend only on the key):
+**Rule**: 2NF + no transitive dependencies (non-key attributes depend only on the primary key, not on other non-key attributes).
 
 ```sql
--- VIOLATES 3NF: zip_code -> city -> state (city depends on zip, state depends on city)
--- BAD: users(id, name, zip_code, city, state)
--- GOOD: separate address lookup
+-- VIOLATES 3NF: zip_code → city (transitive dependency)
+CREATE TABLE customers_bad (
+  id       INT PRIMARY KEY,
+  name     TEXT,
+  zip_code VARCHAR(10),
+  city     TEXT,       -- Determined by zip_code, not by id — transitive!
+  state    TEXT        -- Also determined by zip_code
+);
+
+-- SATISFIES 3NF: move city/state to a zip_codes table
 CREATE TABLE zip_codes (
   zip_code VARCHAR(10) PRIMARY KEY,
   city     TEXT NOT NULL,
   state    CHAR(2) NOT NULL
 );
-CREATE TABLE users (
-  id       BIGINT PRIMARY KEY,
-  name     TEXT,
+
+CREATE TABLE customers (
+  id       INT PRIMARY KEY,
+  name     TEXT NOT NULL,
   zip_code VARCHAR(10) REFERENCES zip_codes(zip_code)
 );
 ```
 
-### Boyce-Codd Normal Form (BCNF)
+### BCNF (Boyce-Codd Normal Form)
 
-Stricter than 3NF: every determinant must be a candidate key:
+**Rule**: For every non-trivial functional dependency X → Y, X must be a superkey.
 
-```sql
--- Every column's value must be determined by a key
--- A table with overlapping candidate keys can violate 3NF but satisfy BCNF needs restructuring
--- Practical rule: if EXPLAIN shows unexpected joins, re-examine your normalization
-```
+BCNF handles edge cases where 3NF is insufficient due to overlapping candidate keys.
 
 :::tip[When to Denormalize]
-Normalization reduces redundancy and ensures consistency. But for read-heavy analytics workloads, controlled denormalization (storing pre-computed aggregates, materialized views, or summary tables) can dramatically improve performance. Always profile before denormalizing.
+High normalization is ideal for write-heavy OLTP systems. For read-heavy analytics and reporting (OLAP), deliberate denormalization can dramatically improve query performance by reducing joins. Always profile before denormalizing.
 :::

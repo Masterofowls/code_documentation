@@ -1,506 +1,442 @@
 ---
 title: MySQL Indexes
-description: Deep dive into MySQL index types, InnoDB clustered and secondary indexes, composite indexes, FULLTEXT, EXPLAIN interpretation, and query optimization.
+description: Deep dive into MySQL index types, InnoDB clustered indexes, composite indexes, FULLTEXT search, EXPLAIN analysis, and query optimization.
 sidebar:
   order: 4
 tags: [database, sql]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
 # MySQL Indexes
 
-Indexes are the single most important factor in MySQL query performance. A well-indexed schema can make queries thousands of times faster; a missing index on a large table causes a full table scan on every query.
+Indexes are data structures that allow MySQL to find rows matching a `WHERE` clause without scanning the entire table. Understanding how MySQL uses indexes — and when it doesn't — is the foundation of query optimization.
 
-## Index Types
+## Index Types in MySQL
 
 ### B-Tree (Default)
 
-InnoDB uses B-tree indexes for PRIMARY, UNIQUE, INDEX, and KEY. B-tree indexes work for:
+The default index type for InnoDB and MyISAM. B-Tree (balanced tree) indexes support:
+- Equality lookups: `WHERE id = 42`
+- Range queries: `WHERE price BETWEEN 10 AND 100`
+- Prefix lookups: `WHERE name LIKE 'John%'`
+- Sorting (can avoid filesort): `ORDER BY indexed_col`
+- `IS NULL` and `IS NOT NULL`
 
-- Equality: `WHERE col = val`
-- Range: `WHERE col BETWEEN a AND b`, `WHERE col > val`
-- Prefix: `WHERE col LIKE 'prefix%'` (NOT `'%suffix'`)
-- Sorting: `ORDER BY col` (if index order matches)
-- Covering: all needed columns are in the index
+**Cannot** use B-Tree for `LIKE '%suffix'` or `LIKE '%middle%'`.
 
-```sql
--- Basic B-tree index
-CREATE INDEX idx_email ON users(email);
-ALTER TABLE users ADD INDEX idx_email (email);
+### HASH (MEMORY engine only)
 
--- Composite B-tree index
-CREATE INDEX idx_status_created ON orders(status, created_at);
+HASH indexes are only available in the `MEMORY` storage engine and for NDB Cluster.
 
--- Unique index
-CREATE UNIQUE INDEX idx_email_unique ON users(email);
-ALTER TABLE users ADD UNIQUE (email);
+- Only support exact equality lookups (`=`, `IN`)
+- Cannot support range queries or ORDER BY
+- Generally faster than B-Tree for equality lookups in the MEMORY engine
+- InnoDB has an **Adaptive Hash Index** (AHI) built internally, but you cannot create HASH indexes manually in InnoDB
 
--- Index on expression (MySQL 8.0+)
-CREATE INDEX idx_lower_email ON users((LOWER(email)));
-```
+### FULLTEXT
 
-### HASH Indexes
+Full-text search indexes allow relevance-based text searching. Available in both MyISAM (older) and InnoDB (since 5.6).
 
-Available only in the MEMORY storage engine. Hash indexes are O(1) for exact equality lookups but **cannot** be used for range queries or sorting. InnoDB has an _adaptive hash index_ (automatically built in-memory for frequently accessed pages) that cannot be created manually.
+### SPATIAL
 
-```sql
--- HASH index only in MEMORY tables
-CREATE TABLE session_cache (
-  session_id CHAR(32) NOT NULL,
-  data TEXT,
-  expires_at DATETIME,
-  PRIMARY KEY (session_id)
-) ENGINE=MEMORY;
+For geometry data types (`POINT`, `LINESTRING`, `POLYGON`). Used with spatial queries and the InnoDB/MyISAM engines.
 
-CREATE INDEX idx_session USING HASH ON session_cache(session_id);
-```
+## InnoDB Clustered Index (Primary Key)
 
-### FULLTEXT Indexes
-
-For full-text search across large text columns. Available in InnoDB (MySQL 5.6+) and MyISAM.
+In InnoDB, the **primary key IS the clustered index** — the table data is physically stored in primary key order. This is a fundamental architectural difference from MyISAM.
 
 ```sql
-CREATE TABLE articles (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  title VARCHAR(500),
-  body LONGTEXT,
-  FULLTEXT INDEX idx_ft_content (title, body)
-) ENGINE=InnoDB;
-
--- Add FULLTEXT to existing table
-ALTER TABLE articles ADD FULLTEXT INDEX idx_ft_body (body);
-```
-
-### SPATIAL Indexes
-
-For geometric data types (GEOMETRY, POINT, LINESTRING, POLYGON). Requires NOT NULL columns and uses R-tree indexing.
-
-```sql
-CREATE TABLE locations (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  name VARCHAR(255),
-  coordinates POINT NOT NULL,
-  SPATIAL INDEX idx_coordinates (coordinates)
-) ENGINE=InnoDB;
-```
-
-## InnoDB and the Clustered Index
-
-Understanding how InnoDB stores data is crucial to understanding index performance.
-
-### Primary Key = Clustered Index
-
-In InnoDB, **the primary key IS the table**. The entire row data is stored in the B-tree leaf pages of the primary key index. There is no separate "heap" storage — all data is physically ordered by the primary key.
-
-```sql
--- Good: compact integer PK — rows are stored in insertion order
 CREATE TABLE orders (
-  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  user_id INT UNSIGNED NOT NULL,
-  -- ...
-  PRIMARY KEY (id)
+  -- This is the clustered index: data rows are stored ordered by order_id
+  order_id    INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id     INT UNSIGNED NOT NULL,
+  total       DECIMAL(10,2),
+  created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_user (user_id),
+  INDEX idx_created (created_at)
+);
+```
+
+Key implications:
+
+| Consideration | Effect |
+|---|---|
+| PK lookup | Extremely fast (data is the index) |
+| Range scans on PK | Very efficient (sequential I/O) |
+| Secondary index lookup | Two lookups: secondary index → PK → clustered data |
+| PK should be small | PK value is stored in every secondary index leaf |
+| Monotonically increasing PK | Prevents page splits and fragmentation |
+| UUIDs as PK | Random insertion causes heavy page splits; use UUIDv7 or `UUID_TO_BIN()` with `swap_flag=1` |
+
+:::caution[Hidden Clustered Index]
+If you don't define a PRIMARY KEY, InnoDB looks for a NOT NULL UNIQUE index to use as the clustered key. If none exists, InnoDB creates a hidden 6-byte `rowid` field as the clustered key. You lose the ability to reference rows predictably. **Always define an explicit PRIMARY KEY.**
+:::
+
+### Secondary Index Structure in InnoDB
+
+```sql
+-- Every secondary index leaf node stores the PK value (not a physical row pointer)
+-- Lookup: secondary index → find PK → go to clustered index → fetch row
+-- This is called a "double lookup" or "index dive"
+
+-- Covering index: if ALL needed columns are in the index, no clustered lookup needed
+CREATE INDEX idx_user_created ON orders (user_id, created_at);
+
+-- This query uses only the index (covering):
+SELECT user_id, created_at FROM orders WHERE user_id = 42;
+
+-- This requires a table lookup (total not in index):
+SELECT user_id, created_at, total FROM orders WHERE user_id = 42;
+```
+
+## Creating Indexes
+
+```sql
+-- Create index at table creation time
+CREATE TABLE products (
+  id          INT AUTO_INCREMENT PRIMARY KEY,
+  category_id INT,
+  name        VARCHAR(255) NOT NULL,
+  price       DECIMAL(10,2),
+  sku         VARCHAR(50),
+  created_at  DATETIME,
+  
+  UNIQUE KEY uk_sku (sku),
+  INDEX idx_category (category_id),
+  INDEX idx_price (price),
+  INDEX idx_cat_price (category_id, price)  -- Composite
 );
 
--- Bad: UUID as PK causes random I/O and index fragmentation
--- Random UUID inserts scatter across the B-tree, causing page splits
-CREATE TABLE orders (
-  id CHAR(36) NOT NULL DEFAULT (UUID()),  -- random ordering!
-  -- ...
-  PRIMARY KEY (id)
-);
--- If you must use UUID: use UUID_TO_BIN(UUID(), 1) to store as ordered BINARY(16)
--- The second argument `1` swaps time_hi to improve sequential inserts
-id BINARY(16) NOT NULL DEFAULT (UUID_TO_BIN(UUID(), 1)),
-PRIMARY KEY (id)
-```
+-- Add index to existing table
+CREATE INDEX idx_name ON products (name);
+ALTER TABLE products ADD INDEX idx_created (created_at);
+ALTER TABLE products ADD UNIQUE INDEX uk_email (email);
 
-If a table has no PRIMARY KEY, InnoDB uses the first UNIQUE NOT NULL index. If neither exists, InnoDB silently creates a hidden 6-byte rowid (GEN_CLUST_INDEX) that you cannot query or index on.
-
-:::caution[Always Define a Primary Key]
-Always explicitly define a PRIMARY KEY. Tables without a primary key:
-
-- Use a hidden rowid you can't reference in queries
-- Have no natural clustering order
-- Can cause performance issues in replication and GROUP BY operations
-  :::
-
-### Secondary Indexes in InnoDB
-
-Every secondary index in InnoDB stores the **primary key value** as the row pointer (not a physical page pointer). This means:
-
-1. Looking up a row via a secondary index requires two B-tree traversals: first the secondary index (to find the PK), then the primary key index (to fetch the row). This is called a **"double lookup"** or **"bookmark lookup"**.
-2. A large primary key means **all secondary indexes are larger** (they each store a copy of the PK).
-
-```sql
--- This secondary index lookup requires 2 B-tree traversals:
-SELECT * FROM orders WHERE status = 'pending';
--- Step 1: Traverse idx_status B-tree → find PK values where status='pending'
--- Step 2: For each PK found, traverse the clustered index to get the full row
-
--- A covering index eliminates step 2:
-CREATE INDEX idx_status_covering ON orders(status, user_id, created_at, total);
-SELECT user_id, created_at, total FROM orders WHERE status = 'pending';
--- Step 1: Traverse idx_status_covering → all needed columns are IN the index
--- No step 2 needed!
-```
-
-## Creating and Managing Indexes
-
-```sql
--- Create index
-CREATE INDEX idx_name ON table_name(col1, col2);
-CREATE UNIQUE INDEX idx_name ON table_name(col1);
-ALTER TABLE table_name ADD INDEX idx_name (col1);
-ALTER TABLE table_name ADD UNIQUE (col1, col2);
-
--- Drop index
-DROP INDEX idx_name ON table_name;
-ALTER TABLE table_name DROP INDEX idx_name;
-
--- Show indexes on a table
-SHOW INDEXES FROM orders\G
-SHOW INDEX FROM orders FROM myapp\G
-
--- Detailed index info from information_schema
-SELECT
-  INDEX_NAME,
-  SEQ_IN_INDEX,
-  COLUMN_NAME,
-  NULLABLE,
-  INDEX_TYPE,
-  CARDINALITY
-FROM information_schema.STATISTICS
-WHERE TABLE_SCHEMA = 'myapp' AND TABLE_NAME = 'orders'
-ORDER BY INDEX_NAME, SEQ_IN_INDEX;
+-- Drop an index
+DROP INDEX idx_name ON products;
+ALTER TABLE products DROP INDEX idx_name;
+ALTER TABLE products DROP PRIMARY KEY;  -- Only if auto_increment is removed first
 ```
 
 ## Composite Indexes and the Leftmost Prefix Rule
 
-A composite (multi-column) index on `(a, b, c)` can be used for queries that filter on:
+A composite (multi-column) index `(a, b, c)` can satisfy queries on:
+- `a`
+- `a, b`
+- `a, b, c`
 
-- `a` alone
-- `a, b` together
-- `a, b, c` together
-- `a, c` — **only the `a` part** (MySQL can't skip columns)
-- ❌ `b` alone (leftmost prefix rule violated)
-- ❌ `c` alone
-- ❌ `b, c` together
+But **not** on `b` alone, `c` alone, or `b, c` — unless all of these are fixed by equality predicates.
 
 ```sql
-CREATE INDEX idx_composite ON orders(status, user_id, created_at);
+CREATE INDEX idx_composite ON orders (user_id, status, created_at);
 
--- ✅ Uses the full index
-SELECT * FROM orders WHERE status = 'pending' AND user_id = 42 AND created_at > '2024-01-01';
-
--- ✅ Uses first two columns (status, user_id)
-SELECT * FROM orders WHERE status = 'pending' AND user_id = 42;
-
--- ✅ Uses first column only (status)
-SELECT * FROM orders WHERE status = 'pending' ORDER BY created_at;
--- Actually: can use (status) part for filtering, then filesort for ORDER BY
--- Better: use ORDER BY created_at only when status is equality, then index covers it
-
--- ❌ Does NOT use the index (user_id is not leftmost)
+-- Uses the index (leftmost prefix: user_id)
 SELECT * FROM orders WHERE user_id = 42;
 
--- ❌ Does NOT use the index
-SELECT * FROM orders WHERE created_at > '2024-01-01';
+-- Uses the index (user_id + status)
+SELECT * FROM orders WHERE user_id = 42 AND status = 'pending';
+
+-- Uses the full index
+SELECT * FROM orders WHERE user_id = 42 AND status = 'pending' AND created_at > '2024-01-01';
+
+-- Uses the index only for user_id (range stops reuse for subsequent columns)
+SELECT * FROM orders WHERE user_id = 42 AND created_at > '2024-01-01';
+
+-- Does NOT use the composite index at all
+SELECT * FROM orders WHERE status = 'pending';  -- status is not the leftmost column
 ```
 
-### Selectivity and Column Order
-
-```sql
--- Check cardinality (higher = more selective = better leftmost column)
-SELECT
-  COLUMN_NAME,
-  CARDINALITY,
-  CARDINALITY / TABLE_ROWS AS selectivity
-FROM information_schema.STATISTICS s
-JOIN information_schema.TABLES t USING (TABLE_SCHEMA, TABLE_NAME)
-WHERE TABLE_SCHEMA = 'myapp' AND TABLE_NAME = 'orders';
-
--- Rule of thumb: put the most selective column FIRST in composite indexes
--- Exception: if both columns appear in WHERE, order doesn't matter much for filtering
--- But ORDER BY column ordering matters for sort optimization
-```
+:::tip[Composite Index Column Order]
+Place equality columns first, then range columns. High-cardinality columns before low-cardinality ones generally improves selectivity. Column order must match the `WHERE`, `ORDER BY`, and `GROUP BY` clauses to be effective.
+:::
 
 ## Covering Indexes
 
-A covering index contains **all columns** needed by a query (in SELECT, WHERE, ORDER BY, GROUP BY). The query can be answered entirely from the index without touching the primary key B-tree.
+A covering index contains all the columns that a query needs, so MySQL can satisfy the query entirely from the index without reading the actual table rows.
 
 ```sql
--- Example: frequently run report query
-SELECT user_id, status, SUM(total) AS revenue, COUNT(*) AS order_count
-FROM orders
-WHERE created_at BETWEEN '2024-01-01' AND '2024-12-31'
-GROUP BY user_id, status;
+-- Query: find recent orders for a user, return just dates
+SELECT created_at FROM orders WHERE user_id = 42 ORDER BY created_at DESC LIMIT 10;
 
--- Covering index for this query
-CREATE INDEX idx_covering_report
-  ON orders (created_at, user_id, status, total);
--- All columns in WHERE (created_at), GROUP BY (user_id, status),
--- and SELECT aggregate (total) are in the index
+-- A covering index for this query:
+CREATE INDEX idx_user_created ON orders (user_id, created_at);
+
+-- EXPLAIN will show "Using index" in Extra column — means covering index used
+```
+
+## UNIQUE Indexes
+
+```sql
+-- NULL is considered distinct from NULL in UNIQUE indexes
+-- Multiple NULL values are allowed even in a UNIQUE column
+CREATE TABLE users (
+  id       INT AUTO_INCREMENT PRIMARY KEY,
+  email    VARCHAR(255),
+  username VARCHAR(50),
+  UNIQUE KEY uk_email (email),
+  UNIQUE KEY uk_username_email (username, email)  -- Composite unique
+);
+
+-- Check for duplicate values before adding UNIQUE index
+SELECT email, COUNT(*) FROM users GROUP BY email HAVING COUNT(*) > 1;
 ```
 
 ## Invisible Indexes (MySQL 8.0+)
 
-Invisible indexes exist and are maintained by the optimizer but are **not used by the query optimizer**. This lets you test the impact of removing an index without actually dropping it.
+Invisible indexes are maintained by InnoDB but ignored by the query optimizer. This lets you safely test the impact of dropping an index before actually removing it.
 
 ```sql
--- Make an index invisible
-ALTER TABLE orders ALTER INDEX idx_status INVISIBLE;
+-- Create an invisible index
+CREATE INDEX idx_test ON orders (total) INVISIBLE;
 
--- Query optimizer now ignores idx_status
--- Run your queries and check EXPLAIN
+-- Make an existing index invisible
+ALTER TABLE orders ALTER INDEX idx_old_index INVISIBLE;
 
 -- Make it visible again
-ALTER TABLE orders ALTER INDEX idx_status VISIBLE;
+ALTER TABLE orders ALTER INDEX idx_old_index VISIBLE;
 
--- Or create invisible from the start
-CREATE INDEX idx_test ON orders(status) INVISIBLE;
-
--- Force a specific session to use invisible indexes (for testing)
+-- Force optimizer to consider invisible indexes (for testing)
 SET SESSION optimizer_switch = 'use_invisible_indexes=on';
+
+-- Show index visibility
+SELECT INDEX_NAME, IS_VISIBLE
+FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'mydb' AND TABLE_NAME = 'orders';
 ```
 
-## Functional (Expression) Indexes (MySQL 8.0+)
+## Functional Indexes (MySQL 8.0+)
+
+Index on an expression rather than a column value.
 
 ```sql
--- Index on a function expression
-CREATE INDEX idx_lower_email ON users((LOWER(email)));
--- Now this query can use the index:
-SELECT * FROM users WHERE LOWER(email) = 'alice@example.com';
+-- Index on the year of a date (without generated column)
+CREATE INDEX idx_year_created ON orders ((YEAR(created_at)));
 
--- Index on JSON path
-CREATE INDEX idx_json_price ON products((CAST(data->>'$.price' AS DECIMAL(10,2))));
+-- Index on lowercase email for case-insensitive lookups
+CREATE INDEX idx_lower_email ON users ((LOWER(email)));
 
--- Multi-valued index for JSON arrays (MySQL 8.0.17+)
-CREATE INDEX idx_tags ON articles ((CAST(tags AS CHAR(100) ARRAY)));
-SELECT * FROM articles WHERE JSON_CONTAINS(tags, '"mysql"');
+-- Query MUST match the expression exactly to use the index
+SELECT * FROM orders WHERE YEAR(created_at) = 2024;  -- Uses idx_year_created
+SELECT * FROM users WHERE LOWER(email) = 'alice@example.com';  -- Uses idx_lower_email
 ```
 
-## FULLTEXT Search
+## FULLTEXT Indexes
 
 ```sql
--- Create FULLTEXT index
-ALTER TABLE articles ADD FULLTEXT idx_ft (title, body);
+CREATE TABLE articles (
+  id      INT AUTO_INCREMENT PRIMARY KEY,
+  title   VARCHAR(255) NOT NULL,
+  body    MEDIUMTEXT,
+  FULLTEXT INDEX ft_content (title, body)
+);
 
--- Natural language mode (default): relevance ranking
+-- Natural Language Mode (default): relevance-ranked results
 SELECT id, title,
-  MATCH(title, body) AGAINST ('mysql performance tuning') AS relevance
+  MATCH(title, body) AGAINST ('mysql indexing') AS relevance
 FROM articles
-WHERE MATCH(title, body) AGAINST ('mysql performance tuning')
+WHERE MATCH(title, body) AGAINST ('mysql indexing')
 ORDER BY relevance DESC;
 
--- Boolean mode: precise control
-SELECT id, title FROM articles
+-- Boolean Mode: supports +, -, "", *, ~
+SELECT * FROM articles
 WHERE MATCH(title, body) AGAINST (
-  '+mysql +index -mongodb "full text"'
+  '+mysql -oracle "full text" index*'
   IN BOOLEAN MODE
 );
--- + = must include
--- - = must exclude
--- "phrase" = exact phrase
--- * = wildcard (word*)
--- > / < = increase/decrease relevance
+-- + required term
+-- - excluded term
+-- "phrase" exact phrase
+-- word* prefix wildcard
+-- ~word lower relevance (but don't exclude)
 
--- Query expansion: widens search using words from top results
-SELECT id, title FROM articles
-WHERE MATCH(title, body) AGAINST (
-  'mysql' WITH QUERY EXPANSION
-);
+-- Query Expansion: find related terms (two passes)
+SELECT * FROM articles
+WHERE MATCH(title, body) AGAINST ('database' WITH QUERY EXPANSION);
 
 -- Minimum word length (default 3 for InnoDB, 4 for MyISAM)
-SHOW VARIABLES LIKE 'innodb_ft_min_token_size';    -- default 3
--- Words shorter than minimum are not indexed
--- Change requires rebuilding the index: DROP INDEX + CREATE INDEX
+SHOW VARIABLES LIKE 'innodb_ft_min_token_size';
+-- Words shorter than this are not indexed
 ```
 
-## EXPLAIN Output
+## EXPLAIN Analysis
 
-`EXPLAIN` is the primary tool for understanding how MySQL executes a query.
+`EXPLAIN` shows how MySQL plans to execute a query.
 
 ```sql
 -- Basic EXPLAIN
-EXPLAIN SELECT * FROM orders WHERE status = 'pending' AND user_id = 42\G
+EXPLAIN SELECT * FROM orders WHERE user_id = 42\G
 
--- Extended output (MySQL 5.6+, included in EXPLAIN by default in 8.0)
-EXPLAIN FORMAT=JSON SELECT * FROM orders WHERE status = 'pending'\G
+-- EXPLAIN FORMAT=JSON (more detail)
+EXPLAIN FORMAT=JSON SELECT * FROM orders WHERE user_id = 42;
 
--- EXPLAIN ANALYZE (MySQL 8.0.18+): actually runs the query and shows real stats
-EXPLAIN ANALYZE SELECT * FROM orders WHERE status = 'pending' AND user_id = 42\G
+-- EXPLAIN ANALYZE (MySQL 8.0.18+): actually executes and shows real timing
+EXPLAIN ANALYZE SELECT * FROM orders WHERE user_id = 42\G
 ```
 
-### EXPLAIN Columns
+### Key EXPLAIN Columns
 
-| Column          | Description                                           |
-| --------------- | ----------------------------------------------------- |
-| `id`            | SELECT identifier; same id = same SELECT              |
-| `select_type`   | SIMPLE, PRIMARY, SUBQUERY, DERIVED, UNION             |
-| `table`         | Table being accessed                                  |
-| `type`          | **Access type** (see below)                           |
-| `possible_keys` | Indexes that could be used                            |
-| `key`           | Index actually chosen                                 |
-| `key_len`       | Bytes of index used (reflects which columns are used) |
-| `ref`           | Columns or constants compared to key                  |
-| `rows`          | Estimated rows examined                               |
-| `filtered`      | Estimated % of rows passing WHERE conditions          |
-| `Extra`         | Additional info (Using index, Using filesort, etc.)   |
+| Column | Description |
+|---|---|
+| `id` | Query identifier (higher = inner subquery) |
+| `select_type` | SIMPLE, PRIMARY, SUBQUERY, DERIVED, UNION |
+| `table` | Table being accessed |
+| `type` | Access type (see below) |
+| `possible_keys` | Indexes MySQL considered |
+| `key` | Index MySQL actually chose |
+| `key_len` | Bytes of key used (smaller = fewer columns used) |
+| `ref` | Column or constant compared to key |
+| `rows` | Estimated rows to examine |
+| `filtered` | % of rows filtered after conditions |
+| `Extra` | Important additional information |
 
-### Access Types (type column, best to worst)
+### Access Types (type column) — Best to Worst
 
-| type          | Description                                             |
-| ------------- | ------------------------------------------------------- |
-| `system`      | Table has exactly 1 row                                 |
-| `const`       | Single row via PRIMARY KEY or UNIQUE equality           |
-| `eq_ref`      | One row from each join, via PRIMARY KEY or UNIQUE       |
-| `ref`         | Multiple rows via non-unique index equality             |
-| `fulltext`    | FULLTEXT index used                                     |
-| `ref_or_null` | ref + IS NULL                                           |
-| `index_merge` | Multiple indexes merged                                 |
-| `range`       | Index range scan (BETWEEN, >, &lt;, IN, LIKE 'prefix%') |
-| `index`       | Full index scan (fast, but still all rows)              |
-| `ALL`         | **Full table scan — no useful index found**             |
-
-:::caution[type=ALL on Large Tables]
-`type=ALL` on a table with millions of rows means every query reads every row. Add an index. For small tables (< ~1000 rows), a full table scan may still be faster than using an index.
-:::
+| Type | Description |
+|---|---|
+| `system` | Single-row system table |
+| `const` | PK or UNIQUE lookup — 1 row at most |
+| `eq_ref` | PK or UNIQUE join — 1 row per row from outer |
+| `ref` | Non-unique index scan with equality |
+| `fulltext` | FULLTEXT index scan |
+| `ref_or_null` | Like `ref` but also looks for NULL |
+| `index_merge` | Multiple indexes merged |
+| `range` | Index range scan |
+| `index` | Full index scan (reads all index entries) |
+| `ALL` | Full table scan ⚠️ |
 
 ### Extra Column Values
 
-| Extra value                    | Meaning                                                           |
-| ------------------------------ | ----------------------------------------------------------------- |
-| `Using index`                  | ✅ Covering index — no row lookup needed                          |
-| `Using where`                  | WHERE filter applied after index scan                             |
-| `Using index condition`        | Index Condition Pushdown (ICP) — filter applied in storage engine |
-| `Using filesort`               | ⚠️ Sort operation in memory or disk (no index for ORDER BY)       |
-| `Using temporary`              | ⚠️ Temp table created (often for GROUP BY or DISTINCT)            |
-| `Using join buffer`            | Join buffering (Block Nested Loop) — join lacks index             |
-| `Select tables optimized away` | ✅ Aggregate query answered from index alone                      |
-| `Impossible WHERE`             | WHERE is always false (no rows)                                   |
-| `Using MRR`                    | Multi-Range Read optimization                                     |
+```sql
+-- "Using index" — covering index (no table lookup needed, FAST)
+-- "Using where" — MySQL filters rows after reading them
+-- "Using index condition" — Index Condition Pushdown (ICP, 5.6+)
+-- "Using filesort" — cannot use index for ORDER BY (potentially slow)
+-- "Using temporary" — temp table needed (GROUP BY, UNION, etc.)
+-- "Using join buffer" — Block Nested Loop join (no index on join column)
+-- "Impossible WHERE" — WHERE is always false (no rows can match)
+-- "Select tables optimized away" — query resolved by optimizer alone
+```
 
 ### key_len Calculation
 
-`key_len` tells you how many bytes (and therefore how many columns) of a composite index are actually being used.
+`key_len` tells you how many bytes of a composite index are being used:
 
 ```sql
--- Table: idx_composite ON (status VARCHAR(20), user_id INT, created_at DATETIME)
--- With utf8mb4: VARCHAR(20) = 20 * 4 bytes + 2 bytes length prefix = 82 bytes
--- NOT NULL INT = 4 bytes
--- NOT NULL DATETIME = 8 bytes
+-- INT: 4 bytes
+-- INT NOT NULL: 4 bytes
+-- INT nullable: 4 + 1 = 5 bytes (1 byte for NULL flag)
+-- VARCHAR(100) utf8mb4 NOT NULL: 100 * 4 + 2 = 402 bytes (4 bytes/char + 2 length)
+-- DATETIME: 8 bytes
+-- DATE: 3 bytes
 
--- If key_len = 86 → using (status, user_id) = 82 + 4 = 86
--- If key_len = 82 → using (status) only = 82
--- If key_len = 94 → using (status, user_id, created_at) = 82 + 4 + 8 = 94
-
--- NULL adds 1 byte to key_len (for the null flag)
+-- For a composite index (user_id INT NOT NULL, status ENUM NOT NULL):
+-- key_len = 4 (user_id) = only user_id used
+-- key_len = 5 (user_id + 1 byte enum) = both columns used
 ```
 
 ## Index Hints
 
-Override the optimizer's index choice when you know better:
+When MySQL chooses a suboptimal index, you can guide it:
 
 ```sql
--- Suggest an index (optimizer may still ignore it)
-SELECT * FROM orders USE INDEX (idx_status) WHERE status = 'pending';
+-- Suggest an index (optimizer can ignore the hint)
+SELECT * FROM orders USE INDEX (idx_user) WHERE user_id = 42;
 
--- Force an index (optimizer must use it)
-SELECT * FROM orders FORCE INDEX (idx_status) WHERE status = 'pending';
+-- Force an index (optimizer must use it or table scan)
+SELECT * FROM orders FORCE INDEX (idx_user) WHERE user_id = 42;
 
--- Exclude a specific index
-SELECT * FROM orders IGNORE INDEX (idx_old_status) WHERE status = 'pending';
+-- Tell optimizer not to use an index
+SELECT * FROM orders IGNORE INDEX (idx_bad_index) WHERE user_id = 42;
 
--- USE INDEX FOR JOIN / ORDER BY / GROUP BY
-SELECT * FROM orders USE INDEX FOR ORDER BY (idx_created_at) ORDER BY created_at;
+-- Hints for JOIN and ORDER BY
+SELECT o.*, u.name
+FROM orders o
+  USE INDEX FOR JOIN (idx_user)
+  JOIN users u ON o.user_id = u.id
+USE INDEX FOR ORDER BY (idx_created);
 ```
 
-:::tip[When to Use FORCE INDEX]
-Use `FORCE INDEX` sparingly. If the optimizer is choosing the wrong index, it usually means the statistics are stale (`ANALYZE TABLE`) or your index design is suboptimal. After MySQL upgrades, forced index hints may cause worse performance if the optimizer improves.
+:::caution[Index Hints Are a Code Smell]
+If you need to force indexes, it usually means your statistics are stale or your indexes are poorly designed. Run `ANALYZE TABLE` and review your index strategy before resorting to hints in production code.
 :::
 
-## Table Maintenance
+## Maintaining Tables and Statistics
 
 ```sql
--- Update index statistics (non-blocking for InnoDB)
+-- Update table statistics (helps optimizer make better decisions)
 ANALYZE TABLE orders;
-ANALYZE TABLE orders, users, products;
+ANALYZE TABLE orders, users, products;  -- Multiple tables
 
--- Rebuild table (reclaims fragmented space, updates statistics)
--- WARNING: Locks the table in older MySQL, may be slow on large tables
+-- Rebuild the table and optimize storage (reclaims space from deleted rows)
+-- Also refreshes statistics
+-- Note: OPTIMIZE TABLE locks the table and copies data — use pt-online-schema-change for large tables
 OPTIMIZE TABLE orders;
--- Prefer: ALTER TABLE orders ENGINE=InnoDB; (same effect, online in MySQL 5.6+)
 
--- Check table for corruption (MyISAM, read-only for InnoDB)
+-- Check table for errors
 CHECK TABLE orders;
-CHECK TABLE orders EXTENDED;
+CHECK TABLE orders EXTENDED;  -- More thorough
 
--- Repair MyISAM table (NOT available for InnoDB)
+-- Repair a corrupted table (MyISAM mainly)
 REPAIR TABLE myisam_table;
 ```
 
-## Slow Query Log Setup
+## Slow Query Log
+
+The slow query log is your primary tool for identifying queries that need indexes:
 
 ```sql
--- Enable slow query log at runtime
-SET GLOBAL slow_query_log = 'ON';
-SET GLOBAL slow_query_log_file = '/var/log/mysql/slow.log';
-SET GLOBAL long_query_time = 1;          -- log queries taking > 1 second
-SET GLOBAL log_queries_not_using_indexes = 'ON';  -- log full table scans
-SET GLOBAL log_throttle_queries_not_using_indexes = 10;  -- max 10/min
-
--- View slow query log config
-SHOW VARIABLES LIKE '%slow%';
+-- Check current slow query settings
+SHOW VARIABLES LIKE 'slow_query%';
 SHOW VARIABLES LIKE 'long_query_time';
+SHOW VARIABLES LIKE 'log_queries_not_using_indexes';
 
--- Analyze the slow query log with mysqldumpslow
--- mysqldumpslow -s t -t 10 /var/log/mysql/slow.log  (top 10 by time)
--- mysqldumpslow -s c -t 10 /var/log/mysql/slow.log  (top 10 by count)
+-- Enable at runtime
+SET GLOBAL slow_query_log = ON;
+SET GLOBAL slow_query_log_file = '/var/log/mysql/slow.log';
+SET GLOBAL long_query_time = 1;             -- Log queries taking > 1 second
+SET GLOBAL log_queries_not_using_indexes = ON;  -- Also log non-indexed queries
+SET GLOBAL min_examined_row_limit = 100;    -- Only log if >= 100 rows examined
 
--- Better: use pt-query-digest (Percona Toolkit)
--- pt-query-digest /var/log/mysql/slow.log > digest.txt
+-- Analyze slow query log with mysqldumpslow
+-- mysqldumpslow -s t -t 10 /var/log/mysql/slow.log
+-- -s t: sort by query time
+-- -t 10: top 10 queries
+
+-- Or use pt-query-digest (Percona Toolkit) for richer analysis
+-- pt-query-digest /var/log/mysql/slow.log
 ```
 
-## Index Best Practices
-
-<CardGrid>
-  <Card title="Do Index" icon="approve-check">
-    - Primary keys (always) - Foreign key columns (always — MySQL doesn't
-    auto-index FKs) - Columns in WHERE clauses of frequent queries - Columns in
-    JOIN conditions - Columns in ORDER BY / GROUP BY - Columns used in covering
-    indexes
-  </Card>
-  <Card title="Don't Over-Index" icon="warning">
-    - Every column (wastes space, slows writes) - Low-cardinality boolean
-    columns alone (status with 2 values is rarely useful solo) - Very long
-    VARCHAR columns (use prefix indexes or functional indexes) - Columns rarely
-    used in queries
-  </Card>
-</CardGrid>
+## Index Best Practices Summary
 
 ```sql
--- Prefix index for long strings (when you can't use the full column)
-CREATE INDEX idx_url_prefix ON pages(url(100));
--- Only indexes first 100 characters — saves space but may reduce selectivity
+-- 1. Always have a PRIMARY KEY
+-- 2. Index all foreign key columns
+-- 3. Index columns used in WHERE, JOIN ON, ORDER BY, GROUP BY
+-- 4. Use composite indexes instead of multiple single-column indexes
+-- 5. Put high-selectivity (high cardinality) columns first
+-- 6. Put equality conditions before range conditions in composite indexes
+-- 7. Consider covering indexes for critical queries
+-- 8. Avoid indexing boolean/low-cardinality columns alone
+-- 9. Don't over-index — each index slows down writes
+-- 10. Use INVISIBLE indexes to safely test before dropping
 
--- Find tables without a primary key
-SELECT t.TABLE_SCHEMA, t.TABLE_NAME
-FROM information_schema.TABLES t
-LEFT JOIN information_schema.TABLE_CONSTRAINTS c
-  ON t.TABLE_SCHEMA = c.TABLE_SCHEMA
-  AND t.TABLE_NAME = c.TABLE_NAME
-  AND c.CONSTRAINT_TYPE = 'PRIMARY KEY'
-WHERE t.TABLE_SCHEMA NOT IN ('mysql','information_schema','performance_schema','sys')
-  AND c.CONSTRAINT_NAME IS NULL
-  AND t.TABLE_TYPE = 'BASE TABLE';
+-- Check index usage statistics
+SELECT
+  t.TABLE_SCHEMA,
+  t.TABLE_NAME,
+  s.INDEX_NAME,
+  s.COLUMN_NAME,
+  s.CARDINALITY,
+  t.TABLE_ROWS,
+  ROUND(s.CARDINALITY / t.TABLE_ROWS * 100, 2) AS selectivity_pct
+FROM information_schema.STATISTICS s
+JOIN information_schema.TABLES t
+  ON s.TABLE_SCHEMA = t.TABLE_SCHEMA
+  AND s.TABLE_NAME = t.TABLE_NAME
+WHERE t.TABLE_SCHEMA = 'mydb'
+  AND t.TABLE_ROWS > 0
+ORDER BY selectivity_pct ASC;
 
 -- Find unused indexes (requires performance_schema)
 SELECT
@@ -510,6 +446,6 @@ SELECT
 FROM performance_schema.table_io_waits_summary_by_index_usage
 WHERE index_name IS NOT NULL
   AND count_star = 0
-  AND object_schema NOT IN ('mysql','performance_schema','information_schema','sys')
-ORDER BY object_schema, object_name;
+  AND object_schema NOT IN ('mysql', 'performance_schema', 'information_schema')
+ORDER BY object_schema, object_name, index_name;
 ```

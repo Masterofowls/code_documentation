@@ -1,259 +1,180 @@
 ---
 title: Deployment with GitHub Actions
-description: Deploy to production using GitHub Environments, approval gates, and cloud platforms including AWS, GCP, Azure, Vercel, and Kubernetes.
+description: GitHub Environments, approval gates, and deploying to Vercel, AWS, Azure, GCP, Kubernetes, and automated release management.
 sidebar:
   order: 7
 tags: [devops, ci-cd]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
 ## GitHub Environments
 
-Environments provide named deployment targets with protection rules, secrets, and approval gates.
+Environments are named deployment targets with protection rules, secrets, and approval gates.
 
 ### Creating Environments
 
-Navigate to `Repository Settings > Environments > New environment`. You can create:
-
-- **development** — auto-deploy on every push
-- **staging** — auto-deploy from main branch
-- **production** — requires manual approval + deployment timer
-
-### Environment Protection Rules
-
-```yaml
-# Environment: production settings
-# Protection rules (configured in GitHub UI):
-# ✓ Required reviewers: @team/platform-leads (min 1)
-# ✓ Wait timer: 5 minutes (allows cancellation window)
-# ✓ Restrict deployments to: refs/heads/main, refs/tags/v*
-# ✓ Allow administrators to bypass
-
-# Environment-specific secrets (only accessible when deploying to this env):
-# PROD_DATABASE_URL
-# PROD_API_KEY
-# PROD_K8S_KUBECONFIG
-```
+<Steps>
+1. Navigate to **Settings → Environments → New environment**
+2. Name it (e.g., `staging`, `production`)
+3. Configure protection rules:
+   - **Required reviewers** — specific people or teams must approve
+   - **Wait timer** — delay before a deployment can proceed (0–43,200 minutes)
+   - **Deployment branches** — restrict which branches can deploy
+4. Add environment-scoped secrets and variables
+5. Set an **Environment URL** (displayed in the GitHub UI)
+</Steps>
 
 ### Using Environments in Workflows
 
 ```yaml
 jobs:
-  deploy-production:
+  deploy-staging:
     runs-on: ubuntu-latest
     environment:
-      name: production
-      url: https://app.example.com # shown in deployment panel
+      name: staging
+      url: ${{ steps.deploy.outputs.url }}
     steps:
       - uses: actions/checkout@v4
-      - run: ./deploy.sh
+      - id: deploy
+        run: |
+          URL=$(./deploy.sh staging)
+          echo "url=$URL" >> $GITHUB_OUTPUT
+
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    environment:
+      name: production          # triggers required reviewer approval
+      url: https://myapp.com
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./deploy.sh production
         env:
-          # Secrets from the 'production' environment
-          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
-          API_KEY: ${{ secrets.PROD_API_KEY }}
+          PROD_SECRET: ${{ secrets.PROD_SECRET }}  # environment-scoped
 ```
 
-## Standard Deployment Pipeline Pattern
+When a job targets an environment with required reviewers, the workflow pauses and sends a notification. Reviewers can approve, reject, or add comments.
 
-A production-grade pipeline: build once, promote through environments.
+:::tip[Environment secrets vs repo secrets]
+Environment secrets override repo secrets of the same name. This lets you use `${{ secrets.DATABASE_URL }}` in your steps and have it automatically resolve to the correct value per environment.
+:::
+
+## Standard Deployment Pipeline
 
 ```yaml
-name: Deploy Pipeline
+name: Deploy
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:
-    inputs:
-      skip-staging:
-        type: boolean
-        default: false
-
-concurrency:
-  group: deploy
-  cancel-in-progress: false # queue deployments, never cancel
-
-permissions:
-  id-token: write
-  contents: read
-  deployments: write
 
 jobs:
   build:
-    name: Build & Test
+    name: Build
     runs-on: ubuntu-latest
-    timeout-minutes: 20
     outputs:
-      image-tag: ${{ steps.meta.outputs.version }}
-      image-digest: ${{ steps.build.outputs.digest }}
+      artifact-name: build-${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: npm
-
-      - run: npm ci
-      - run: npm run lint && npm run test && npm run build
-
-      - name: Set image metadata
-        id: meta
-        run: echo "version=${{ github.sha }}" >> $GITHUB_OUTPUT
-
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci && npm run build
       - uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ github.sha }}
+          name: build-${{ github.run_id }}
           path: dist/
+          retention-days: 1
 
   deploy-staging:
     name: Deploy → Staging
-    needs: build
     runs-on: ubuntu-latest
-    if: ${{ !inputs.skip-staging }}
-    timeout-minutes: 15
+    needs: build
     environment:
       name: staging
-      url: https://staging.example.com
+      url: https://staging.myapp.com
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
-          name: dist-${{ github.sha }}
+          name: ${{ needs.build.outputs.artifact-name }}
           path: dist/
+      - run: ./scripts/deploy.sh staging
 
-      - name: Deploy to staging
-        run: ./scripts/deploy.sh staging
+  smoke-test:
+    name: Smoke Tests
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm run test:smoke
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
-
-      - name: Run smoke tests
-        run: npm run test:smoke
-        env:
-          BASE_URL: https://staging.example.com
+          BASE_URL: https://staging.myapp.com
 
   deploy-production:
     name: Deploy → Production
-    needs: [build, deploy-staging]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    needs: [deploy-staging, smoke-test]
     environment:
       name: production
-      url: https://app.example.com
+      url: https://myapp.com
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
-          name: dist-${{ github.sha }}
+          name: ${{ needs.build.outputs.artifact-name }}
           path: dist/
-
-      - name: Deploy to production
-        run: ./scripts/deploy.sh production
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
-
-      - name: Verify deployment
-        run: |
-          sleep 30
-          curl --retry 5 --retry-delay 10 \
-            -f https://app.example.com/health || exit 1
-
-      - name: Write deployment summary
-        run: |
-          echo "## 🚀 Production Deployment" >> $GITHUB_STEP_SUMMARY
-          echo "- **Version**: ${{ needs.build.outputs.image-tag }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **URL**: https://app.example.com" >> $GITHUB_STEP_SUMMARY
-          echo "- **Deployed by**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+      - run: ./scripts/deploy.sh production
 ```
-
-:::tip[Build Once, Deploy Everywhere]
-Always build your artifact (Docker image, static files, binary) in a single job, upload it as an artifact or Docker image, and then download/pull it in each deployment job. Never rebuild in deployment jobs — you risk deploying a different artifact than what was tested.
-:::
 
 ## Deploy to Vercel
 
 <Tabs>
-<TabItem label="Vercel CLI (Recommended)">
-
+  <TabItem label="Vercel CLI">
 ```yaml
 jobs:
-  deploy-vercel:
+  deploy:
     runs-on: ubuntu-latest
     environment:
-      name: production
       url: ${{ steps.deploy.outputs.url }}
+      name: ${{ github.ref == 'refs/heads/main' && 'production' || 'preview' }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-
-      - name: Install Vercel CLI
-        run: npm install --global vercel@latest
-
-      - name: Pull Vercel Environment
-        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
-
-      - name: Build Project
-        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+          node-version: '20'
+      - run: npm install -g vercel
 
       - name: Deploy to Vercel
         id: deploy
         run: |
-          URL=$(vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }})
+          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            URL=$(vercel --prod --token=${{ secrets.VERCEL_TOKEN }} --yes)
+          else
+            URL=$(vercel --token=${{ secrets.VERCEL_TOKEN }} --yes)
+          fi
           echo "url=$URL" >> $GITHUB_OUTPUT
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
 ```
-
-</TabItem>
-<TabItem label="Preview Deployments">
-
+  </TabItem>
+  <TabItem label="amondnet/vercel-action">
 ```yaml
-on:
-  pull_request:
-
 jobs:
-  preview:
+  deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Vercel CLI
-        run: npm install --global vercel@latest
-
-      - name: Deploy Preview
-        id: preview
-        run: |
-          vercel pull --yes --environment=preview --token=${{ secrets.VERCEL_TOKEN }}
-          vercel build --token=${{ secrets.VERCEL_TOKEN }}
-          URL=$(vercel deploy --prebuilt --token=${{ secrets.VERCEL_TOKEN }})
-          echo "url=$URL" >> $GITHUB_OUTPUT
-
-      - name: Comment PR with preview URL
-        uses: actions/github-script@v7
+      - uses: amondnet/vercel-action@v25
         with:
-          script: |
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: `## 🔍 Preview Deployment\n\n🌐 **URL**: ${{ steps.preview.outputs.url }}`
-            })
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-args: ${{ github.ref == 'refs/heads/main' && '--prod' || '' }}
+          working-directory: ./
 ```
-
-</TabItem>
+  </TabItem>
 </Tabs>
 
 ## Deploy to AWS
@@ -262,32 +183,39 @@ jobs:
 
 ```yaml
 jobs:
-  deploy-s3:
+  deploy:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
       - run: npm ci && npm run build
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
 
       - name: Sync to S3
         run: |
-          # Upload immutable assets with long cache
-          aws s3 sync dist/_next/static s3://${{ vars.S3_BUCKET }}/_next/static \
-            --cache-control "public, max-age=31536000, immutable" \
-            --delete
-
-          # Upload HTML with short cache
-          aws s3 sync dist s3://${{ vars.S3_BUCKET }} \
-            --cache-control "public, max-age=0, must-revalidate" \
+          aws s3 sync dist/ s3://${{ vars.S3_BUCKET }} \
             --delete \
-            --exclude "_next/static/*"
+            --cache-control "max-age=31536000,immutable" \
+            --exclude "index.html" \
+            --exclude "*.json"
+
+          # Short cache for HTML and JSON
+          aws s3 sync dist/ s3://${{ vars.S3_BUCKET }} \
+            --exclude "*" \
+            --include "index.html" \
+            --include "*.json" \
+            --cache-control "no-cache,must-revalidate"
 
       - name: Invalidate CloudFront
         run: |
@@ -296,7 +224,7 @@ jobs:
             --paths "/*"
 ```
 
-### ECS (Container Deployments)
+### ECS (Fargate) Deployment
 
 ```yaml
 jobs:
@@ -308,44 +236,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
 
-      - uses: aws-actions/amazon-ecr-login@v2
+      - name: Login to Amazon ECR
         id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push to ECR
+      - name: Build and push Docker image
         id: build
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: myapp
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t $ECR_REGISTRY/my-app:$IMAGE_TAG .
-          docker push $ECR_REGISTRY/my-app:$IMAGE_TAG
-          echo "image=$ECR_REGISTRY/my-app:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
       - name: Download task definition
         run: |
-          aws ecs describe-task-definition \
-            --task-definition my-app \
-            --query taskDefinition > task-def.json
+          aws ecs describe-task-definition --task-definition myapp \
+            --query taskDefinition > task-definition.json
 
-      - name: Update ECS task definition with new image
+      - name: Update ECS task definition
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
-          task-definition: task-def.json
-          container-name: my-app
+          task-definition: task-definition.json
+          container-name: myapp
           image: ${{ steps.build.outputs.image }}
 
       - name: Deploy to ECS
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
         with:
           task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: my-app-service
-          cluster: production
+          service: myapp-service
+          cluster: myapp-cluster
           wait-for-service-stability: true
 ```
 
@@ -359,35 +289,37 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
       - run: npm ci && npm run build
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
 
       - name: Package Lambda
-        run: |
-          cd dist
-          zip -r ../function.zip .
-          cd ..
+        run: zip -r function.zip dist/ node_modules/
 
-      - name: Update Lambda function
+      - name: Deploy Lambda
         run: |
           aws lambda update-function-code \
-            --function-name my-function \
-            --zip-file fileb://function.zip \
-            --publish
+            --function-name myapp-handler \
+            --zip-file fileb://function.zip
 
           aws lambda wait function-updated \
-            --function-name my-function
+            --function-name myapp-handler
+
+          aws lambda publish-version \
+            --function-name myapp-handler
 ```
 
 ## Deploy to GCP Cloud Run
 
 ```yaml
 jobs:
-  deploy-cloudrun:
+  deploy-cloud-run:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -395,28 +327,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: google-github-actions/auth@v2
+      - id: auth
+        uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      - name: Build and push to Artifact Registry
+      - name: Build and push image
         run: |
-          IMAGE="us-central1-docker.pkg.dev/${{ vars.GCP_PROJECT }}/my-app/api:${{ github.sha }}"
-          gcloud builds submit --tag "$IMAGE" .
-          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+          gcloud builds submit \
+            --tag gcr.io/${{ vars.GCP_PROJECT_ID }}/myapp:${{ github.sha }} .
 
-      - uses: google-github-actions/deploy-cloudrun@v2
-        with:
-          service: my-api
-          region: us-central1
-          image: ${{ env.IMAGE }}
-          flags: '--min-instances=1 --max-instances=10 --memory=512Mi'
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy myapp \
+            --image gcr.io/${{ vars.GCP_PROJECT_ID }}/myapp:${{ github.sha }} \
+            --platform managed \
+            --region us-central1 \
+            --allow-unauthenticated \
+            --set-env-vars "NODE_ENV=production" \
+            --min-instances 1 \
+            --max-instances 10 \
+            --memory 512Mi \
+            --cpu 1
 ```
 
-## Deploy to Kubernetes
+## Kubernetes Deployment
 
 ```yaml
 jobs:
@@ -426,33 +364,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure kubectl
-        run: |
-          echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig.yaml
-          echo "KUBECONFIG=$PWD/kubeconfig.yaml" >> $GITHUB_ENV
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
 
-      - name: Update image in manifests
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Update image tag
         run: |
           sed -i "s|IMAGE_TAG|${{ github.sha }}|g" k8s/deployment.yaml
 
       - name: Apply manifests
         run: |
           kubectl apply -f k8s/
-          kubectl rollout status deployment/my-app -n production --timeout=300s
+          kubectl rollout status deployment/myapp --timeout=5m
 
-      - name: Verify deployment
+      - name: Verify rollout
         run: |
-          kubectl get pods -n production -l app=my-app
-          kubectl rollout history deployment/my-app -n production
+          kubectl get pods -l app=myapp
+          kubectl get service myapp
 ```
 
 ## Release Automation
 
-### `softprops/action-gh-release` (Recommended)
+### softprops/action-gh-release
 
 ```yaml
-name: Release
-
 on:
   push:
     tags: ['v*']
@@ -465,119 +406,92 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # needed for changelog generation
+          fetch-depth: 0
 
-      - run: npm ci && npm run build
-
-      - name: Create release archives
+      - name: Build release artifacts
         run: |
-          tar -czf app-linux-amd64.tar.gz -C dist .
-          zip -r app-windows-amd64.zip dist/
+          npm ci && npm run build
+          tar -czf dist-linux-x64.tar.gz dist/
+          sha256sum dist-linux-x64.tar.gz > checksums.txt
 
-      - uses: softprops/action-gh-release@v2
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true # auto-generate from PR titles
-          draft: false
-          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') }}
           files: |
-            app-linux-amd64.tar.gz
-            app-windows-amd64.zip
+            dist-linux-x64.tar.gz
+            checksums.txt
+          generate_release_notes: true    # auto-generate from commits
+          draft: false
+          prerelease: ${{ contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
           body: |
-            ## Installation
-            Download the appropriate binary for your platform.
-
-            ## Changelog
-            See [CHANGELOG.md](CHANGELOG.md) for details.
+            ## What's Changed
+            See [CHANGELOG.md](./CHANGELOG.md) for full details.
 ```
 
-### `release-please` (Automated Versioning)
+### release-please (Google)
 
 ```yaml
 # .github/workflows/release-please.yml
-name: Release Please
-
 on:
   push:
     branches: [main]
 
-permissions:
-  contents: write
-  pull-requests: write
-
 jobs:
   release-please:
     runs-on: ubuntu-latest
-    outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
         with:
-          release-type: node # reads version from package.json
-          package-name: my-app
+          release-type: node
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-  deploy-on-release:
+  # Deploy only when release-please creates a release
+  deploy:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created }}
-    uses: ./.github/workflows/deploy.yml
-    with:
-      version: ${{ needs.release-please.outputs.tag_name }}
-    secrets: inherit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci && npm run build
+      - run: ./scripts/deploy-production.sh
+        env:
+          VERSION: ${{ needs.release-please.outputs.tag_name }}
 ```
 
-:::caution[release-please Commit Convention]
-`release-please` requires [Conventional Commits](https://www.conventionalcommits.org/) format: `feat:` bumps minor, `fix:` bumps patch, `feat!:` or `BREAKING CHANGE:` bumps major. Without this convention, no release PR will be generated.
-:::
-
-## Blue-Green Deployments
+### semantic-release
 
 ```yaml
 jobs:
-  blue-green:
+  release:
     runs-on: ubuntu-latest
-    environment: production
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      packages: write
     steps:
       - uses: actions/checkout@v4
-
-      - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: us-east-1
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Determine current color and target
-        id: color
-        run: |
-          CURRENT=$(aws ssm get-parameter \
-            --name /myapp/active-color \
-            --query 'Parameter.Value' \
-            --output text)
-          TARGET=$([ "$CURRENT" = "blue" ] && echo "green" || echo "blue")
-          echo "current=$CURRENT" >> $GITHUB_OUTPUT
-          echo "target=$TARGET" >> $GITHUB_OUTPUT
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
-      - name: Deploy to ${{ steps.color.outputs.target }}
-        run: |
-          aws ecs update-service \
-            --cluster myapp-${{ steps.color.outputs.target }} \
-            --service myapp \
-            --force-new-deployment
-          aws ecs wait services-stable \
-            --cluster myapp-${{ steps.color.outputs.target }} \
-            --services myapp
+      - run: npm ci
 
-      - name: Run smoke tests against new environment
-        run: |
-          curl -f https://${{ steps.color.outputs.target }}.internal.example.com/health
-
-      - name: Flip traffic to ${{ steps.color.outputs.target }}
-        run: |
-          aws elbv2 modify-rule \
-            --rule-arn ${{ vars.ALB_RULE_ARN }} \
-            --actions "[{\"Type\":\"forward\",\"TargetGroupArn\":\"${{ vars[format('{0}_TG_ARN', steps.color.outputs.target)] }}\"}]"
-
-          aws ssm put-parameter \
-            --name /myapp/active-color \
-            --value ${{ steps.color.outputs.target }} \
-            --overwrite
+      - name: Release
+        run: npx semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 ```
+
+:::tip[Changelog generation]
+Both `release-please` and `semantic-release` generate changelogs automatically from your Conventional Commit messages. Use `feat:` for minor bumps, `fix:` for patch bumps, and `feat!:` or `BREAKING CHANGE:` in body for major bumps.
+:::

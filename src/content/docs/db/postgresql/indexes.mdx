@@ -1,300 +1,310 @@
 ---
 title: PostgreSQL Indexes
-description: B-tree, Hash, GIN, GiST, BRIN, partial, expression, and covering indexes — creation, maintenance, and when to use each.
+description: Master all PostgreSQL index types — B-tree, Hash, GIN, GiST, BRIN, partial, expression, covering — and learn index maintenance best practices.
 sidebar:
   order: 4
 tags: [database, sql]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-Indexes are the primary tool for query optimization in PostgreSQL. Choosing the right index type and strategy can improve query performance by orders of magnitude.
+Indexes are the primary tool for improving query performance in PostgreSQL. Choosing the right index type for each use case is critical — a wrong choice adds overhead without benefit.
 
-## How Indexes Work
+## B-Tree Indexes (Default)
 
-An index is a separate data structure that maps column values to their corresponding row locations (heap tuple IDs). When a query filters, sorts, or joins on an indexed column, PostgreSQL can use the index to find rows directly instead of scanning every row in the table.
-
-**Trade-offs**: Indexes speed up reads but slow down writes (every INSERT/UPDATE/DELETE must also update the index). Indexes consume disk space and memory (for caching). The query planner decides whether to use an index based on estimated cost.
-
-## B-tree Indexes (Default)
-
-B-tree (balanced tree) is the default index type — appropriate for the vast majority of cases. It supports equality (`=`), range (`<`, `<=`, `>`, `>=`), `IN`, `BETWEEN`, `IS NULL`, `IS NOT NULL`, `ORDER BY`, and `LIKE 'prefix%'`.
+B-tree (balanced tree) is the default index type. It works for equality, range queries, and sorting.
 
 ```sql
 -- Create a basic B-tree index
-CREATE INDEX idx_orders_customer_id ON orders (customer_id);
 CREATE INDEX idx_users_email ON users (email);
-CREATE INDEX idx_products_price ON products (price);
 
--- Descending index (useful for ORDER BY col DESC queries)
-CREATE INDEX idx_orders_created_desc ON orders (created_at DESC);
+-- Unique index (enforces uniqueness + index)
+CREATE UNIQUE INDEX idx_users_email_unique ON users (email);
+-- Note: UNIQUE constraint creates a unique index automatically
 
--- Composite index (multi-column)
--- Column order matters! Most selective / most commonly filtered first
-CREATE INDEX idx_orders_status_created ON orders (status, created_at DESC);
+-- Multi-column index
+CREATE INDEX idx_orders_customer_status ON orders (customer_id, status);
 
--- Query that uses the above index:
-SELECT * FROM orders WHERE status = 'pending' ORDER BY created_at DESC;
+-- Descending order (for ORDER BY col DESC queries)
+CREATE INDEX idx_products_price_desc ON products (price DESC);
+
+-- Specify NULL ordering
+CREATE INDEX idx_products_deleted_at ON products (deleted_at NULLS LAST);
 ```
 
-### Multi-Column Index Column Order
+### When B-Tree Works
 
-The first column in a composite index can be used independently. Later columns only help when earlier columns are also filtered.
+B-tree indexes support these operators: `=`, `<`, `<=`, `>`, `>=`, `BETWEEN`, `IN`, `LIKE 'prefix%'`, `IS NULL`, `IS NOT NULL`, `ORDER BY`.
 
 ```sql
--- Index on (status, created_at):
--- ✅ Uses index: WHERE status = 'x'
--- ✅ Uses index: WHERE status = 'x' AND created_at > '2024-01-01'
--- ❌ Cannot use index efficiently: WHERE created_at > '2024-01-01' (no status filter)
+-- All of these can use a B-tree index on (price):
+SELECT * FROM products WHERE price = 29.99;
+SELECT * FROM products WHERE price > 10 AND price < 50;
+SELECT * FROM products WHERE price BETWEEN 10 AND 50;
+SELECT * FROM products ORDER BY price;
+SELECT * FROM products ORDER BY price DESC NULLS LAST;
+
+-- B-tree on (name) can use prefix matching:
+SELECT * FROM products WHERE name LIKE 'Widget%';      -- Works (prefix)
+SELECT * FROM products WHERE name LIKE '%Widget%';     -- Does NOT use index
 ```
 
 ## Hash Indexes
 
-Hash indexes are optimized for equality comparisons only. They do not support range queries or sorting. Since PostgreSQL 10, they are WAL-logged (safe to use on production).
+Hash indexes store a hash of the indexed value. They only support `=` equality lookups.
 
 ```sql
--- Good for: equality lookups on high-cardinality columns
-CREATE INDEX idx_sessions_token ON sessions USING HASH (token);
+CREATE INDEX idx_sessions_token_hash ON sessions USING HASH (token);
 
--- When to use over B-tree:
--- - Column is only used in WHERE col = 'value' (never ranges or LIKE)
--- - Hash index is slightly smaller than B-tree
--- - Hash index lookup is slightly faster than B-tree for equality
+-- Perfect for equality lookups on long strings (UUID, token, hash)
+SELECT * FROM sessions WHERE token = 'abc123def456...';
 ```
 
-## GIN Indexes (Generalized Inverted Index)
-
-GIN indexes are designed for columns that contain multiple values per row. Perfect for JSONB, arrays, and full-text search.
-
-```sql
--- Arrays: supports @>, &&, = operators
-CREATE INDEX idx_articles_tags ON articles USING GIN (tags);
-SELECT * FROM articles WHERE tags @> ARRAY['postgresql'];
-
--- JSONB: supports @>, ?, ?|, ?& operators
-CREATE INDEX idx_events_payload ON events USING GIN (payload);
-SELECT * FROM events WHERE payload @> '{"status": "active"}';
-SELECT * FROM events WHERE payload ? 'email';
-
--- jsonb_path_ops: smaller index, only @> operator (often sufficient)
-CREATE INDEX idx_events_payload_path ON events USING GIN (payload jsonb_path_ops);
-
--- Full-text search: tsvector column
-CREATE INDEX idx_articles_fts ON articles USING GIN (search_vector);
-SELECT * FROM articles WHERE search_vector @@ to_tsquery('postgresql');
-
--- pg_trgm: trigram index for LIKE/ILIKE queries (requires extension)
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
-CREATE INDEX idx_users_name_trgm ON users USING GIN (name gin_trgm_ops);
-SELECT * FROM users WHERE name ILIKE '%smith%';  -- Uses trigram index!
-```
-
-:::tip[GIN vs B-tree for LIKE]
-A plain B-tree index only accelerates `LIKE 'prefix%'` (starts-with). For `LIKE '%substring%'` (contains), you need a trigram GIN index with `pg_trgm`. This is the correct solution for search-as-you-type features.
+:::tip[Hash vs B-tree for Equality]
+Since PostgreSQL 10, hash indexes are WAL-logged and crash-safe. They can be slightly faster than B-tree for pure equality lookups, but B-tree is more versatile. Only choose hash when you have pure equality queries on high-cardinality columns.
 :::
 
-## GiST Indexes (Generalized Search Tree)
+## GIN Indexes
 
-GiST is a flexible index framework supporting non-standard data types: geometric shapes, ranges, full-text, and anything with a custom GiST implementation.
-
-```sql
--- Range types: supports @>, &&, <@ operators
-CREATE INDEX idx_subscriptions_active ON subscriptions USING GiST (active);
-SELECT * FROM subscriptions WHERE active @> NOW()::timestamptz;
-
--- Geometric types (PostGIS)
-CREATE INDEX idx_locations_point ON locations USING GiST (coordinates);
-SELECT * FROM locations WHERE ST_DWithin(coordinates, ST_MakePoint(-73.9, 40.7), 1000);
-
--- Full-text search (alternative to GIN for smaller tables)
-CREATE INDEX idx_articles_fts_gist ON articles USING GiST (search_vector);
-
--- Trigram search (alternative to GIN with pg_trgm)
-CREATE INDEX idx_products_name_trgm ON products USING GiST (name gist_trgm_ops);
-```
-
-**GIN vs GiST for full-text search:**
-
-- **GIN**: Larger, slower to build, much faster to query. Use for large tables with frequent searches.
-- **GiST**: Smaller, faster to build, slightly slower to query. Use for small tables or write-heavy workloads.
-
-## BRIN Indexes (Block Range Index)
-
-BRIN stores min/max values for physical blocks of the table. Extremely small (a few hundred pages regardless of table size) but only useful when the data is physically ordered by the indexed column (like a sequential timestamp).
+Generalized Inverted Index — designed for values that contain multiple components (arrays, JSONB, full-text).
 
 ```sql
--- Events table where rows are inserted in time order
-CREATE INDEX idx_events_created_brin ON events USING BRIN (created_at);
+-- For JSONB (full operators: @>, ?, ?|, ?&)
+CREATE INDEX idx_products_metadata ON products USING GIN (metadata);
 
--- BRIN is ideal for:
--- - Append-only time-series data
--- - Sequential integer IDs
--- - Any column where value increases as rows are inserted
--- - Tables too large to index with B-tree (BRIN is ~10,000x smaller)
+-- jsonb_path_ops: smaller index, only supports @>
+CREATE INDEX idx_products_metadata_fast ON products USING GIN (metadata jsonb_path_ops);
 
--- Configure pages_per_range (default: 128)
-CREATE INDEX ON events USING BRIN (created_at) WITH (pages_per_range = 32);
+-- For arrays
+CREATE INDEX idx_users_tags ON users USING GIN (tags);
+
+-- For full-text search
+CREATE INDEX idx_articles_search ON articles USING GIN (to_tsvector('english', title || ' ' || body));
+
+-- For pg_trgm (fuzzy search with LIKE '%text%' and similarity)
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX idx_products_name_trgm ON products USING GIN (name gin_trgm_ops);
+
+-- Now these use the index:
+SELECT * FROM products WHERE name ILIKE '%widget%';
+SELECT * FROM products WHERE similarity(name, 'wiget') > 0.3;
 ```
 
-:::caution[BRIN has limited selectivity]
-BRIN only helps when data is physically sorted by the indexed column. If data is randomly ordered, BRIN provides no benefit. Always check with `EXPLAIN ANALYZE` before relying on a BRIN index.
+## GiST Indexes
+
+Generalized Search Tree — supports complex data types with custom search strategies: geometric types, full-text, range types, PostGIS.
+
+```sql
+-- For range types (exclusion constraints use GiST)
+CREATE TABLE reservations (
+  room_id   BIGINT NOT NULL,
+  during    TSTZRANGE NOT NULL,
+  EXCLUDE USING GIST (room_id WITH =, during WITH &&)
+);
+
+-- For full-text search (alternative to GIN — smaller but slower for large datasets)
+CREATE INDEX idx_articles_search_gist ON articles USING GIST (search_vector);
+
+-- For pg_trgm with GiST (better for UPDATE-heavy workloads than GIN)
+CREATE INDEX idx_products_name_gist ON products USING GIST (name gist_trgm_ops);
+
+-- For PostGIS geometry
+CREATE INDEX idx_locations_geom ON locations USING GIST (geom);
+```
+
+### GIN vs GiST
+
+| Aspect | GIN | GiST |
+|---|---|---|
+| **Build time** | Slower | Faster |
+| **Index size** | Larger | Smaller |
+| **Query speed** | Faster | Slower |
+| **Update overhead** | Higher (but pending list helps) | Lower |
+| **Best for** | Read-heavy, full-text, JSONB | Geometric, range, write-heavy |
+
+## BRIN Indexes
+
+Block Range INdex — stores min/max values per block range. Very small, very fast to build, but only useful for naturally ordered data.
+
+```sql
+-- Perfect for timestamp columns in append-only tables (logs, events)
+CREATE INDEX idx_events_created_at_brin ON events USING BRIN (created_at);
+
+-- Custom block range size (default: 128 pages)
+CREATE INDEX idx_metrics_time_brin ON metrics
+  USING BRIN (recorded_at) WITH (pages_per_range = 64);
+
+-- Check effectiveness: BRIN is useful only when physical order ≈ logical order
+-- If rows are inserted in created_at order (typical for event/log tables), BRIN is excellent
+```
+
+:::tip[BRIN for Time-Series]
+BRIN indexes are orders of magnitude smaller than B-tree for time-series data. A BRIN index on a 100 million row event table might be only 100 KB. Use it for append-only tables where you frequently query by time range.
 :::
 
 ## Partial Indexes
 
-A partial index only indexes rows matching a WHERE condition. Smaller and faster than a full index.
+Index only a subset of rows, defined by a WHERE clause. Smaller, faster to maintain:
 
 ```sql
--- Only index active users (not the millions of deleted/inactive ones)
-CREATE INDEX idx_active_users_email ON users (email)
-  WHERE is_active = true AND deleted_at IS NULL;
+-- Only index active users (where most queries focus)
+CREATE INDEX idx_users_email_active ON users (email)
+  WHERE status = 'active';
 
--- Only index pending orders (completed orders rarely need fast lookup)
-CREATE INDEX idx_pending_orders_customer ON orders (customer_id)
-  WHERE status = 'pending';
+-- Only index orders that aren't completed (pending + processing are queried often)
+CREATE INDEX idx_orders_customer_open ON orders (customer_id)
+  WHERE status NOT IN ('completed', 'cancelled', 'refunded');
 
--- Partial unique constraint (only one active session per user)
-CREATE UNIQUE INDEX idx_users_one_active_session ON sessions (user_id)
-  WHERE is_active = true;
+-- Index only non-null values
+CREATE INDEX idx_products_deleted_at ON products (deleted_at)
+  WHERE deleted_at IS NOT NULL;
+
+-- For the query to USE a partial index, the WHERE condition must match
+-- This uses the partial index:
+SELECT * FROM users WHERE email = 'alice@example.com' AND status = 'active';
+
+-- This does NOT use the partial index (status is not filtered):
+SELECT * FROM users WHERE email = 'alice@example.com';
 ```
 
-## Expression Indexes (Functional Indexes)
+## Expression Indexes
 
-Index the result of a function or expression on a column:
+Index the result of an expression rather than a raw column value:
 
 ```sql
--- Case-insensitive email search
-CREATE INDEX idx_users_email_lower ON users (LOWER(email));
--- Query MUST use the same expression:
-SELECT * FROM users WHERE LOWER(email) = 'alice@example.com';
+-- Case-insensitive email lookup
+CREATE UNIQUE INDEX idx_users_email_lower ON users (LOWER(email));
 
--- Index on JSONB field value
-CREATE INDEX idx_events_user_id ON events ((payload->>'user_id'));
-SELECT * FROM events WHERE payload->>'user_id' = '42';
+-- Query that uses this index:
+SELECT * FROM users WHERE LOWER(email) = LOWER('Alice@Example.com');
 
--- Index on date part
-CREATE INDEX idx_orders_year_month ON orders (EXTRACT(YEAR FROM created_at), EXTRACT(MONTH FROM created_at));
+-- Extract a JSONB field and index it
+CREATE INDEX idx_products_color ON products ((metadata ->> 'color'));
 
--- Combined partial + expression
-CREATE INDEX idx_published_articles_title ON articles (LOWER(title))
-  WHERE status = 'published';
+-- Query that uses this index:
+SELECT * FROM products WHERE (metadata ->> 'color') = 'blue';
+
+-- Date part extraction
+CREATE INDEX idx_orders_month ON orders (EXTRACT(MONTH FROM created_at));
+SELECT * FROM orders WHERE EXTRACT(MONTH FROM created_at) = 6;
+
+-- Computed column
+CREATE INDEX idx_order_items_total ON order_items ((quantity * unit_price));
 ```
 
 ## Covering Indexes (INCLUDE)
 
-A covering index includes additional columns in the index leaf pages. Queries that only need the indexed columns and the included columns can be satisfied by an **index-only scan** — never touching the heap.
+Include extra columns in the index so the query can be satisfied entirely from the index (index-only scan):
 
 ```sql
--- Without INCLUDE: query needs heap access for 'total'
-CREATE INDEX idx_orders_customer_id ON orders (customer_id);
+-- INCLUDE columns are stored in the leaf nodes but not sorted
+-- They enable index-only scans when the query only needs these columns
+CREATE INDEX idx_products_category_covering
+  ON products (category_id)
+  INCLUDE (name, price, status);
 
--- With INCLUDE: index-only scan possible for (customer_id, total, created_at)
-CREATE INDEX idx_orders_customer_covering ON orders (customer_id)
-  INCLUDE (total, status, created_at);
+-- This query does an index-only scan — no table access:
+SELECT name, price, status
+FROM products
+WHERE category_id = 5
+  AND status = 'active';
 
--- This query can be served entirely from the index:
-SELECT customer_id, total, status, created_at
-FROM orders
-WHERE customer_id = 42;
+-- Covering index for orders lookup
+CREATE INDEX idx_orders_customer_covering
+  ON orders (customer_id, status)
+  INCLUDE (id, total, created_at);
 ```
 
-## Creating Indexes Without Blocking Writes
+## Multi-Column Index Column Order
 
-`CREATE INDEX` (without `CONCURRENTLY`) takes an `AccessShareLock` that blocks all writes during index creation. On large tables, this can cause significant downtime.
+The order of columns in a multi-column index critically affects which queries can use it.
 
 ```sql
--- Non-blocking index creation (takes longer, but doesn't block)
-CREATE INDEX CONCURRENTLY idx_events_created ON events (created_at);
+-- Index: (customer_id, status, created_at)
+CREATE INDEX idx_orders_multi ON orders (customer_id, status, created_at);
 
--- Non-blocking re-index
-REINDEX INDEX CONCURRENTLY idx_events_created;
+-- CAN use this index (left-prefix rule):
+WHERE customer_id = 42
+WHERE customer_id = 42 AND status = 'pending'
+WHERE customer_id = 42 AND status = 'pending' AND created_at > '2024-01-01'
+ORDER BY customer_id, status, created_at
 
--- Re-index entire table (rebuilds all indexes)
-REINDEX TABLE CONCURRENTLY events;
+-- CANNOT use this index:
+WHERE status = 'pending'                -- Missing first column
+WHERE created_at > '2024-01-01'         -- Missing first two columns
 ```
 
-:::caution[CONCURRENTLY limitations]
-`CREATE INDEX CONCURRENTLY` cannot be run inside a transaction. It may leave an "invalid" index if the server crashes during creation — check with `SELECT * FROM pg_indexes WHERE pg_get_indexdef(indexrelid) IS NULL` and drop invalid indexes.
-:::
+**Rule of thumb**: Put the most selective (high cardinality) column first when using equality filters; put the sort column last.
 
-## Monitoring Index Usage
+## CREATE INDEX CONCURRENTLY
+
+Creating an index normally locks the table for writes. CONCURRENTLY allows writes during the build (takes longer):
 
 ```sql
--- Find unused indexes (no or very few scans since last stats reset)
+-- Create index without locking writes
+CREATE INDEX CONCURRENTLY idx_orders_created_at ON orders (created_at);
+
+-- Note: CONCURRENTLY requires a separate transaction — cannot be in BEGIN/COMMIT block
+
+-- Rebuild a corrupted or bloated index
+REINDEX INDEX CONCURRENTLY idx_orders_created_at;
+
+-- Rebuild all indexes on a table
+REINDEX TABLE CONCURRENTLY orders;
+```
+
+## Index Maintenance
+
+### Finding Unused Indexes
+
+```sql
+-- Indexes that have never been used since last stats reset
 SELECT
   schemaname,
   tablename,
   indexname,
-  idx_scan AS scans,
-  idx_tup_read AS tuples_read,
-  pg_size_pretty(pg_relation_size(indexrelid)) AS size
+  idx_scan,
+  idx_tup_read,
+  idx_tup_fetch,
+  pg_size_pretty(pg_relation_size(indexrelid)) AS index_size
 FROM pg_stat_user_indexes
-WHERE idx_scan < 50    -- Less than 50 uses
-ORDER BY pg_relation_size(indexrelid) DESC;
-
--- Find tables doing the most sequential scans (need indexes!)
-SELECT schemaname, tablename, seq_scan, seq_tup_read,
-  idx_scan, n_live_tup
-FROM pg_stat_user_tables
-WHERE seq_scan > 1000
-ORDER BY seq_tup_read DESC
-LIMIT 20;
-
--- List all indexes on a table with size
-SELECT
-  indexname,
-  pg_size_pretty(pg_relation_size(indexrelid)) AS index_size,
-  idx_scan AS scan_count
-FROM pg_stat_user_indexes
-WHERE tablename = 'orders'
+WHERE idx_scan = 0
+  AND indexrelname NOT LIKE 'pg_%'
 ORDER BY pg_relation_size(indexrelid) DESC;
 ```
 
-## Index Bloat and Maintenance
+### Index Bloat
+
+Deleted and updated rows leave dead tuples in indexes. VACUUM removes them:
 
 ```sql
--- Check for index bloat (dead tuples in index)
+-- Check index bloat
 SELECT
-  indexrelname,
+  tablename,
+  indexname,
   pg_size_pretty(pg_relation_size(indexrelid)) AS index_size,
-  pg_stat_user_indexes.idx_scan
+  round(100 * pg_relation_size(indexrelid) /
+    pg_relation_size(indrelid::regclass)::numeric, 1) AS index_to_table_ratio
 FROM pg_stat_user_indexes
-JOIN pg_class ON pg_class.oid = indexrelid
-ORDER BY pg_relation_size(indexrelid) DESC;
+JOIN pg_index ON indexrelid = pg_stat_user_indexes.indexrelid
+ORDER BY pg_relation_size(indexrelid) DESC
+LIMIT 20;
 
--- Manual VACUUM to reclaim space (happens automatically via autovacuum)
-VACUUM ANALYZE orders;
-
--- Rebuild a bloated index (blocks reads, use CONCURRENTLY in production)
-REINDEX INDEX CONCURRENTLY idx_orders_customer_id;
-
--- Check if autovacuum is running often enough
-SELECT relname, last_autovacuum, last_autoanalyze, n_dead_tup, n_live_tup
-FROM pg_stat_user_tables
-WHERE n_dead_tup > 10000
-ORDER BY n_dead_tup DESC;
+-- Manual VACUUM (also done by autovacuum)
+VACUUM (VERBOSE, ANALYZE) orders;
 ```
 
-## Index Strategy Summary
+### pg_stat_user_indexes
 
-| Scenario                                   | Recommended Index              |
-| ------------------------------------------ | ------------------------------ | ------------- |
-| Equality and range on standard types       | B-tree (default)               |
-| Equality only (tokens, IDs)                | Hash (slightly smaller/faster) |
-| JSONB `@>` containment                     | GIN with `jsonb_path_ops`      |
-| JSONB key operators `?`, `?                | `, `?&`                        | GIN (default) |
-| Arrays (`@>`, `&&`)                        | GIN                            |
-| Full-text search (`@@`)                    | GIN on tsvector column         |
-| `ILIKE '%substring%'` search               | GIN with `pg_trgm`             |
-| Range types (`@>`, `&&`)                   | GiST                           |
-| Large time-series table, sequential insert | BRIN                           |
-| Sparse data (active rows only)             | Partial B-tree                 |
-| Case-insensitive string lookups            | B-tree on `LOWER(col)`         |
-| Index-only scan optimization               | B-tree with `INCLUDE`          |
+```sql
+SELECT
+  relname           AS table,
+  indexrelname      AS index,
+  idx_scan          AS scans,
+  idx_tup_read      AS tuples_read,
+  idx_tup_fetch     AS tuples_fetched,
+  pg_size_pretty(pg_relation_size(indexrelid)) AS size
+FROM pg_stat_user_indexes
+WHERE schemaname = 'public'
+ORDER BY idx_scan DESC;
+```

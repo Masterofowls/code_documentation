@@ -1,213 +1,208 @@
 ---
 title: Testing Async Code with Jest
-description: Test Promises, async/await, callbacks, timers, fetch, Axios, and event emitters in Jest — including fake timers, expect.assertions, and real-world service patterns.
+description: Test Promises, async/await, callbacks, fake timers, fetch, Axios, event emitters, and polling functions reliably with Jest.
 sidebar:
   order: 5
 tags: [testing, javascript]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-Asynchronous code is everywhere in modern JavaScript — API calls, database queries, file I/O, timers, and event streams. Jest provides several patterns for testing async code correctly and reliably.
+Asynchronous code is everywhere in modern JavaScript — API calls, database queries, timers, file I/O. Jest provides multiple strategies for testing async code, and choosing the right one makes your tests more reliable and readable.
 
 ## The Problem with Async Tests
 
-Without proper async handling, tests can pass incorrectly:
+The most common async testing mistake is a test that finishes before the async operation completes:
 
 ```typescript
-// WRONG — this test always passes because Jest doesn't wait for the assertion
-test('fetches user data', () => {
+// ❌ This test will ALWAYS pass — even if the function rejects!
+it('fetches user data', () => {
   fetchUser(1).then((user) => {
-    expect(user.name).toBe('Alice'); // never executed if the test ends first
+    expect(user.name).toBe('Alice'); // Never reached if test exits early
   });
 });
 ```
 
-Jest finishes the test synchronously, the assertion inside `.then()` never runs, and the test passes despite the potential failure.
+Jest considers a test complete when the test function returns. For async code, you must either `return` the promise, use `async/await`, or use the `done` callback.
 
-## Callbacks with `done`
+## Callbacks — The `done` Parameter
 
-For older callback-based APIs, use the `done` parameter. Jest waits until `done()` is called before considering the test complete.
+For legacy callback-based APIs, Jest provides the `done` parameter. The test does not complete until `done()` is called.
 
 ```typescript
-import { readFileCallback } from './fileReader';
-
-test('reads file contents', (done) => {
-  readFileCallback('./data.txt', (error, contents) => {
-    if (error) {
-      done(error); // fail the test with the error
+it('reads a file successfully', (done) => {
+  readFile('./data.txt', 'utf8', (err, content) => {
+    if (err) {
+      done(err); // Fail the test with the error
       return;
     }
-    expect(contents).toContain('Hello');
-    done(); // signal the test is complete
+    expect(content).toContain('Hello');
+    done(); // Signal test completion
   });
 });
 ```
 
-:::caution[Always call done on error paths]
-If you forget to call `done(error)` on the error path, the test will time out rather than fail with a useful message. Always handle both the success and error cases.
+:::caution[Always Pass Errors to done()]
+If you call `done()` without an argument in an error branch, the test will pass even though an error occurred. Always call `done(err)` when there's an error — this fails the test with the error as the message.
 :::
 
-### Converting callbacks to Promises
-
-When possible, wrap callback APIs in Promises for cleaner tests:
-
 ```typescript
-import { promisify } from 'util';
-import { readFile } from 'fs';
+// Pattern for ensuring done is called in all code paths
+it('handles both success and error cases', (done) => {
+  eventEmitter.on('data', (value) => {
+    try {
+      expect(value).toBe(42);
+      done();
+    } catch (error) {
+      done(error); // Forward assertion errors to Jest
+    }
+  });
 
-const readFileAsync = promisify(readFile);
-
-test('reads file contents', async () => {
-  const contents = await readFileAsync('./data.txt', 'utf8');
-  expect(contents).toContain('Hello');
+  eventEmitter.emit('data', 42);
 });
 ```
 
-## Testing Promises
+## Promises
 
-### Return the promise
-
-The simplest way to test Promises is to return them from the test. Jest will wait for the returned Promise to settle.
+You can test promises by returning them from the test function. Jest waits for the returned promise to settle.
 
 ```typescript
-test('resolves with user data', () => {
+// ✅ Return the promise
+it('fetches a user by ID', () => {
   return fetchUser(1).then((user) => {
-    expect(user.name).toBe('Alice');
-    expect(user.email).toBeDefined();
+    expect(user).toEqual({ id: 1, name: 'Alice' });
   });
 });
 
-test('rejects on invalid ID', () => {
-  return expect(fetchUser(-1)).rejects.toThrow('Invalid user ID');
+// ✅ Return the rejection assertion
+it('rejects for unknown user IDs', () => {
+  return expect(fetchUser(999)).rejects.toThrow('User not found');
 });
 ```
 
-### `.resolves` and `.rejects` matchers
+### `.resolves` and `.rejects` Matchers
 
-These matchers unwrap the Promise before running the assertion:
+Jest provides `.resolves` and `.rejects` modifiers that unwrap promises and apply matchers to the resolved/rejected value:
 
 ```typescript
-test('resolves with user data', async () => {
-  await expect(fetchUser(1)).resolves.toEqual(
-    expect.objectContaining({ name: 'Alice' }),
+// .resolves — asserts the promise resolves with a matching value
+it('resolves with user data', () => {
+  return expect(fetchUser(1)).resolves.toEqual({
+    id: 1,
+    name: 'Alice',
+    email: 'alice@example.com',
+  });
+});
+
+it('resolves with a defined value', () => {
+  return expect(createSession()).resolves.toBeDefined();
+});
+
+// .rejects — asserts the promise rejects
+it('rejects when credentials are wrong', () => {
+  return expect(login('alice', 'wrong-password')).rejects.toThrow(
+    'Invalid credentials',
   );
 });
 
-test('rejects with a network error', async () => {
-  await expect(fetchFromBrokenEndpoint()).rejects.toThrow('Network error');
-  await expect(fetchFromBrokenEndpoint()).rejects.toMatchObject({
-    message: expect.stringContaining('Network'),
-    status: 503,
+it('rejects with the correct error class', () => {
+  return expect(fetchUser(-1)).rejects.toThrow(ValidationError);
+});
+
+it('rejects with matching error properties', () => {
+  return expect(fetchUser(-1)).rejects.toMatchObject({
+    message: 'Invalid user ID',
+    statusCode: 400,
   });
 });
 ```
 
-:::tip[Always await .resolves and .rejects]
-`expect(promise).resolves.toBe(value)` returns a Promise. If you forget to `await` it, the assertion never runs and the test passes regardless of the actual resolved value.
-:::
+## async / await
 
-## `async` / `await`
-
-The cleanest pattern for testing Promises is `async/await`:
+`async/await` is the cleanest and most readable way to test asynchronous code in Jest. Mark the test function as `async` and `await` each async operation.
 
 ```typescript
-test('creates and retrieves a user', async () => {
-  // Arrange
-  const payload = { name: 'Alice', email: 'alice@example.com' };
+it('creates and retrieves a user', async () => {
+  const created = await userService.create({
+    name: 'Alice',
+    email: 'alice@example.com',
+  });
 
-  // Act
-  const created = await userService.create(payload);
-  const retrieved = await userService.findById(created.id);
+  expect(created.id).toBeDefined();
+  expect(created.name).toBe('Alice');
 
-  // Assert
-  expect(retrieved.name).toBe('Alice');
-  expect(retrieved.email).toBe('alice@example.com');
+  const fetched = await userService.findById(created.id);
+  expect(fetched).toEqual(created);
 });
 ```
 
-### Testing async errors with try/catch
+### Async Error Testing with try/catch
 
 ```typescript
-test('throws when user is not found', async () => {
-  await expect(userService.findById(99999)).rejects.toThrow('User not found');
-});
+it('throws when creating a user with a duplicate email', async () => {
+  await userService.create({ email: 'alice@example.com' });
 
-// Alternatively with try/catch (more verbose but useful for inspecting the error)
-test('throws with correct error code', async () => {
   try {
-    await userService.findById(99999);
-    fail('Expected an error to be thrown'); // force failure if no error thrown
+    await userService.create({ email: 'alice@example.com' });
+    // If we reach here, the function didn't throw — fail the test explicitly
+    throw new Error('Expected userService.create to throw, but it did not');
   } catch (error) {
-    expect(error).toBeInstanceOf(NotFoundError);
-    expect((error as NotFoundError).code).toBe('USER_NOT_FOUND');
-    expect((error as NotFoundError).statusCode).toBe(404);
+    expect(error).toBeInstanceOf(ConflictError);
+    expect((error as ConflictError).message).toContain('already exists');
   }
 });
 ```
 
-## `expect.assertions()` — Guarding Async Error Paths
-
-`expect.assertions(N)` declares that exactly N assertions must be called during the test. If fewer assertions run (e.g., because a Promise resolved instead of rejecting), the test fails.
+The cleaner approach using `.rejects`:
 
 ```typescript
-test('rejects on database error', async () => {
-  expect.assertions(2); // exactly 2 assertions must run
+it('throws ConflictError for duplicate email', async () => {
+  await userService.create({ email: 'alice@example.com' });
 
-  mockDb.query.mockRejectedValue(new Error('Connection refused'));
+  await expect(
+    userService.create({ email: 'alice@example.com' }),
+  ).rejects.toThrow(ConflictError);
+});
+```
+
+## `expect.assertions(N)` — Guard Against Silent Passes
+
+`expect.assertions(N)` declares that exactly N assertions must be called during the test. If the async code never executes, the test fails.
+
+```typescript
+it('handles the rejection path', async () => {
+  // This test MUST execute exactly 2 assertions
+  expect.assertions(2);
 
   try {
-    await userService.findById(1);
+    await fetchUser(-1);
   } catch (error) {
-    expect(error).toBeInstanceOf(DatabaseError); // assertion 1
-    expect((error as DatabaseError).message).toContain('Connection refused'); // assertion 2
+    expect(error).toBeInstanceOf(ValidationError);       // assertion 1
+    expect((error as ValidationError).statusCode).toBe(400); // assertion 2
   }
 });
 ```
 
-Without `expect.assertions(2)`, if `findById` unexpectedly resolves, the `catch` block never runs, the test has zero assertions, and **Jest considers it a pass**.
-
-Use `expect.hasAssertions()` when you know at least one assertion should run, but you don't know exactly how many:
-
 ```typescript
-test('processes all items', async () => {
+// expect.hasAssertions() — at least 1 assertion must have run
+it('calls the success callback', (done) => {
   expect.hasAssertions();
 
-  const items = await fetchItems();
-  items.forEach((item) => {
-    expect(item).toHaveProperty('id');
+  service.process((result) => {
+    expect(result).toBe('ok');
+    done();
   });
 });
 ```
 
-## Testing `setTimeout` and `setInterval` with Fake Timers
+:::tip[When to Use expect.assertions()]
+Use `expect.assertions(N)` whenever you test error/rejection paths using try/catch. Without it, a bug that makes the code succeed silently will cause your catch block never to run, and the test will pass without executing any assertions.
+:::
+
+## Testing setTimeout and setInterval with Fake Timers
 
 ```typescript
-// src/utils/debounce.ts
-export function debounce<T extends (...args: unknown[]) => void>(
-  fn: T,
-  delay: number,
-): T {
-  let timer: ReturnType<typeof setTimeout>;
-  return function (this: unknown, ...args: Parameters<T>) {
-    clearTimeout(timer);
-    timer = setTimeout(() => fn.apply(this, args), delay);
-  } as T;
-}
-```
-
-```typescript
-// src/utils/debounce.test.ts
-import { debounce } from './debounce';
-
-describe('debounce', () => {
+describe('retry logic', () => {
   beforeEach(() => {
     jest.useFakeTimers();
   });
@@ -216,71 +211,35 @@ describe('debounce', () => {
     jest.useRealTimers();
   });
 
-  it('calls the function after the delay', () => {
-    const mockFn = jest.fn();
-    const debounced = debounce(mockFn, 300);
+  it('retries 3 times with exponential backoff', async () => {
+    const mockApi = jest.fn()
+      .mockRejectedValueOnce(new Error('Timeout'))
+      .mockRejectedValueOnce(new Error('Timeout'))
+      .mockResolvedValueOnce({ data: 'success' });
 
-    debounced('call 1');
-    expect(mockFn).not.toHaveBeenCalled(); // not called yet
+    const promise = retryWithBackoff(mockApi, { maxRetries: 3 });
 
-    jest.advanceTimersByTime(300);
-    expect(mockFn).toHaveBeenCalledTimes(1);
-    expect(mockFn).toHaveBeenCalledWith('call 1');
+    // First retry fires after 1000ms
+    await jest.advanceTimersByTimeAsync(1000);
+    expect(mockApi).toHaveBeenCalledTimes(2);
+
+    // Second retry fires after 2000ms
+    await jest.advanceTimersByTimeAsync(2000);
+    expect(mockApi).toHaveBeenCalledTimes(3);
+
+    const result = await promise;
+    expect(result).toEqual({ data: 'success' });
   });
 
-  it('only calls the function once for rapid calls', () => {
-    const mockFn = jest.fn();
-    const debounced = debounce(mockFn, 300);
+  it('polls for status every 5 seconds', () => {
+    const mockPoll = jest.fn().mockReturnValue('pending');
+    startPolling(mockPoll, 5000);
 
-    debounced('call 1');
-    debounced('call 2');
-    debounced('call 3');
+    jest.advanceTimersByTime(5000);
+    expect(mockPoll).toHaveBeenCalledTimes(1);
 
-    jest.advanceTimersByTime(300);
-
-    expect(mockFn).toHaveBeenCalledTimes(1);
-    expect(mockFn).toHaveBeenCalledWith('call 3'); // last call wins
-  });
-});
-```
-
-### Testing polling with `setInterval`
-
-```typescript
-// src/utils/poller.ts
-export class StatusPoller {
-  private intervalId: ReturnType<typeof setInterval> | null = null;
-
-  start(checkFn: () => Promise<void>, intervalMs: number) {
-    this.intervalId = setInterval(checkFn, intervalMs);
-  }
-
-  stop() {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-    }
-  }
-}
-```
-
-```typescript
-describe('StatusPoller', () => {
-  beforeEach(() => jest.useFakeTimers());
-  afterEach(() => jest.useRealTimers());
-
-  it('calls checkFn at the specified interval', async () => {
-    const checkFn = jest.fn().mockResolvedValue(undefined);
-    const poller = new StatusPoller();
-
-    poller.start(checkFn, 1000);
-
-    jest.advanceTimersByTime(3500);
-
-    // Called at t=1000, t=2000, t=3000
-    expect(checkFn).toHaveBeenCalledTimes(3);
-
-    poller.stop();
+    jest.advanceTimersByTime(15000);
+    expect(mockPoll).toHaveBeenCalledTimes(4);
   });
 });
 ```
@@ -288,57 +247,50 @@ describe('StatusPoller', () => {
 ## Testing `fetch`
 
 ```typescript
-// src/services/weatherService.ts
-export async function getWeather(city: string) {
-  const response = await fetch(`https://api.weather.com/v1/current?q=${city}`);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch weather: ${response.status}`);
-  }
-  return response.json();
-}
-```
-
-```typescript
-// src/services/weatherService.test.ts
+// Global fetch mock using jest.fn()
 global.fetch = jest.fn();
 
-describe('getWeather', () => {
+const mockFetch = global.fetch as jest.MockedFunction<typeof fetch>;
+
+describe('apiClient', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
-  });
-
-  it('returns weather data for a valid city', async () => {
-    const mockData = { city: 'Paris', temp: 22, condition: 'Sunny' };
-    (global.fetch as jest.Mock).mockResolvedValue({
+    mockFetch.mockResolvedValue({
       ok: true,
-      json: jest.fn().mockResolvedValue(mockData),
-    });
-
-    const result = await getWeather('Paris');
-
-    expect(global.fetch).toHaveBeenCalledWith(
-      'https://api.weather.com/v1/current?q=Paris',
-    );
-    expect(result).toEqual(mockData);
+      status: 200,
+      json: jest.fn().mockResolvedValue({ id: 1, name: 'Alice' }),
+    } as unknown as Response);
   });
 
-  it('throws on non-OK response', async () => {
-    (global.fetch as jest.Mock).mockResolvedValue({
+  afterEach(() => {
+    mockFetch.mockReset();
+  });
+
+  it('calls the correct endpoint with authorization header', async () => {
+    await apiClient.getUser(1);
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      '/api/users/1',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer test-token',
+        }),
+      }),
+    );
+  });
+
+  it('returns parsed JSON on success', async () => {
+    const user = await apiClient.getUser(1);
+    expect(user).toEqual({ id: 1, name: 'Alice' });
+  });
+
+  it('throws ApiError when response is not ok', async () => {
+    mockFetch.mockResolvedValueOnce({
       ok: false,
       status: 404,
-    });
+      json: jest.fn().mockResolvedValue({ message: 'User not found' }),
+    } as unknown as Response);
 
-    await expect(getWeather('Atlantis')).rejects.toThrow(
-      'Failed to fetch weather: 404',
-    );
-  });
-
-  it('propagates network errors', async () => {
-    (global.fetch as jest.Mock).mockRejectedValue(
-      new TypeError('Failed to fetch'),
-    );
-
-    await expect(getWeather('Paris')).rejects.toThrow('Failed to fetch');
+    await expect(apiClient.getUser(999)).rejects.toThrow(ApiError);
   });
 });
 ```
@@ -346,47 +298,46 @@ describe('getWeather', () => {
 ## Testing Axios
 
 ```typescript
-// src/services/userApiService.ts
 import axios from 'axios';
-
-export async function getUser(id: number) {
-  const { data } = await axios.get(`/api/users/${id}`);
-  return data;
-}
-
-export async function createUser(payload: { name: string; email: string }) {
-  const { data } = await axios.post('/api/users', payload);
-  return data;
-}
-```
-
-```typescript
-// src/services/userApiService.test.ts
-import axios from 'axios';
-import { getUser, createUser } from './userApiService';
 
 jest.mock('axios');
+
 const mockedAxios = axios as jest.Mocked<typeof axios>;
 
-describe('getUser', () => {
-  it('fetches user by ID', async () => {
+describe('UserRepository', () => {
+  it('fetches a user by ID', async () => {
     mockedAxios.get.mockResolvedValue({
-      data: { id: 1, name: 'Alice', email: 'alice@example.com' },
+      data: { id: 1, name: 'Alice' },
+      status: 200,
     });
 
-    const user = await getUser(1);
+    const user = await userRepository.findById(1);
 
     expect(mockedAxios.get).toHaveBeenCalledWith('/api/users/1');
-    expect(user.name).toBe('Alice');
+    expect(user).toEqual({ id: 1, name: 'Alice' });
   });
 
-  it('throws on 404', async () => {
-    const error = Object.assign(new Error('Not Found'), {
-      response: { status: 404, data: { message: 'User not found' } },
+  it('handles Axios network errors', async () => {
+    mockedAxios.get.mockRejectedValue({
+      isAxiosError: true,
+      response: { status: 503, data: { message: 'Service unavailable' } },
     });
-    mockedAxios.get.mockRejectedValue(error);
 
-    await expect(getUser(999)).rejects.toThrow('Not Found');
+    await expect(userRepository.findById(1)).rejects.toThrow('Service unavailable');
+  });
+
+  it('handles POST requests', async () => {
+    const newUser = { name: 'Bob', email: 'bob@example.com' };
+
+    mockedAxios.post.mockResolvedValue({
+      data: { id: 2, ...newUser },
+      status: 201,
+    });
+
+    const created = await userRepository.create(newUser);
+
+    expect(mockedAxios.post).toHaveBeenCalledWith('/api/users', newUser);
+    expect(created.id).toBe(2);
   });
 });
 ```
@@ -394,124 +345,93 @@ describe('getUser', () => {
 ## Testing Event Emitters
 
 ```typescript
-// src/events/eventBus.ts
 import { EventEmitter } from 'events';
 
-export class OrderEventBus extends EventEmitter {
-  placeOrder(order: Order) {
-    // ... process order
-    this.emit('order:placed', order);
-    return order;
+class DataStream extends EventEmitter {
+  async start() {
+    // Emits 'data' events as it processes
+    for (const chunk of await fetchChunks()) {
+      this.emit('data', chunk);
+    }
+    this.emit('end');
   }
 }
-```
 
-```typescript
-// src/events/eventBus.test.ts
-import { OrderEventBus } from './eventBus';
+describe('DataStream', () => {
+  it('emits data events for each chunk', (done) => {
+    const stream = new DataStream();
+    const receivedData: string[] = [];
 
-test('emits order:placed event when order is placed', (done) => {
-  const bus = new OrderEventBus();
-  const order = { id: 1, item: 'Widget', quantity: 2 };
+    stream.on('data', (chunk) => {
+      receivedData.push(chunk);
+    });
 
-  bus.on('order:placed', (emittedOrder) => {
-    expect(emittedOrder).toEqual(order);
-    done();
+    stream.on('end', () => {
+      try {
+        expect(receivedData).toHaveLength(3);
+        expect(receivedData).toEqual(['chunk1', 'chunk2', 'chunk3']);
+        done();
+      } catch (error) {
+        done(error);
+      }
+    });
+
+    stream.start();
   });
 
-  bus.placeOrder(order);
-});
+  it('resolves a promise when end event fires', () => {
+    const stream = new DataStream();
 
-// Using a mock listener
-test('notifies all listeners', () => {
-  const bus = new OrderEventBus();
-  const listener = jest.fn();
+    const endPromise = new Promise<void>((resolve) => {
+      stream.on('end', resolve);
+    });
 
-  bus.on('order:placed', listener);
-  bus.placeOrder({ id: 1, item: 'Widget', quantity: 2 });
-  bus.placeOrder({ id: 2, item: 'Gadget', quantity: 1 });
+    stream.start();
 
-  expect(listener).toHaveBeenCalledTimes(2);
-  expect(listener).toHaveBeenNthCalledWith(
-    1,
-    expect.objectContaining({ item: 'Widget' }),
-  );
+    return expect(endPromise).resolves.toBeUndefined();
+  });
 });
 ```
 
-## Retry Logic Testing
+## Testing Polling Functions
 
 ```typescript
-// src/utils/withRetry.ts
-export async function withRetry<T>(
-  fn: () => Promise<T>,
-  options: { maxRetries: number; delayMs: number },
-): Promise<T> {
-  let lastError: Error;
-  for (let attempt = 0; attempt <= options.maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (error) {
-      lastError = error as Error;
-      if (attempt < options.maxRetries) {
-        await new Promise((resolve) => setTimeout(resolve, options.delayMs));
-      }
-    }
-  }
-  throw lastError!;
-}
-```
-
-```typescript
-// src/utils/withRetry.test.ts
-import { withRetry } from './withRetry';
-
-describe('withRetry', () => {
+describe('pollUntilComplete', () => {
   beforeEach(() => jest.useFakeTimers());
   afterEach(() => jest.useRealTimers());
 
-  it('returns the result on first success', async () => {
-    const mockFn = jest.fn().mockResolvedValue('success');
+  it('resolves when the condition is met', async () => {
+    let callCount = 0;
+    const mockCheck = jest.fn().mockImplementation(async () => {
+      callCount++;
+      return callCount >= 3 ? 'complete' : 'pending';
+    });
 
-    const result = await withRetry(mockFn, { maxRetries: 3, delayMs: 100 });
+    const promise = pollUntilComplete(mockCheck, {
+      interval: 1000,
+      condition: (result) => result === 'complete',
+    });
 
-    expect(result).toBe('success');
-    expect(mockFn).toHaveBeenCalledTimes(1);
+    await jest.advanceTimersByTimeAsync(2500);
+
+    const result = await promise;
+    expect(result).toBe('complete');
+    expect(mockCheck).toHaveBeenCalledTimes(3);
   });
 
-  it('retries on failure and eventually succeeds', async () => {
-    const mockFn = jest
-      .fn()
-      .mockRejectedValueOnce(new Error('Attempt 1 failed'))
-      .mockRejectedValueOnce(new Error('Attempt 2 failed'))
-      .mockResolvedValue('success on attempt 3');
+  it('rejects after the maximum number of attempts', async () => {
+    const mockCheck = jest.fn().mockResolvedValue('pending');
 
-    const resultPromise = withRetry(mockFn, { maxRetries: 3, delayMs: 100 });
+    const promise = pollUntilComplete(mockCheck, {
+      interval: 1000,
+      maxAttempts: 5,
+      condition: (result) => result === 'complete',
+    });
 
-    // Advance through the delay periods
-    await Promise.resolve(); // let first attempt run
-    jest.advanceTimersByTime(100);
-    await Promise.resolve(); // let second attempt run
-    jest.advanceTimersByTime(100);
+    await jest.advanceTimersByTimeAsync(5000);
 
-    const result = await resultPromise;
-
-    expect(result).toBe('success on attempt 3');
-    expect(mockFn).toHaveBeenCalledTimes(3);
-  });
-
-  it('throws after exhausting all retries', async () => {
-    const mockFn = jest.fn().mockRejectedValue(new Error('Always fails'));
-
-    const resultPromise = withRetry(mockFn, { maxRetries: 2, delayMs: 50 });
-
-    for (let i = 0; i < 2; i++) {
-      await Promise.resolve();
-      jest.advanceTimersByTime(50);
-    }
-
-    await expect(resultPromise).rejects.toThrow('Always fails');
-    expect(mockFn).toHaveBeenCalledTimes(3); // 1 initial + 2 retries
+    await expect(promise).rejects.toThrow('Max attempts exceeded');
+    expect(mockCheck).toHaveBeenCalledTimes(5);
   });
 });
 ```
@@ -519,67 +439,85 @@ describe('withRetry', () => {
 ## Real-World Async Service Test
 
 ```typescript
-// src/services/orderService.test.ts
-import { OrderService } from './orderService';
-import { paymentGateway } from './paymentGateway';
-import { inventoryService } from './inventoryService';
-import { emailService } from './emailService';
+// src/services/orderService.ts
+export class OrderService {
+  constructor(
+    private readonly db: Database,
+    private readonly paymentGateway: PaymentGateway,
+    private readonly emailService: EmailService,
+  ) {}
 
-jest.mock('./paymentGateway');
-jest.mock('./inventoryService');
-jest.mock('./emailService');
+  async placeOrder(userId: number, items: CartItem[]): Promise<Order> {
+    const total = items.reduce((sum, item) => sum + item.price * item.qty, 0);
+    const payment = await this.paymentGateway.charge(userId, total);
 
-const mockPayment = paymentGateway as jest.Mocked<typeof paymentGateway>;
-const mockInventory = inventoryService as jest.Mocked<typeof inventoryService>;
-const mockEmail = emailService as jest.Mocked<typeof emailService>;
+    if (!payment.success) {
+      throw new PaymentError(payment.declineReason);
+    }
 
-describe('OrderService.placeOrder', () => {
-  let service: OrderService;
-
-  beforeEach(() => {
-    service = new OrderService();
-    jest.clearAllMocks();
-  });
-
-  it('completes a successful order', async () => {
-    expect.assertions(4);
-
-    mockInventory.reserve.mockResolvedValue({ reservationId: 'res-123' });
-    mockPayment.charge.mockResolvedValue({ transactionId: 'txn-456' });
-    mockEmail.send.mockResolvedValue({ messageId: 'msg-789' });
-
-    const result = await service.placeOrder({
-      userId: 1,
-      items: [{ productId: 'SKU-001', quantity: 2 }],
-      paymentMethod: 'card_visa',
+    const order = await this.db.orders.create({
+      userId,
+      items,
+      total,
+      paymentId: payment.id,
     });
 
-    expect(result.status).toBe('confirmed');
-    expect(mockInventory.reserve).toHaveBeenCalledWith([
-      { productId: 'SKU-001', quantity: 2 },
-    ]);
-    expect(mockPayment.charge).toHaveBeenCalledWith(
-      expect.objectContaining({ userId: 1 }),
-    );
-    expect(mockEmail.send).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'order_confirmation' }),
+    await this.emailService.send(userId, 'order_confirmation', { order });
+    return order;
+  }
+}
+
+// __tests__/orderService.test.ts
+describe('OrderService.placeOrder', () => {
+  const mockDb = { orders: { create: jest.fn() } };
+  const mockPaymentGateway = { charge: jest.fn() };
+  const mockEmailService = { send: jest.fn() };
+
+  let service: OrderService;
+
+  const cartItems: CartItem[] = [
+    { productId: 1, name: 'Widget', price: 9.99, qty: 2 },
+    { productId: 2, name: 'Gadget', price: 49.99, qty: 1 },
+  ];
+
+  beforeEach(() => {
+    service = new OrderService(mockDb as any, mockPaymentGateway as any, mockEmailService as any);
+
+    mockPaymentGateway.charge.mockResolvedValue({ success: true, id: 'pay_123' });
+    mockDb.orders.create.mockResolvedValue({ id: 'order_456', items: cartItems, total: 69.97 });
+    mockEmailService.send.mockResolvedValue(undefined);
+  });
+
+  it('charges the correct total', async () => {
+    await service.placeOrder(1, cartItems);
+    expect(mockPaymentGateway.charge).toHaveBeenCalledWith(1, 69.97);
+  });
+
+  it('creates an order record with the payment ID', async () => {
+    await service.placeOrder(1, cartItems);
+    expect(mockDb.orders.create).toHaveBeenCalledWith(
+      expect.objectContaining({ paymentId: 'pay_123' }),
     );
   });
 
-  it('releases inventory reservation when payment fails', async () => {
-    mockInventory.reserve.mockResolvedValue({ reservationId: 'res-123' });
-    mockPayment.charge.mockRejectedValue(new Error('Card declined'));
+  it('sends a confirmation email after success', async () => {
+    const order = await service.placeOrder(1, cartItems);
+    expect(mockEmailService.send).toHaveBeenCalledWith(
+      1,
+      'order_confirmation',
+      { order },
+    );
+  });
 
-    await expect(
-      service.placeOrder({
-        userId: 1,
-        items: [{ productId: 'SKU-001', quantity: 2 }],
-        paymentMethod: 'card_expired',
-      }),
-    ).rejects.toThrow('Card declined');
+  it('throws PaymentError without creating an order when payment fails', async () => {
+    expect.assertions(2);
+    mockPaymentGateway.charge.mockResolvedValueOnce({
+      success: false,
+      declineReason: 'Insufficient funds',
+    });
 
-    expect(mockInventory.release).toHaveBeenCalledWith('res-123');
-    expect(mockEmail.send).not.toHaveBeenCalled();
+    await expect(service.placeOrder(1, cartItems)).rejects.toThrow(PaymentError);
+    expect(mockDb.orders.create).not.toHaveBeenCalled();
   });
 });
 ```

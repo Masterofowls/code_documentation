@@ -1,91 +1,61 @@
 ---
 title: Object-Oriented Programming in C++
-description: Classes, constructors, RAII, Rule of 0/3/5, copy and move semantics, operator overloading, inheritance, virtual dispatch, and CRTP.
+description: Classes, access specifiers, constructors, Rule of 0/3/5, copy and move semantics, operator overloading, inheritance, virtual dispatch, and CRTP.
 sidebar:
   order: 3
 tags: [systems, cpp, c]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
 # Object-Oriented Programming in C++
 
-C++ OOP goes far deeper than Java or Python — with manual control over copying, moving, destruction, and memory layout. Understanding these mechanisms is essential for writing correct, efficient C++.
+C++ provides a full OOP model: classes with access control, constructors, destructors, operator overloading, inheritance, and virtual dispatch — all with zero-overhead abstraction.
 
 ## Classes In Depth
 
 ```cpp
-#include <iostream>
 #include <string>
+#include <iostream>
 
 class BankAccount {
-public:
-    // Access specifiers: public, protected, private
-    static int total_accounts;    // Shared across all instances
+public:  // accessible by everyone
+    BankAccount(std::string owner, double initial_balance);
 
-    // Constructor
-    BankAccount(std::string owner, double balance = 0.0)
-        : m_owner(std::move(owner))
-        , m_balance(balance)
-        , m_id(++total_accounts)
-    {}
+    void deposit(double amount);
+    bool withdraw(double amount);
+    double balance() const;       // const member: does not modify *this
+    const std::string& owner() const;
 
-    // Const member function — does not modify *this
-    double balance() const { return m_balance; }
-    const std::string& owner() const { return m_owner; }
-    int id() const { return m_id; }
+    // mutable: can be modified even in a const member function
+    mutable int access_count = 0;
 
-    // Non-const member function
-    bool deposit(double amount) {
-        if (amount <= 0) return false;
-        m_balance += amount;
-        return true;
-    }
+protected: // accessible by this class and derived classes
+    double balance_;
 
-    bool withdraw(double amount) {
-        if (amount <= 0 || amount > m_balance) return false;
-        m_balance -= amount;
-        return true;
-    }
+private:  // accessible only within this class (and friends)
+    std::string owner_;
 
-    // mutable: can be modified even in const member functions
-    // Useful for caches, lazy initialization, mutexes
-    mutable int m_access_count = 0;
-
-    double balance_cached() const {
-        ++m_access_count;   // OK: mutable field
-        return m_balance;
-    }
-
-    // Friend: grants access to private/protected members
-    friend std::ostream& operator<<(std::ostream& os, const BankAccount& a);
-
-    // this pointer: pointer to current object
-    BankAccount& transfer_to(BankAccount& other, double amount) {
-        if (this == &other) return *this;  // Self-transfer check
-        if (withdraw(amount)) other.deposit(amount);
-        return *this;  // Return *this for chaining
-    }
-
-private:
-    std::string m_name_prefix = "ACC";  // In-class default
-    std::string m_owner;
-    double      m_balance;
-    int         m_id;
+    // Friend declaration: grants access to private members
+    friend class Auditor;
+    friend std::ostream& operator<<(std::ostream&, const BankAccount&);
 };
 
-int BankAccount::total_accounts = 0;  // Static member definition
+// Inline definition after class declaration
+double BankAccount::balance() const {
+    ++access_count;   // OK: mutable member
+    return balance_;
+}
 
-std::ostream& operator<<(std::ostream& os, const BankAccount& a) {
-    return os << "Account[" << a.m_id << "] " << a.m_owner
-              << " $" << a.m_balance;
+bool BankAccount::withdraw(double amount) {
+    if (amount > balance_) return false;
+    balance_ -= amount;
+    return true;
+}
+
+// The 'this' pointer: points to the current object
+void BankAccount::deposit(double amount) {
+    this->balance_ += amount;  // explicit this->; usually omitted
 }
 ```
 
@@ -93,66 +63,49 @@ std::ostream& operator<<(std::ostream& os, const BankAccount& a) {
 
 ```cpp
 #include <string>
-#include <iostream>
-#include <initializer_list>
+#include <vector>
+#include <utility>   // std::move
 
-class Point {
+class Person {
 public:
-    // Default constructor (compiler generates if no user-provided constructor)
-    Point() : x(0.0), y(0.0) {}
+    // Default constructor
+    Person() : name_("Unknown"), age_(0) {}
 
-    // Parameterized constructor
-    Point(double x, double y) : x(x), y(y) {}
-
-    // Explicit prevents implicit conversion
-    explicit Point(double scalar) : x(scalar), y(scalar) {}
-
-    // Delegating constructor (C++11): calls another constructor
-    Point(double val) : Point(val, val) {}  // Wait — this conflicts with explicit above
-
-    // Copy constructor
-    Point(const Point& other) : x(other.x), y(other.y) {}
-
-    // Move constructor (C++11)
-    Point(Point&& other) noexcept : x(other.x), y(other.y) {
-        other.x = other.y = 0.0;  // Leave moved-from in valid state
+    // Parameterized constructor with member initializer list
+    // Prefer initializer list over assignment in body — more efficient
+    Person(std::string name, int age)
+        : name_(std::move(name)), age_(age) {
+        if (age_ < 0) throw std::invalid_argument("Age cannot be negative");
     }
 
-    // default/delete
-    Point& operator=(const Point&) = default;  // Compiler generates
-    // ~Point() = default;
+    // Delegating constructor (C++11): call another constructor
+    explicit Person(std::string name) : Person(std::move(name), 0) {}
 
-    double x, y;
+    // explicit: prevents implicit conversion
+    explicit Person(int age) : Person("Unknown", age) {}
+
+    // Copy constructor
+    Person(const Person& other)
+        : name_(other.name_), age_(other.age_) {}
+
+    // Move constructor (C++11)
+    Person(Person&& other) noexcept
+        : name_(std::move(other.name_)), age_(std::exchange(other.age_, 0)) {}
+
+private:
+    std::string name_;
+    int         age_;
 };
 
-// Aggregate initialization (C++20 designated initializers work with aggregates)
-struct Config {
-    int width  = 800;
-    int height = 600;
-    bool fullscreen = false;
-    std::string title = "Window";
-};
+// Aggregate initialization (C++11/17): classes with no user-provided constructors
+struct Point { double x, y, z; };
+Point p = {1.0, 2.0, 3.0};          // positional
+Point q = {.x = 1.0, .z = 3.0};    // C++20 designated initializers
 
-Config cfg{
-    .width      = 1920,
-    .height     = 1080,
-    .fullscreen = true,
-    // title uses default: "Window"
-};
-
-// std::initializer_list constructor
-class NumberList {
-public:
-    NumberList(std::initializer_list<int> vals)
-        : data(vals.begin(), vals.end()) {}
-
-    std::vector<int> data;
-};
-
-NumberList nl = {1, 2, 3, 4, 5};  // Uses initializer_list constructor
-
-// explicit prevents: NumberList nl2 = {1}; using copy-init
-// Without explicit: NumberList nl3(42); and NumberList nl3 = 42; would work
+// Brace initialization: works with any constructor, prevents narrowing
+Person alice{"Alice", 30};   // same as Person("Alice", 30)
+Person bob{42};              // calls explicit Person(int)
+std::vector<int> v{1,2,3,4}; // initializer_list constructor
 ```
 
 ## Destructor and RAII
@@ -162,307 +115,371 @@ RAII (Resource Acquisition Is Initialization) ties resource lifetime to object l
 ```cpp
 #include <cstdio>
 #include <stdexcept>
-#include <memory>
 
-// RAII file wrapper: file is closed automatically
+// RAII wrapper for FILE*
 class FileGuard {
 public:
-    explicit FileGuard(const char* path, const char* mode) {
-        m_file = fopen(path, mode);
-        if (!m_file) {
-            throw std::runtime_error(std::string("Cannot open: ") + path);
-        }
+    explicit FileGuard(const char *path, const char *mode) {
+        file_ = std::fopen(path, mode);
+        if (!file_) throw std::runtime_error("Cannot open file");
     }
 
-    // Destructor: runs automatically when object goes out of scope
-    // Even if an exception is thrown — guaranteed cleanup
+    // Destructor: automatically called when object goes out of scope
     ~FileGuard() {
-        if (m_file) {
-            fclose(m_file);
-            m_file = nullptr;
-        }
+        if (file_) std::fclose(file_);
     }
 
-    // Delete copy (resource should not be shared)
-    FileGuard(const FileGuard&) = delete;
+    FILE* get() const { return file_; }
+
+    // Non-copyable, non-movable (simplest case)
+    FileGuard(const FileGuard&)            = delete;
     FileGuard& operator=(const FileGuard&) = delete;
 
-    // Allow move
-    FileGuard(FileGuard&& other) noexcept : m_file(other.m_file) {
-        other.m_file = nullptr;
-    }
-
-    FILE* get() const { return m_file; }
-
 private:
-    FILE* m_file = nullptr;
+    FILE* file_;
 };
 
-void process_file(const char* path) {
-    FileGuard f(path, "r");  // Opens file
+void process_file(const char *path) {
+    FileGuard f(path, "r");    // file is opened
     // ... use f.get() ...
-    // File automatically closed when f goes out of scope — even on exception
-}
+    // file is automatically closed when f goes out of scope,
+    // even if an exception is thrown — no leaks!
+}  // ~FileGuard() called here
 ```
 
-## Rule of 0/3/5
+## Rule of 0 / 3 / 5
+
+<CardGrid>
+  <Card title="Rule of Zero" icon="approve-check">
+    If your class doesn't directly manage a raw resource (raw pointer, file descriptor), do nothing — let the compiler generate copy/move/destructor. Use smart pointers and RAII wrappers.
+  </Card>
+  <Card title="Rule of Three" icon="warning">
+    If you define any of: destructor, copy constructor, copy assignment — define all three. (C++03 and earlier)
+  </Card>
+  <Card title="Rule of Five" icon="warning">
+    If you define any of: destructor, copy constructor, copy assignment, move constructor, move assignment — define all five. (C++11+)
+  </Card>
+</CardGrid>
 
 ```cpp
-#include <string>
-#include <cstring>
-#include <utility>
-
-// RULE OF 0: If your class doesn't manage resources directly,
-// let the compiler generate all special members.
-class GoodClass {
-    std::string name;
-    std::vector<int> data;
-    // No user-defined destructor, copy, or move needed
-    // std::string and std::vector handle their own resources
-};
-
-// RULE OF 3 (pre-C++11): If you define any of:
-//   destructor, copy constructor, copy assignment
-// you should define ALL THREE.
-class OldResource {
+// Rule of Five example: manually managed resource
+class Buffer {
 public:
-    OldResource(size_t n) : data(new int[n]), size(n) {}
-    ~OldResource() { delete[] data; }
+    explicit Buffer(size_t size)
+        : data_(new int[size]), size_(size) {}
 
-    // Copy constructor
-    OldResource(const OldResource& other)
-        : data(new int[other.size]), size(other.size)
-    {
-        std::memcpy(data, other.data, size * sizeof(int));
+    // 1. Destructor
+    ~Buffer() { delete[] data_; }
+
+    // 2. Copy constructor: deep copy
+    Buffer(const Buffer& other)
+        : data_(new int[other.size_]), size_(other.size_) {
+        std::copy(other.data_, other.data_ + size_, data_);
     }
 
-    // Copy assignment
-    OldResource& operator=(const OldResource& other) {
-        if (this == &other) return *this;  // Self-assignment check
-        delete[] data;
-        size = other.size;
-        data = new int[size];
-        std::memcpy(data, other.data, size * sizeof(int));
-        return *this;
-    }
-
-private:
-    int* data;
-    size_t size;
-};
-
-// RULE OF 5 (C++11): Add move constructor and move assignment
-class Resource {
-public:
-    Resource(size_t n) : m_data(new int[n]), m_size(n) {}
-    ~Resource() { delete[] m_data; }
-
-    // Copy
-    Resource(const Resource& o) : m_data(new int[o.m_size]), m_size(o.m_size) {
-        std::memcpy(m_data, o.m_data, m_size * sizeof(int));
-    }
-
-    Resource& operator=(const Resource& o) {
-        Resource tmp(o);  // Copy-and-swap idiom — exception safe
-        swap(tmp);
-        return *this;
-    }
-
-    // Move — transfer ownership without copying
-    Resource(Resource&& o) noexcept
-        : m_data(o.m_data), m_size(o.m_size)
-    {
-        o.m_data = nullptr;  // Leave moved-from in valid state
-        o.m_size = 0;
-    }
-
-    Resource& operator=(Resource&& o) noexcept {
-        if (this != &o) {
-            delete[] m_data;
-            m_data = o.m_data;
-            m_size = o.m_size;
-            o.m_data = nullptr;
-            o.m_size = 0;
+    // 3. Copy assignment: deep copy with self-assignment check
+    Buffer& operator=(const Buffer& other) {
+        if (this != &other) {
+            int* new_data = new int[other.size_];
+            std::copy(other.data_, other.data_ + other.size_, new_data);
+            delete[] data_;
+            data_ = new_data;
+            size_ = other.size_;
         }
         return *this;
     }
 
-    void swap(Resource& o) noexcept {
-        std::swap(m_data, o.m_data);
-        std::swap(m_size, o.m_size);
+    // 4. Move constructor: steal the resource
+    Buffer(Buffer&& other) noexcept
+        : data_(other.data_), size_(other.size_) {
+        other.data_ = nullptr;  // leave moved-from in valid but unspecified state
+        other.size_ = 0;
     }
 
+    // 5. Move assignment
+    Buffer& operator=(Buffer&& other) noexcept {
+        if (this != &other) {
+            delete[] data_;
+            data_       = other.data_;
+            size_       = other.size_;
+            other.data_ = nullptr;
+            other.size_ = 0;
+        }
+        return *this;
+    }
+
+    int*   data() { return data_; }
+    size_t size() const { return size_; }
+
 private:
-    int*   m_data = nullptr;
-    size_t m_size = 0;
+    int*   data_;
+    size_t size_;
 };
 ```
 
-## Move Semantics
+## Copy and Move Semantics
 
 ```cpp
-#include <string>
+#include <utility>   // std::move, std::forward
 #include <vector>
-#include <utility>
+#include <string>
 
-// std::move doesn't move — it casts to rvalue reference
-// enabling the move constructor/assignment to be selected
-void move_demo() {
-    std::string s1 = "Hello, World!";
-    std::string s2 = std::move(s1);  // s1 now in valid but unspecified state
-    // s1 may be empty; s2 has "Hello, World!"
+void copy_move_demo() {
+    std::string s1 = "hello";
 
-    std::vector<int> v1 = {1, 2, 3, 4, 5};
-    std::vector<int> v2 = std::move(v1);  // O(1) — just pointer swap
-    // v1 is now empty (implementation-defined but typically cleared)
+    // Copy: new string, both s1 and s2 are valid
+    std::string s2 = s1;
+    std::cout << s1 << " " << s2 << '\n';  // hello hello
 
-    // std::forward: perfect forwarding — preserve lvalue/rvalue-ness
-    // Used in generic code (templates)
-    auto wrapper = [](auto&& arg) {
-        process(std::forward<decltype(arg)>(arg));
-    };
+    // Move: transfers ownership, s1 is left in valid but unspecified state
+    std::string s3 = std::move(s1);
+    // s1 may be empty now — don't use s1's value after move
+    std::cout << s3 << '\n';               // hello
+
+    // Move is used automatically for:
+    // - Return values (NRVO/RVO: compiler may elide the copy/move entirely)
+    // - Objects being inserted at end of container
+    // - Temporaries (rvalue expressions)
+
+    std::vector<std::string> v;
+    v.push_back("world");          // copy from lvalue
+    v.push_back(std::string("world")); // move from temporary
+    v.emplace_back("world");       // construct in-place (best)
+
+    // std::move does NOT move — it's a cast to rvalue reference
+    // The actual move happens in the constructor/assignment operator
 }
 
-// Return value optimization (RVO/NRVO): compiler eliminates copies
-std::vector<int> make_vector(int n) {
-    std::vector<int> result;
-    result.reserve(n);
-    for (int i = 0; i < n; i++) result.push_back(i);
-    return result;  // NRVO: no copy or move — constructed in-place at call site
+// Perfect forwarding: pass arguments to another function preserving value category
+template <typename T, typename... Args>
+T* make_object(Args&&... args) {
+    return new T(std::forward<Args>(args)...);
+    // forward: passes lvalue as lvalue, rvalue as rvalue
 }
 ```
 
 ## Operator Overloading
 
 ```cpp
-#include <ostream>
-#include <compare>
+#include <iostream>
+#include <compare>  // std::strong_ordering (C++20)
 #include <cmath>
 
 struct Vec2 {
-    double x, y;
+    float x, y;
 
-    Vec2(double x = 0, double y = 0) : x(x), y(y) {}
+    // Arithmetic operators (non-member, symmetric)
+    friend Vec2 operator+(Vec2 a, const Vec2& b) { return {a.x+b.x, a.y+b.y}; }
+    friend Vec2 operator-(Vec2 a, const Vec2& b) { return {a.x-b.x, a.y-b.y}; }
+    friend Vec2 operator*(Vec2 v, float s)        { return {v.x*s, v.y*s}; }
+    friend Vec2 operator*(float s, Vec2 v)        { return {s*v.x, s*v.y}; }
 
-    // Arithmetic (member functions)
-    Vec2 operator+(const Vec2& o) const { return {x+o.x, y+o.y}; }
-    Vec2 operator-(const Vec2& o) const { return {x-o.x, y-o.y}; }
-    Vec2 operator*(double scalar) const { return {x*scalar, y*scalar}; }
-    Vec2 operator/(double scalar) const { return {x/scalar, y/scalar}; }
-    Vec2 operator-() const { return {-x, -y}; }  // Unary minus
+    // Compound assignment (member)
+    Vec2& operator+=(const Vec2& rhs) { x += rhs.x; y += rhs.y; return *this; }
+    Vec2& operator-=(const Vec2& rhs) { x -= rhs.x; y -= rhs.y; return *this; }
+    Vec2& operator*=(float s)         { x *= s; y *= s; return *this; }
 
-    Vec2& operator+=(const Vec2& o) { x+=o.x; y+=o.y; return *this; }
-    Vec2& operator-=(const Vec2& o) { x-=o.x; y-=o.y; return *this; }
-    Vec2& operator*=(double s) { x*=s; y*=s; return *this; }
+    // Comparison — C++20 spaceship generates all comparison operators
+    auto operator<=>(const Vec2&) const = default;  // lexicographic comparison
 
     // Subscript operator
-    double& operator[](int i) { return i == 0 ? x : y; }
-    double  operator[](int i) const { return i == 0 ? x : y; }
-
-    // Comparison (C++20 spaceship operator — generates ==, !=, <, <=, >, >=)
-    auto operator<=>(const Vec2&) const = default;
-
-    // Conversion operator
-    explicit operator bool() const { return x != 0.0 || y != 0.0; }
-
-    double length() const { return std::sqrt(x*x + y*y); }
-
-    // Non-member friend: scalar * vec2 (free function, accesses privates via friend)
-    friend Vec2 operator*(double scalar, const Vec2& v) { return v * scalar; }
-
-    // Stream output
-    friend std::ostream& operator<<(std::ostream& os, const Vec2& v) {
-        return os << '(' << v.x << ", " << v.y << ')';
+    float& operator[](int i) {
+        return i == 0 ? x : y;
     }
+    const float& operator[](int i) const {
+        return i == 0 ? x : y;
+    }
+
+    // Unary negation
+    Vec2 operator-() const { return {-x, -y}; }
+
+    // Stream output (friend non-member)
+    friend std::ostream& operator<<(std::ostream& os, const Vec2& v) {
+        return os << "(" << v.x << ", " << v.y << ")";
+    }
+
+    // Function call operator (functor)
+    float operator()() const { return std::sqrt(x*x + y*y); }  // length
+
+    // Explicit conversion operator
+    explicit operator bool() const { return x != 0.0f || y != 0.0f; }
+};
+
+// Pre/post increment example
+struct Counter {
+    int value = 0;
+    Counter& operator++()    { ++value; return *this; }   // pre-increment
+    Counter  operator++(int) { Counter tmp = *this; ++value; return tmp; } // post-increment
 };
 ```
 
-## Inheritance and Virtual Dispatch
+## Inheritance
 
 ```cpp
-#include <iostream>
 #include <memory>
 #include <vector>
-#include <string>
+#include <iostream>
 
-// Abstract base class
+// Abstract base class (interface)
 class Shape {
 public:
-    // Virtual destructor: REQUIRED for polymorphic base classes
+    // Pure virtual: subclasses MUST override
+    virtual double area() const = 0;
+    virtual double perimeter() const = 0;
+    virtual void draw() const = 0;
+
+    // Non-pure virtual: provides default, can be overridden
+    virtual std::string name() const { return "Shape"; }
+
+    // Virtual destructor: REQUIRED when using base class pointers
     virtual ~Shape() = default;
 
-    // Pure virtual: must be overridden in derived class
-    virtual double area()      const = 0;
-    virtual double perimeter() const = 0;
-
-    // Virtual with default implementation
-    virtual std::string describe() const {
-        return "Shape with area " + std::to_string(area());
-    }
-
-    // Non-virtual (not intended to be overridden)
-    void print() const {
-        std::cout << describe() << '\n';
-    }
+protected:
+    static constexpr double PI = 3.14159265358979;
 };
 
-class Circle final : public Shape {  // final: cannot be derived from
+class Circle : public Shape {   // public inheritance (IS-A relationship)
 public:
-    explicit Circle(double r) : m_radius(r) {}
+    explicit Circle(double r) : radius_(r) {}
 
-    // override: explicit that we're overriding a virtual function
-    // The compiler errors if the base class doesn't have this virtual function
-    double area()      const override { return 3.14159265 * m_radius * m_radius; }
-    double perimeter() const override { return 2 * 3.14159265 * m_radius; }
-    std::string describe() const override {
-        return "Circle(r=" + std::to_string(m_radius) + ")";
-    }
+    double area() const override { return PI * radius_ * radius_; }
+    double perimeter() const override { return 2 * PI * radius_; }
+    void draw() const override { std::cout << "○ Circle r=" << radius_ << '\n'; }
+    std::string name() const override { return "Circle"; }
 
 private:
-    double m_radius;
+    double radius_;
 };
 
 class Rectangle : public Shape {
 public:
-    Rectangle(double w, double h) : m_width(w), m_height(h) {}
-    double area()      const override { return m_width * m_height; }
-    double perimeter() const override { return 2*(m_width + m_height); }
+    Rectangle(double w, double h) : width_(w), height_(h) {}
+
+    double area() const override { return width_ * height_; }
+    double perimeter() const override { return 2 * (width_ + height_); }
+    void draw() const override { std::cout << "□ Rect " << width_ << "x" << height_ << '\n'; }
 
 private:
-    double m_width, m_height;
+    double width_, height_;
 };
 
-// Polymorphism through base class pointers
-void print_shapes(const std::vector<std::unique_ptr<Shape>>& shapes) {
-    for (const auto& s : shapes) {
-        s->print();  // Virtual dispatch: calls the correct override
-        std::cout << "  Area: " << s->area() << '\n';
-    }
+// Polymorphism via base class pointer
+void print_shape_info(const Shape& s) {
+    std::cout << s.name() << " area=" << s.area()
+              << " perimeter=" << s.perimeter() << '\n';
+    s.draw();
 }
 
-// CRTP: Curiously Recurring Template Pattern
-// Enables static polymorphism (no vtable overhead)
-template<typename Derived>
+int main() {
+    // Collection of heterogeneous shapes via smart pointers
+    std::vector<std::unique_ptr<Shape>> shapes;
+    shapes.push_back(std::make_unique<Circle>(5.0));
+    shapes.push_back(std::make_unique<Rectangle>(4.0, 6.0));
+    shapes.push_back(std::make_unique<Circle>(3.0));
+
+    for (const auto& shape : shapes) {
+        print_shape_info(*shape);  // virtual dispatch
+    }
+    return 0;
+}
+```
+
+### Virtual Table (vtable)
+
+Every class with virtual functions has a hidden vtable — an array of function pointers. Each object has a hidden vptr pointing to its class's vtable.
+
+```cpp
+// Memory layout of a derived class object (conceptual):
+// [vptr] → vtable[area, perimeter, draw, name, ~Shape]
+// [radius_]
+//
+// Virtual dispatch: obj.area() → *vptr[0](obj) — one extra indirection
+```
+
+## Multiple Inheritance and Diamond Problem
+
+```cpp
+class Animal {
+public:
+    virtual void breathe() { std::cout << "Animal breathes\n"; }
+    virtual ~Animal() = default;
+};
+
+class FlyingAnimal : virtual public Animal {  // virtual inheritance
+    virtual void fly() = 0;
+};
+
+class AquaticAnimal : virtual public Animal {  // virtual inheritance
+    virtual void swim() = 0;
+};
+
+// Duck inherits from both: shared single Animal subobject (no diamond!)
+class Duck : public FlyingAnimal, public AquaticAnimal {
+public:
+    void fly()   override { std::cout << "Duck flies\n"; }
+    void swim()  override { std::cout << "Duck swims\n"; }
+    void breathe() override { std::cout << "Duck breathes\n"; }
+};
+```
+
+## Static Members
+
+```cpp
+class Counter {
+public:
+    Counter() { ++instance_count; }
+    ~Counter() { --instance_count; }
+
+    // Static member function: no 'this' pointer, can't access non-static members
+    static int count() { return instance_count; }
+
+    // Static constexpr: inline in header is fine
+    static constexpr int kMax = 1000;
+
+private:
+    // Static member: shared across all instances
+    static int instance_count;
+};
+
+// Static member must be defined outside the class (except constexpr in C++17+)
+int Counter::instance_count = 0;
+
+Counter::count();  // 0
+Counter a, b, c;
+Counter::count();  // 3
+```
+
+## CRTP (Curiously Recurring Template Pattern)
+
+```cpp
+// Static polymorphism: virtual dispatch at compile time with zero overhead
+template <typename Derived>
 class Printable {
 public:
     void print() const {
-        // static_cast to derived — safe because Derived inherits from Printable<Derived>
         static_cast<const Derived*>(this)->print_impl();
+    }
+
+    void print_twice() const {
+        print(); print();
     }
 };
 
 class Foo : public Printable<Foo> {
-public:
-    void print_impl() const { std::cout << "Foo!\n"; }
+    friend class Printable<Foo>;
+    void print_impl() const { std::cout << "Foo\n"; }
 };
+
+class Bar : public Printable<Bar> {
+    friend class Printable<Bar>;
+    void print_impl() const { std::cout << "Bar\n"; }
+};
+
+// No vtable, no virtual dispatch — all resolved at compile time
+Foo f;
+f.print_twice();   // Foo\nFoo\n (static dispatch, inlineable)
 ```
 
-:::caution[Virtual Destructor]
-**Always declare the destructor `virtual` in a polymorphic base class.** Without it, deleting a derived object through a base pointer only calls the base destructor, leaking derived resources.
-
-```cpp
-Base* b = new Derived();
-delete b;  // UB if ~Base() is not virtual — ~Derived() never called!
-```
-
+:::tip[CRTP vs Virtual Dispatch]
+Use CRTP when the set of derived types is known at compile time and you need maximum performance (hot paths, math libraries). Use virtual dispatch when you need to store heterogeneous types in a container or when the set of subtypes isn't known at compile time.
 :::

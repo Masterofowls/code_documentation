@@ -1,304 +1,257 @@
 ---
 title: Pods & Deployments
-description: Master Kubernetes workloads — Pod specs, probes, Deployments, StatefulSets, DaemonSets, Jobs, and CronJobs.
+description: Pod specs, probes, init containers, Deployments, StatefulSets, DaemonSets, Jobs, and CronJobs in Kubernetes.
 sidebar:
   order: 3
 tags: [devops, kubernetes]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
 # Pods & Deployments
 
-Pods are the fundamental compute unit in Kubernetes. Deployments, StatefulSets, DaemonSets, and Jobs are higher-level controllers that manage pods for different workload types.
+Pods are the smallest deployable unit in Kubernetes. Deployments, StatefulSets, and DaemonSets are higher-level workload controllers that manage pods.
 
 ## Pod Specification
 
-A Pod is a group of one or more containers that share network (same IP) and storage.
+A Pod runs one or more containers that share a network namespace, hostname, and optionally storage volumes.
 
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: myapp
-  namespace: production
+  name: my-pod
+  namespace: myapp
   labels:
     app: myapp
-    version: v1.2.3
-    environment: production
+    version: "1.2.3"
   annotations:
-    prometheus.io/scrape: 'true'
-    prometheus.io/port: '9090'
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
 spec:
-  # ── Scheduling ──────────────────────────────────────────────────
-  nodeSelector:
-    kubernetes.io/arch: amd64
-
-  # ── Security context (pod-level) ────────────────────────────────
-  securityContext:
-    runAsNonRoot: true
-    runAsUser: 1001
-    runAsGroup: 1001
-    fsGroup: 1001
-    seccompProfile:
-      type: RuntimeDefault
-
-  # ── Service Account ─────────────────────────────────────────────
-  serviceAccountName: myapp-sa
-  automountServiceAccountToken: false
-
-  # ── Init containers (run to completion before main containers) ──
-  initContainers:
-    - name: wait-for-db
-      image: busybox:1.36
-      command:
-        [
-          'sh',
-          '-c',
-          'until nc -z db 5432; do echo "waiting for db"; sleep 2; done',
-        ]
-
-    - name: db-migrate
-      image: myapp:v1.2.3
-      command: ['node', 'scripts/migrate.js']
-      env:
-        - name: DB_URL
-          valueFrom:
-            secretKeyRef:
-              name: app-secrets
-              key: db-url
-
-  # ── Main containers ─────────────────────────────────────────────
   containers:
-    - name: myapp
-      image: myapp:v1.2.3
-      imagePullPolicy: IfNotPresent # Always | Never | IfNotPresent
+    - name: app
+      image: myapp/api:1.2.3
+      imagePullPolicy: IfNotPresent   # Always | Never | IfNotPresent
 
-      # ── Ports ──────────────────────────────────────────────────
+      # ── Ports ────────────────────────────────────────────────
       ports:
         - name: http
           containerPort: 3000
           protocol: TCP
-        - name: metrics
-          containerPort: 9090
-          protocol: TCP
 
-      # ── Environment ────────────────────────────────────────────
+      # ── Environment Variables ─────────────────────────────────
       env:
+        - name: PORT
+          value: "3000"
         - name: NODE_ENV
           value: production
-        - name: PORT
-          value: '3000'
+        - name: DB_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: db_host
         - name: DB_PASSWORD
           valueFrom:
             secretKeyRef:
               name: app-secrets
-              key: db-password
-        - name: LOG_LEVEL
-          valueFrom:
-            configMapKeyRef:
-              name: app-config
-              key: log-level
-        # Downward API — inject pod metadata as env vars
-        - name: POD_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.name
-        - name: POD_NAMESPACE
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.namespace
-        - name: POD_IP
-          valueFrom:
-            fieldRef:
-              fieldPath: status.podIP
+              key: db_password
 
-      # ── Bulk env from ConfigMap and Secret ─────────────────────
+      # ── Env from ConfigMap / Secret ────────────────────────────
       envFrom:
         - configMapRef:
             name: app-config
         - secretRef:
             name: app-secrets
-            optional: true
 
-      # ── Resources ──────────────────────────────────────────────
+      # ── Resources ─────────────────────────────────────────────
       resources:
-        requests: # minimum guaranteed
-          cpu: 100m # 100 millicores = 0.1 CPU
+        requests:
+          cpu: 100m       # 100 millicores = 0.1 CPU
           memory: 128Mi
-        limits: # maximum allowed
+        limits:
           cpu: 500m
           memory: 512Mi
 
-      # ── Volume mounts ──────────────────────────────────────────
+      # ── Volume Mounts ──────────────────────────────────────────
       volumeMounts:
-        - name: app-config-volume
-          mountPath: /etc/app
+        - name: config
+          mountPath: /app/config
           readOnly: true
         - name: tmp
           mountPath: /tmp
-        - name: app-data
-          mountPath: /app/data
 
-      # ── Security context (container-level overrides pod-level) ──
-      securityContext:
-        allowPrivilegeEscalation: false
-        readOnlyRootFilesystem: true
-        capabilities:
-          drop: [ALL]
-
-      # ── Liveness probe — restart if unhealthy ─────────────────
+      # ── Probes ────────────────────────────────────────────────
       livenessProbe:
         httpGet:
-          path: /health
-          port: http
+          path: /health/live
+          port: 3000
         initialDelaySeconds: 30
-        periodSeconds: 10
+        periodSeconds: 15
         timeoutSeconds: 5
         failureThreshold: 3
-        successThreshold: 1
 
-      # ── Readiness probe — remove from Service endpoints if not ready
       readinessProbe:
         httpGet:
-          path: /ready
-          port: http
+          path: /health/ready
+          port: 3000
         initialDelaySeconds: 10
-        periodSeconds: 5
+        periodSeconds: 10
         timeoutSeconds: 3
         failureThreshold: 3
-        successThreshold: 1
 
-      # ── Startup probe — for slow-starting containers ───────────
       startupProbe:
         httpGet:
-          path: /health
-          port: http
-        initialDelaySeconds: 10
-        periodSeconds: 5
-        timeoutSeconds: 3
-        failureThreshold: 30 # allows up to 30*5s = 150s to start
+          path: /health/startup
+          port: 3000
+        failureThreshold: 30    # allows 30 × 10s = 5min to start
+        periodSeconds: 10
 
-      # ── Lifecycle hooks ────────────────────────────────────────
-      lifecycle:
-        preStop:
-          exec:
-            command: ['/bin/sh', '-c', 'sleep 5'] # drain connections
-
-    # ── Sidecar containers ──────────────────────────────────────────
-    - name: log-forwarder
-      image: fluent/fluent-bit:2.2
-      resources:
-        requests:
-          cpu: 50m
-          memory: 50Mi
-        limits:
-          cpu: 100m
-          memory: 100Mi
-      volumeMounts:
-        - name: app-logs
-          mountPath: /var/log/app
-          readOnly: true
-
-  # ── Volumes ─────────────────────────────────────────────────────
   volumes:
-    - name: app-config-volume
+    - name: config
       configMap:
         name: app-config
-        items:
-          - key: app.properties
-            path: app.properties
     - name: tmp
       emptyDir: {}
-    - name: app-data
-      persistentVolumeClaim:
-        claimName: app-data-pvc
-    - name: app-logs
-      emptyDir: {}
 
-  # ── Restart policy ──────────────────────────────────────────────
-  restartPolicy: Always # Always | OnFailure | Never
+  restartPolicy: Always   # Always | OnFailure | Never
 ```
 
 ## Probe Types
 
-All three probe types (liveness, readiness, startup) support the same handler types:
+Kubernetes supports three probe mechanisms:
 
 ```yaml
-# HTTP GET — success if status 200-399
+# HTTP GET — most common for web services
 livenessProbe:
   httpGet:
     path: /health
     port: 3000
     httpHeaders:
-      - name: X-Probe
-        value: kubernetes
+      - name: X-Health-Check
+        value: "true"
 
-# TCP Socket — success if connection established
+# TCP Socket — for non-HTTP services
 livenessProbe:
   tcpSocket:
     port: 5432
 
-# Exec — success if exit code is 0
+# Exec — run a command inside the container
 livenessProbe:
   exec:
     command:
       - sh
       - -c
-      - "redis-cli ping | grep -q PONG"
-
-# gRPC — success if SERVING status
-livenessProbe:
-  grpc:
-    port: 50051
-    service: my.grpc.Service
+      - "pg_isready -U app -d mydb"
 ```
 
-:::tip[Probe Strategy]
+### Probe Roles
 
-- **Startup probe** — for containers that take a long time to initialise (30s–5min). Disables liveness and readiness until it succeeds.
-- **Liveness probe** — "Is the container alive?" Failure → restart the container.
-- **Readiness probe** — "Is the container ready for traffic?" Failure → remove from Service endpoints (no restart).
-  :::
+| Probe | Action on failure | Use for |
+|---|---|---|
+| `livenessProbe` | Restart the container | Detect deadlocks, hung processes |
+| `readinessProbe` | Remove from Service endpoints | Signal "not ready for traffic" during startup/overload |
+| `startupProbe` | Restart if never succeeds | Slow-starting apps — replaces `initialDelaySeconds` |
+
+:::tip[startupProbe prevents false restarts]
+Without a `startupProbe`, a slow-starting app may be killed by `livenessProbe` before it finishes initialising. Use `startupProbe` with a generous `failureThreshold` to give the app time to start, then hand over to `livenessProbe`.
+:::
+
+## Init Containers
+
+Init containers run to completion before the main containers start. Useful for migrations, waiting for dependencies, or fetching secrets.
+
+```yaml
+spec:
+  initContainers:
+    # Wait for the database to be ready
+    - name: wait-for-db
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          until nc -z postgres 5432; do
+            echo "Waiting for postgres..."; sleep 2
+          done
+
+    # Run database migrations
+    - name: migrate
+      image: myapp/api:1.2.3
+      command: ["node", "dist/migrate.js"]
+      env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: database_url
+
+  containers:
+    - name: api
+      image: myapp/api:1.2.3
+```
+
+## Sidecar Containers
+
+Sidecar containers run alongside the main container in the same Pod, sharing its network and storage.
+
+```yaml
+spec:
+  containers:
+    - name: app
+      image: myapp/api:1.2.3
+      volumeMounts:
+        - name: logs
+          mountPath: /app/logs
+
+    # Sidecar: ship logs to centralised logging
+    - name: log-shipper
+      image: fluent/fluent-bit:latest
+      volumeMounts:
+        - name: logs
+          mountPath: /var/log/app
+          readOnly: true
+
+  volumes:
+    - name: logs
+      emptyDir: {}
+```
 
 ## Pod Lifecycle
 
 ```
-Pending → Running → Succeeded
-                 ↘ Failed
-                 ↘ Unknown
+┌─────────┐    ┌─────────┐    ┌───────────┐
+│ Pending │───►│ Running │───►│ Succeeded │
+└─────────┘    └────┬────┘    └───────────┘
+                    │
+                    ▼
+               ┌─────────┐
+               │  Failed │
+               └─────────┘
 ```
 
-| Phase         | Description                                                                          |
-| ------------- | ------------------------------------------------------------------------------------ |
-| **Pending**   | Pod accepted but containers not yet running (pulling images, waiting for scheduling) |
-| **Running**   | At least one container is running or starting                                        |
-| **Succeeded** | All containers exited with code 0 and will not restart                               |
-| **Failed**    | All containers exited and at least one exited with non-zero code                     |
-| **Unknown**   | Pod state cannot be determined (usually a node communication issue)                  |
+| Phase | Meaning |
+|---|---|
+| `Pending` | Accepted by cluster; containers not yet running (scheduling, image pulling) |
+| `Running` | At least one container running or starting |
+| `Succeeded` | All containers exited with code 0 (Jobs) |
+| `Failed` | At least one container exited with non-zero code |
+| `Unknown` | Cannot communicate with the node |
 
 ```bash
-# Debug pod stuck in Pending
-kubectl describe pod mypod
-# Check events for: Insufficient cpu/memory, Unschedulable, ImagePullBackOff
+# Check pod phase
+kubectl get pod my-pod -o jsonpath='{.status.phase}'
 
-# Container states
-kubectl get pod mypod -o jsonpath='{.status.containerStatuses[*].state}'
+# Detailed status
+kubectl describe pod my-pod | grep -A 10 "Conditions"
 
-# Previous container exit reason
-kubectl describe pod mypod | grep -A 10 "Last State"
+# Check container states
+kubectl get pod my-pod -o jsonpath='{.status.containerStatuses[*].state}'
 ```
 
 ## Deployment
 
-A Deployment manages a ReplicaSet, which manages Pods. It enables rolling updates, rollbacks, and self-healing.
+A Deployment manages a ReplicaSet, which manages Pods. It provides declarative updates with rollout and rollback capabilities.
 
 ```yaml
 apiVersion: apps/v1
@@ -311,34 +264,39 @@ metadata:
 spec:
   replicas: 3
 
-  # ── Selector must match pod template labels ───────────────────
+  # Must match pod template labels
   selector:
     matchLabels:
       app: myapp
 
-  # ── Rolling update strategy ───────────────────────────────────
+  # Rolling update strategy
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 1 # extra pods during update (absolute or %)
-      maxUnavailable: 0 # pods that can be unavailable (0 = no downtime)
+      maxSurge: 1          # extra pods during update (absolute or %)
+      maxUnavailable: 0    # keep all replicas up (zero-downtime)
+  # Recreate strategy — kill all old pods before starting new ones
+  # strategy:
+  #   type: Recreate
 
-  # ── How long until deployment is considered failed ────────────
-  progressDeadlineSeconds: 300
-
-  # ── Keep this many old ReplicaSets for rollback ───────────────
-  revisionHistoryLimit: 5
-
-  # ── Pod template ─────────────────────────────────────────────
   template:
     metadata:
       labels:
         app: myapp
-        version: v1.2.3
+        version: "1.2.3"
     spec:
+      # Allow at most 1 unavailable pod during node disruptions
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: myapp
+
       containers:
-        - name: myapp
-          image: myapp:v1.2.3
+        - name: app
+          image: myapp/api:1.2.3
           ports:
             - containerPort: 3000
           resources:
@@ -350,68 +308,50 @@ spec:
               memory: 512Mi
           readinessProbe:
             httpGet:
-              path: /ready
-              port: 3000
-            initialDelaySeconds: 10
-            periodSeconds: 5
-          livenessProbe:
-            httpGet:
               path: /health
               port: 3000
-            initialDelaySeconds: 30
+            initialDelaySeconds: 10
             periodSeconds: 10
-```
-
-### Recreate Strategy
-
-```yaml
-strategy:
-  type:
-    Recreate # all old pods deleted before new ones start
-    # causes downtime — use for stateful apps that can't run dual versions
 ```
 
 ### Rollout Commands
 
 ```bash
-# Trigger a rollout by updating the image
-kubectl set image deployment/myapp myapp=myapp:v1.3.0
+# Update image (triggers rolling update)
+kubectl set image deployment/myapp app=myapp/api:1.3.0
 
-# Or apply the updated manifest
+# Apply manifest changes
 kubectl apply -f deployment.yaml
 
-# Watch rollout progress
+# Check rollout status
 kubectl rollout status deployment/myapp
+# Waiting for deployment "myapp" rollout to finish: 1 out of 3 updated...
 
 # View rollout history
 kubectl rollout history deployment/myapp
 
-# View specific revision details
-kubectl rollout history deployment/myapp --revision=3
-
-# Roll back to previous version
+# Rollback to previous
 kubectl rollout undo deployment/myapp
 
-# Roll back to specific revision
-kubectl rollout undo deployment/myapp --to-revision=2
+# Rollback to specific revision
+kubectl rollout undo deployment/myapp --to-revision=3
 
-# Pause rollout (canary)
+# Pause rollout (to make multiple changes)
 kubectl rollout pause deployment/myapp
-# Inspect behaviour, then either:
-kubectl rollout resume deployment/myapp    # continue
-kubectl rollout undo deployment/myapp      # abort
+kubectl set image deployment/myapp app=myapp/api:1.3.0
+kubectl set env deployment/myapp LOG_LEVEL=debug
+kubectl rollout resume deployment/myapp
 
-# Restart all pods (force re-pull with imagePullPolicy: Always)
-kubectl rollout restart deployment/myapp
+# Annotate a rollout (shows in history)
+kubectl annotate deployment/myapp kubernetes.io/change-cause="release v1.3.0"
 ```
 
 ## StatefulSet
 
-StatefulSets are for applications that require:
-
-- **Stable network identity** — each pod gets a predictable hostname (`pod-0`, `pod-1`)
-- **Ordered deployment and scaling** — pods start/stop in sequence
-- **Stable persistent storage** — each pod gets its own PVC
+StatefulSets manage stateful applications that require:
+- Stable, unique network identities (e.g., `pod-0`, `pod-1`)
+- Stable persistent storage per pod
+- Ordered deployment and scaling
 
 ```yaml
 apiVersion: apps/v1
@@ -419,7 +359,7 @@ kind: StatefulSet
 metadata:
   name: postgres
 spec:
-  serviceName: postgres-headless # must match headless Service name
+  serviceName: postgres   # headless service name (required)
   replicas: 3
   selector:
     matchLabels:
@@ -432,8 +372,6 @@ spec:
       containers:
         - name: postgres
           image: postgres:16-alpine
-          ports:
-            - containerPort: 5432
           env:
             - name: POSTGRES_PASSWORD
               valueFrom:
@@ -443,90 +381,69 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
-          readinessProbe:
-            exec:
-              command: ['pg_isready', '-U', 'postgres']
-            initialDelaySeconds: 10
-            periodSeconds: 5
 
-  # ── Each pod gets its own PVC ──────────────────────────────────
+  # Each pod gets its own PVC from this template
   volumeClaimTemplates:
     - metadata:
         name: data
       spec:
-        accessModes: [ReadWriteOnce]
-        storageClassName: fast-ssd
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: fast
         resources:
           requests:
-            storage: 20Gi
-
-  # ── Control pod management policy ─────────────────────────────
-  podManagementPolicy: OrderedReady # or Parallel
-  updateStrategy:
-    type: RollingUpdate
-    rollingUpdate:
-      partition: 0 # only update pods with index >= partition (canary)
+            storage: 10Gi
 ```
 
-Pod names: `postgres-0`, `postgres-1`, `postgres-2`
-DNS: `postgres-0.postgres-headless.namespace.svc.cluster.local`
+Pod names are predictable: `postgres-0`, `postgres-1`, `postgres-2`. DNS: `postgres-0.postgres.namespace.svc.cluster.local`.
 
 ## DaemonSet
 
-Runs exactly one pod per node (or on selected nodes). Common uses: log collection, monitoring agents, network plugins.
+Runs exactly one Pod per node (or per selected nodes). Used for cluster-level services like log collectors and monitoring agents.
 
 ```yaml
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: fluentbit
-  namespace: logging
+  name: node-exporter
+  namespace: monitoring
 spec:
   selector:
     matchLabels:
-      app: fluentbit
-  updateStrategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 1
+      app: node-exporter
   template:
     metadata:
       labels:
-        app: fluentbit
+        app: node-exporter
     spec:
-      tolerations:
-        # Run on control-plane nodes too
-        - key: node-role.kubernetes.io/control-plane
-          effect: NoSchedule
+      hostNetwork: true
+      hostPID: true
       containers:
-        - name: fluent-bit
-          image: fluent/fluent-bit:2.2
-          resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 200m
-              memory: 200Mi
+        - name: node-exporter
+          image: prom/node-exporter:latest
+          ports:
+            - containerPort: 9100
           volumeMounts:
-            - name: varlog
-              mountPath: /var/log
+            - name: proc
+              mountPath: /host/proc
               readOnly: true
-            - name: containers
-              mountPath: /var/lib/docker/containers
+            - name: sys
+              mountPath: /host/sys
               readOnly: true
       volumes:
-        - name: varlog
+        - name: proc
           hostPath:
-            path: /var/log
-        - name: containers
+            path: /proc
+        - name: sys
           hostPath:
-            path: /var/lib/docker/containers
+            path: /sys
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
 ```
 
 ## Job
 
-A Job creates one or more pods and ensures they complete successfully. For batch processing.
+A Job creates one or more Pods and ensures a specified number complete successfully.
 
 ```yaml
 apiVersion: batch/v1
@@ -534,79 +451,60 @@ kind: Job
 metadata:
   name: db-migration
 spec:
-  completions: 1 # total successful completions required
-  parallelism: 1 # pods running in parallel
-  backoffLimit: 4 # retries on failure
-  activeDeadlineSeconds: 300 # maximum job duration (seconds)
-  ttlSecondsAfterFinished: 3600 # auto-cleanup after completion
-
+  completions: 1
+  parallelism: 1
+  backoffLimit: 3       # retry up to 3 times on failure
+  activeDeadlineSeconds: 300   # fail if not complete in 5 minutes
   template:
     spec:
-      restartPolicy: OnFailure # Never | OnFailure (required for Jobs)
+      restartPolicy: OnFailure   # Never | OnFailure
       containers:
-        - name: migration
-          image: myapp:v1.2.3
-          command: ['node', 'scripts/migrate.js']
+        - name: migrate
+          image: myapp/api:1.2.3
+          command: ["node", "dist/migrate.js"]
           env:
-            - name: DB_URL
+            - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: app-secrets
-                  key: db-url
+                  key: database_url
 ```
 
 ## CronJob
 
-A CronJob creates Jobs on a schedule (cron format).
+A CronJob creates Jobs on a schedule (standard cron syntax).
 
 ```yaml
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: daily-backup
+  name: nightly-backup
 spec:
-  schedule: '0 2 * * *' # 2 AM daily
-  timeZone: 'America/New_York' # K8s 1.27+
-  concurrencyPolicy: Forbid # Allow | Forbid | Replace
+  schedule: "0 2 * * *"          # Every day at 2:00 AM UTC
+  timeZone: "America/New_York"   # Kubernetes 1.27+
+  concurrencyPolicy: Forbid      # Allow | Forbid | Replace
   successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 1
-  startingDeadlineSeconds: 60 # skip if missed by more than 60s
-
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300   # skip if missed by >5 minutes
   jobTemplate:
     spec:
-      backoffLimit: 2
       template:
         spec:
           restartPolicy: OnFailure
           containers:
             - name: backup
-              image: postgres:16-alpine
-              command:
-                - sh
-                - -c
-                - |
-                  pg_dump -h $DB_HOST -U $DB_USER $DB_NAME \
-                    | gzip > /backup/$(date +%Y%m%d_%H%M%S).sql.gz
-              envFrom:
-                - secretRef:
-                    name: backup-credentials
-              volumeMounts:
-                - name: backup-storage
-                  mountPath: /backup
-          volumes:
-            - name: backup-storage
-              persistentVolumeClaim:
-                claimName: backup-pvc
+              image: myapp/backup:latest
+              command: ["./backup.sh"]
+              env:
+                - name: S3_BUCKET
+                  value: my-backup-bucket
 ```
 
 ```bash
 # Manually trigger a CronJob
-kubectl create job --from=cronjob/daily-backup manual-backup-$(date +%s)
+kubectl create job --from=cronjob/nightly-backup manual-backup-$(date +%s)
 
-# List CronJob history
-kubectl get jobs -l job-name=daily-backup
+# View job status
+kubectl get jobs
+kubectl describe job nightly-backup-123456
 ```
-
-:::caution[Job Cleanup]
-By default, completed Jobs and their Pods accumulate in the cluster. Use `ttlSecondsAfterFinished` to automatically clean them up, or set `successfulJobsHistoryLimit` and `failedJobsHistoryLimit` on CronJobs.
-:::

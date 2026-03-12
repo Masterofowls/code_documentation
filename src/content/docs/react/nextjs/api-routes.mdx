@@ -1,88 +1,89 @@
 ---
 title: API Routes
-description: Build API endpoints in Next.js using Route Handlers — handle GET, POST, PUT, DELETE requests, stream responses, add CORS headers, implement JWT authentication, and use the Edge Runtime.
+description: Build backend endpoints in Next.js with Route Handlers — HTTP methods, NextRequest/NextResponse, streaming, CORS, JWT authentication, rate limiting, and Edge Runtime.
 sidebar:
   order: 7
 tags: [react, javascript, frontend]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-Route Handlers (`route.ts` files in the App Router) replace the Pages Router's API routes. They give you full control over HTTP request and response handling with access to the Web Fetch API.
+Route Handlers are the App Router replacement for the Pages Router `pages/api/` pattern. They allow you to create REST endpoints inside your Next.js project using standard Web API `Request` and `Response` objects.
 
-## Basic Route Handler
+## Creating Route Handlers
 
-```typescript
-// app/api/hello/route.ts
-import { NextResponse } from 'next/server';
+Route Handlers live in `route.ts` (or `route.js`) files inside the `app/` directory. A directory can have either a `page.tsx` or a `route.ts` — not both.
 
-// Each HTTP method is a named export
-export async function GET() {
-  return NextResponse.json({ message: 'Hello, World!' });
-}
-
-export async function POST() {
-  return NextResponse.json({ message: 'Created' }, { status: 201 });
-}
+```
+app/
+├── api/
+│   ├── users/
+│   │   ├── route.ts               # /api/users
+│   │   └── [id]/
+│   │       └── route.ts           # /api/users/:id
+│   ├── auth/
+│   │   └── [...nextauth]/
+│   │       └── route.ts           # /api/auth/* (NextAuth)
+│   └── webhooks/
+│       └── stripe/
+│           └── route.ts           # /api/webhooks/stripe
 ```
 
-## NextRequest and NextResponse
+---
 
-`NextRequest` extends the Web `Request` API. `NextResponse` extends `Response`.
+## HTTP Methods
+
+Export named functions matching HTTP method names:
 
 ```typescript
-// app/api/users/route.ts
+// src/app/api/posts/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
+import { requireAuth } from '@/lib/auth';
 import { z } from 'zod';
 
-export async function GET(request: NextRequest) {
-  const searchParams = request.nextUrl.searchParams;
-  const page = Number(searchParams.get('page') ?? '1');
-  const limit = Number(searchParams.get('limit') ?? '20');
-  const search = searchParams.get('q') ?? '';
+const createPostSchema = z.object({
+  title: z.string().min(1).max(200),
+  content: z.string().min(10),
+  published: z.boolean().optional().default(false),
+});
 
-  const [users, total] = await Promise.all([
-    db.user.findMany({
-      where: search ? { name: { contains: search, mode: 'insensitive' } } : {},
+// GET /api/posts
+export async function GET(request: NextRequest) {
+  const { searchParams } = request.nextUrl;
+  const page = Number(searchParams.get('page') ?? '1');
+  const limit = Math.min(Number(searchParams.get('limit') ?? '20'), 100);
+  const published = searchParams.get('published');
+
+  const [posts, total] = await Promise.all([
+    db.post.findMany({
+      where: published !== null ? { published: published === 'true' } : {},
       skip: (page - 1) * limit,
       take: limit,
-      select: { id: true, name: true, email: true, createdAt: true },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, title: true, excerpt: true, publishedAt: true, author: { select: { name: true } } },
     }),
-    db.user.count({
-      where: search ? { name: { contains: search, mode: 'insensitive' } } : {},
-    }),
+    db.post.count(),
   ]);
 
   return NextResponse.json({
-    users,
-    pagination: {
-      page,
-      limit,
-      total,
-      totalPages: Math.ceil(total / limit),
-      hasMore: page * limit < total,
-    },
+    data: posts,
+    meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
   });
 }
 
-const createUserSchema = z.object({
-  name: z.string().min(1).max(100),
-  email: z.string().email(),
-  password: z.string().min(8),
-});
-
+// POST /api/posts
 export async function POST(request: NextRequest) {
-  const body = await request.json();
-  const parsed = createUserSchema.safeParse(body);
+  const user = await requireAuth(request);
 
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+  }
+
+  const parsed = createPostSchema.safeParse(body);
   if (!parsed.success) {
     return NextResponse.json(
       { error: 'Validation failed', details: parsed.error.flatten() },
@@ -90,312 +91,153 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const { name, email, password } = parsed.data;
-
-  const existing = await db.user.findUnique({ where: { email } });
-  if (existing) {
-    return NextResponse.json(
-      { error: 'Email already registered' },
-      { status: 409 },
-    );
-  }
-
-  const hashedPassword = await bcrypt.hash(password, 12);
-  const user = await db.user.create({
-    data: { name, email, password: hashedPassword },
-    select: { id: true, name: true, email: true, createdAt: true },
+  const post = await db.post.create({
+    data: { ...parsed.data, authorId: user.id },
   });
 
-  return NextResponse.json(user, { status: 201 });
+  return NextResponse.json(post, { status: 201 });
 }
 ```
 
-## Reading the Request Body
+### Dynamic Route Handlers
 
 ```typescript
-import { NextRequest, NextResponse } from 'next/server';
-
-export async function POST(request: NextRequest) {
-  const contentType = request.headers.get('content-type') ?? '';
-
-  if (contentType.includes('application/json')) {
-    const body = await request.json();
-    console.log(body);
-  } else if (contentType.includes('text/')) {
-    const text = await request.text();
-    console.log(text);
-  } else if (contentType.includes('multipart/form-data')) {
-    const formData = await request.formData();
-    const file = formData.get('file') as File;
-    const name = formData.get('name') as string;
-    console.log(file, name);
-  } else if (contentType.includes('application/x-www-form-urlencoded')) {
-    const formData = await request.formData();
-    const entries = Object.fromEntries(formData.entries());
-    console.log(entries);
-  }
-
-  return NextResponse.json({ ok: true });
-}
-```
-
-## Dynamic Route Handlers
-
-```typescript
-// app/api/users/[id]/route.ts
+// src/app/api/posts/[id]/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 
 interface RouteContext {
-  params: Promise<{ id: string }>;
+  params: { id: string };
 }
 
+// GET /api/posts/:id
 export async function GET(request: NextRequest, { params }: RouteContext) {
-  const { id } = await params;
-  const user = await db.user.findUnique({ where: { id } });
+  const post = await db.post.findUnique({ where: { id: params.id } });
 
-  if (!user) {
-    return NextResponse.json({ error: 'User not found' }, { status: 404 });
+  if (!post) {
+    return NextResponse.json({ error: 'Post not found' }, { status: 404 });
   }
 
-  return NextResponse.json(user);
+  return NextResponse.json(post);
 }
 
-export async function PUT(request: NextRequest, { params }: RouteContext) {
-  const { id } = await params;
+// PATCH /api/posts/:id
+export async function PATCH(request: NextRequest, { params }: RouteContext) {
+  const user = await requireAuth(request);
   const body = await request.json();
-  const user = await db.user.update({ where: { id }, data: body });
-  return NextResponse.json(user);
+
+  const post = await db.post.findUnique({ where: { id: params.id } });
+  if (!post) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  if (post.authorId !== user.id) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+
+  const updated = await db.post.update({
+    where: { id: params.id },
+    data: body,
+  });
+
+  return NextResponse.json(updated);
 }
 
+// DELETE /api/posts/:id
 export async function DELETE(request: NextRequest, { params }: RouteContext) {
-  const { id } = await params;
-  await db.user.delete({ where: { id } });
+  const user = await requireAuth(request);
+  const post = await db.post.findUnique({ where: { id: params.id } });
+
+  if (!post) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  if (post.authorId !== user.id) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+
+  await db.post.delete({ where: { id: params.id } });
   return new Response(null, { status: 204 });
 }
-
-export async function PATCH(request: NextRequest, { params }: RouteContext) {
-  const { id } = await params;
-  const body = await request.json();
-  const user = await db.user.update({ where: { id }, data: body });
-  return NextResponse.json(user);
-}
 ```
 
-## Reading Headers and Cookies
+---
+
+## Reading Request Data
 
 ```typescript
-import { cookies, headers } from 'next/headers';
-import { NextRequest, NextResponse } from 'next/server';
+// JSON body
+const body = await request.json();
 
-export async function GET(request: NextRequest) {
-  // Option 1: From NextRequest directly
-  const authHeader = request.headers.get('authorization');
-  const tokenFromReq = request.cookies.get('session')?.value;
+// Text body
+const text = await request.text();
 
-  // Option 2: next/headers (useful for shared auth utilities)
-  const headersList = await headers();
-  const cookieStore = await cookies();
+// FormData
+const formData = await request.formData();
+const file = formData.get('file') as File;
+const name = formData.get('name') as string;
 
-  const userAgent = headersList.get('user-agent');
-  const sessionToken = cookieStore.get('session')?.value;
+// URL search params
+const { searchParams } = request.nextUrl;
+const q = searchParams.get('q');
 
-  // Set cookies in response
-  const response = NextResponse.json({ ok: true });
-  response.cookies.set('last-visited', new Date().toISOString(), {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    maxAge: 60 * 60 * 24 * 30, // 30 days
-    sameSite: 'lax',
-  });
-  response.cookies.delete('old-cookie');
+// Headers
+const authorization = request.headers.get('authorization');
+const contentType = request.headers.get('content-type');
 
-  return response;
-}
+// Cookies
+const sessionCookie = request.cookies.get('session')?.value;
 ```
 
-## JWT Authentication in Route Handlers
+---
+
+## Reading and Setting Headers/Cookies in Responses
 
 ```typescript
-// lib/api-auth.ts
-import { NextRequest, NextResponse } from 'next/server';
-import { jwtVerify } from 'jose';
+// Set response headers
+const response = NextResponse.json({ success: true });
+response.headers.set('X-Custom-Header', 'value');
+response.headers.set('Cache-Control', 'public, max-age=3600, s-maxage=86400');
+return response;
 
-const SECRET = new TextEncoder().encode(process.env.JWT_SECRET);
+// Set cookies on response
+const response = NextResponse.json({ success: true });
+response.cookies.set('session', token, {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  maxAge: 60 * 60 * 24 * 7, // 7 days
+  path: '/',
+  sameSite: 'lax',
+});
+return response;
 
-export interface AuthenticatedUser {
-  userId: string;
-  email: string;
-  role: 'user' | 'admin';
-}
-
-export async function requireAuth(
-  request: NextRequest,
-): Promise<{ user: AuthenticatedUser } | NextResponse> {
-  const authHeader = request.headers.get('authorization');
-  const token = authHeader?.startsWith('Bearer ')
-    ? authHeader.slice(7)
-    : request.cookies.get('auth-token')?.value;
-
-  if (!token) {
-    return NextResponse.json(
-      { error: 'Authentication required' },
-      { status: 401 },
-    );
-  }
-
-  try {
-    const { payload } = await jwtVerify(token, SECRET);
-    return { user: payload as AuthenticatedUser };
-  } catch {
-    return NextResponse.json(
-      { error: 'Invalid or expired token' },
-      { status: 401 },
-    );
-  }
-}
+// Delete cookie
+response.cookies.delete('session');
 ```
 
-```typescript
-// app/api/profile/route.ts
-import { requireAuth } from '@/lib/api-auth';
-
-export async function GET(request: NextRequest) {
-  const auth = await requireAuth(request);
-
-  // If requireAuth returns a NextResponse, it's an error
-  if (auth instanceof NextResponse) return auth;
-
-  const { user } = auth;
-  const profile = await db.user.findUnique({ where: { id: user.userId } });
-
-  return NextResponse.json(profile);
-}
-```
-
-## CORS Headers
-
-```typescript
-// lib/cors.ts
-import { NextResponse } from 'next/server';
-
-const ALLOWED_ORIGINS = [
-  'https://myapp.com',
-  'https://www.myapp.com',
-  ...(process.env.NODE_ENV === 'development'
-    ? ['http://localhost:3000', 'http://localhost:3001']
-    : []),
-];
-
-export function corsHeaders(origin: string | null): Record<string, string> {
-  const isAllowed = origin && ALLOWED_ORIGINS.includes(origin);
-
-  return {
-    'Access-Control-Allow-Origin': isAllowed ? origin : ALLOWED_ORIGINS[0]!,
-    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
-    'Access-Control-Allow-Headers':
-      'Content-Type, Authorization, X-Requested-With',
-    'Access-Control-Max-Age': '86400',
-  };
-}
-
-// Add to any route handler:
-export async function GET(request: NextRequest) {
-  const origin = request.headers.get('origin');
-  const data = await fetchData();
-
-  return NextResponse.json(data, {
-    headers: corsHeaders(origin),
-  });
-}
-
-// Handle preflight
-export async function OPTIONS(request: NextRequest) {
-  const origin = request.headers.get('origin');
-  return new Response(null, {
-    status: 204,
-    headers: corsHeaders(origin),
-  });
-}
-```
-
-## Rate Limiting
-
-```typescript
-// lib/rate-limit.ts
-import { NextRequest, NextResponse } from 'next/server';
-
-// Simple in-memory rate limiter (use Redis for multi-instance)
-const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
-
-export function rateLimit(
-  request: NextRequest,
-  options: { limit: number; windowMs: number },
-) {
-  const ip =
-    request.headers.get('x-forwarded-for')?.split(',')[0] ?? '127.0.0.1';
-  const key = `${ip}:${request.nextUrl.pathname}`;
-  const now = Date.now();
-
-  const entry = rateLimitMap.get(key);
-
-  if (!entry || now > entry.resetAt) {
-    rateLimitMap.set(key, { count: 1, resetAt: now + options.windowMs });
-    return null; // not rate limited
-  }
-
-  if (entry.count >= options.limit) {
-    return NextResponse.json(
-      { error: 'Too many requests' },
-      {
-        status: 429,
-        headers: {
-          'Retry-After': String(Math.ceil((entry.resetAt - now) / 1000)),
-          'X-RateLimit-Limit': String(options.limit),
-          'X-RateLimit-Remaining': '0',
-          'X-RateLimit-Reset': String(Math.ceil(entry.resetAt / 1000)),
-        },
-      },
-    );
-  }
-
-  entry.count++;
-  return null;
-}
-```
-
-```typescript
-// app/api/auth/login/route.ts
-import { rateLimit } from '@/lib/rate-limit';
-
-export async function POST(request: NextRequest) {
-  // Limit login attempts: 5 requests per 15 minutes per IP
-  const limited = rateLimit(request, { limit: 5, windowMs: 15 * 60 * 1000 });
-  if (limited) return limited;
-
-  const { email, password } = await request.json();
-  const token = await authenticateUser(email, password);
-
-  return NextResponse.json({ token });
-}
-```
+---
 
 ## Streaming Responses
 
 ```typescript
-// app/api/stream/route.ts
-import { NextRequest } from 'next/server';
+// src/app/api/chat/route.ts
+import { OpenAIStream, StreamingTextResponse } from 'ai'; // Vercel AI SDK
 
-export async function GET(request: NextRequest) {
+export async function POST(request: NextRequest) {
+  const { messages } = await request.json();
+
+  const openaiResponse = await openai.chat.completions.create({
+    model: 'gpt-4o',
+    messages,
+    stream: true,
+  });
+
+  const stream = OpenAIStream(openaiResponse);
+  return new StreamingTextResponse(stream);
+}
+
+// Raw ReadableStream
+export async function GET() {
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
     async start(controller) {
-      // Send chunks as they become available
-      for (let i = 0; i < 10; i++) {
-        await new Promise((resolve) => setTimeout(resolve, 200));
-        const chunk = `data: ${JSON.stringify({ count: i, timestamp: Date.now() })}\n\n`;
-        controller.enqueue(encoder.encode(chunk));
+      const data = ['Event 1', 'Event 2', 'Event 3'];
+
+      for (const item of data) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ item })}\n\n`));
+        await new Promise((resolve) => setTimeout(resolve, 500));
       }
+
       controller.close();
     },
   });
@@ -410,67 +252,223 @@ export async function GET(request: NextRequest) {
 }
 ```
 
+---
+
+## CORS Headers
+
 ```typescript
-// Streaming AI responses (example with OpenAI)
-import OpenAI from 'openai';
+// src/lib/cors.ts
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
 
-const openai = new OpenAI();
+const ALLOWED_ORIGINS = [
+  'https://app.example.com',
+  'https://www.example.com',
+  process.env.NODE_ENV === 'development' ? 'http://localhost:3000' : '',
+].filter(Boolean);
 
-export async function POST(request: NextRequest) {
-  const { messages } = await request.json();
+export function withCors(request: NextRequest, response: NextResponse) {
+  const origin = request.headers.get('origin');
 
-  const stream = await openai.chat.completions.create({
-    model: 'gpt-4o',
-    messages,
-    stream: true,
-  });
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    response.headers.set('Access-Control-Allow-Origin', origin);
+    response.headers.set('Access-Control-Allow-Credentials', 'true');
+  }
 
-  const readableStream = new ReadableStream({
-    async start(controller) {
-      const encoder = new TextEncoder();
-      for await (const chunk of stream) {
-        const content = chunk.choices[0]?.delta?.content ?? '';
-        if (content) {
-          controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify({ content })}\n\n`),
-          );
-        }
-      }
-      controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-      controller.close();
-    },
-  });
+  response.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  response.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  response.headers.set('Access-Control-Max-Age', '86400');
 
-  return new Response(readableStream, {
-    headers: { 'Content-Type': 'text/event-stream' },
-  });
+  return response;
+}
+
+// Handle preflight requests in route handler
+export async function OPTIONS(request: NextRequest) {
+  return withCors(request, new NextResponse(null, { status: 204 }));
 }
 ```
+
+---
+
+## JWT Authentication
+
+```typescript
+// src/lib/auth-route.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { jwtVerify, SignJWT } from 'jose';
+
+const JWT_SECRET = new TextEncoder().encode(process.env.JWT_SECRET!);
+
+export async function verifyJwt(token: string) {
+  const { payload } = await jwtVerify(token, JWT_SECRET);
+  return payload as { userId: string; email: string; role: string };
+}
+
+export async function requireRouteAuth(
+  request: NextRequest,
+): Promise<{ userId: string; email: string; role: string }> {
+  const authorization = request.headers.get('authorization');
+
+  if (!authorization?.startsWith('Bearer ')) {
+    throw new AuthError('Missing or invalid authorization header', 401);
+  }
+
+  const token = authorization.slice(7);
+
+  try {
+    return await verifyJwt(token);
+  } catch {
+    throw new AuthError('Invalid or expired token', 401);
+  }
+}
+
+class AuthError extends Error {
+  constructor(message: string, public status: number) {
+    super(message);
+  }
+}
+
+// Usage in a route handler
+export async function GET(request: NextRequest) {
+  let user: Awaited<ReturnType<typeof requireRouteAuth>>;
+
+  try {
+    user = await requireRouteAuth(request);
+  } catch (err) {
+    if (err instanceof AuthError) {
+      return NextResponse.json({ error: err.message }, { status: err.status });
+    }
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+
+  const profile = await db.user.findUnique({ where: { id: user.userId } });
+  return NextResponse.json(profile);
+}
+```
+
+---
+
+## Rate Limiting
+
+```bash
+npm install @upstash/ratelimit @upstash/redis
+```
+
+```typescript
+// src/lib/rate-limit.ts
+import { Ratelimit } from '@upstash/ratelimit';
+import { Redis } from '@upstash/redis';
+import { NextRequest, NextResponse } from 'next/server';
+
+const redis = Redis.fromEnv();
+
+// 10 requests per 10 seconds per IP
+export const apiRatelimit = new Ratelimit({
+  redis,
+  limiter: Ratelimit.slidingWindow(10, '10 s'),
+  analytics: true,
+});
+
+export async function withRateLimit(request: NextRequest, handler: () => Promise<NextResponse>) {
+  const ip = request.headers.get('x-forwarded-for')?.split(',')[0] ?? '127.0.0.1';
+  const identifier = `api:${ip}`;
+
+  const { success, limit, remaining, reset } = await apiRatelimit.limit(identifier);
+
+  if (!success) {
+    return NextResponse.json(
+      { error: 'Too many requests. Please try again later.' },
+      {
+        status: 429,
+        headers: {
+          'X-RateLimit-Limit': String(limit),
+          'X-RateLimit-Remaining': '0',
+          'X-RateLimit-Reset': String(reset),
+          'Retry-After': String(Math.ceil((reset - Date.now()) / 1000)),
+        },
+      },
+    );
+  }
+
+  const response = await handler();
+  response.headers.set('X-RateLimit-Limit', String(limit));
+  response.headers.set('X-RateLimit-Remaining', String(remaining));
+  return response;
+}
+```
+
+---
 
 ## Edge Runtime
 
-Route Handlers can run at the edge (Vercel's global network) for lower latency. Edge Runtime is a restricted environment — no Node.js APIs.
+Route Handlers can run on the Vercel Edge network for ultra-low latency.
 
 ```typescript
-// app/api/geo/route.ts
+// src/app/api/geo/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 
-export const runtime = 'edge'; // 'nodejs' (default) or 'edge'
+// Declare this route runs on Edge
+export const runtime = 'edge';
 
-export async function GET(request: NextRequest) {
-  // Access geo data from Vercel headers
-  const geo = {
-    city: request.headers.get('x-vercel-ip-city') ?? 'Unknown',
-    country: request.headers.get('x-vercel-ip-country') ?? 'Unknown',
-    region: request.headers.get('x-vercel-ip-country-region') ?? 'Unknown',
-    latitude: request.headers.get('x-vercel-ip-latitude'),
-    longitude: request.headers.get('x-vercel-ip-longitude'),
-  };
+export function GET(request: NextRequest) {
+  // Vercel injects geo data into headers
+  const country = request.headers.get('x-vercel-ip-country') ?? 'unknown';
+  const city = request.headers.get('x-vercel-ip-city') ?? 'unknown';
+  const latitude = request.headers.get('x-vercel-ip-latitude') ?? '0';
+  const longitude = request.headers.get('x-vercel-ip-longitude') ?? '0';
 
-  return NextResponse.json(geo);
+  return NextResponse.json({ country, city, latitude, longitude });
 }
 ```
 
-:::caution[Edge Runtime Limitations]
-The Edge Runtime doesn't support all Node.js APIs. No `fs`, `child_process`, native Node.js modules, or most npm packages that rely on Node.js internals. It supports the Web Fetch API, Web Crypto, and Web Streams. Check package compatibility before using Edge Runtime.
+:::caution[Edge Runtime Restrictions]
+Edge Runtime does not support all Node.js APIs. It only supports Web APIs and a subset of Node APIs. Check the [Edge Runtime compatibility table](https://nextjs.org/docs/app/api-reference/edge) before using libraries that may use `fs`, `crypto`, `buffer`, or `path`.
 :::
+
+---
+
+## Webhook Handler Pattern
+
+```typescript
+// src/app/api/webhooks/stripe/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+import Stripe from 'stripe';
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
+
+export async function POST(request: NextRequest) {
+  const body = await request.text();
+  const signature = request.headers.get('stripe-signature');
+
+  if (!signature) {
+    return NextResponse.json({ error: 'Missing signature' }, { status: 400 });
+  }
+
+  let event: Stripe.Event;
+
+  try {
+    event = stripe.webhooks.constructEvent(body, signature, process.env.STRIPE_WEBHOOK_SECRET!);
+  } catch (err) {
+    console.error('Webhook signature verification failed:', err);
+    return NextResponse.json({ error: 'Invalid signature' }, { status: 400 });
+  }
+
+  // Handle events idempotently
+  switch (event.type) {
+    case 'checkout.session.completed': {
+      const session = event.data.object as Stripe.Checkout.Session;
+      await handleCheckoutCompleted(session);
+      break;
+    }
+    case 'customer.subscription.deleted': {
+      const subscription = event.data.object as Stripe.Subscription;
+      await handleSubscriptionCancelled(subscription);
+      break;
+    }
+    default:
+      console.log(`Unhandled event type: ${event.type}`);
+  }
+
+  return NextResponse.json({ received: true });
+}
+```

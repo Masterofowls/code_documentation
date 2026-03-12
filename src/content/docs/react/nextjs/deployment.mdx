@@ -1,68 +1,88 @@
 ---
 title: Deployment
-description: Deploy Next.js to Vercel with git integration and preview deployments, self-host with Node.js or Docker, export as static HTML, set up CI/CD with GitHub Actions, and manage environment variables.
+description: Deploy your Next.js application to Vercel, self-host on Node.js, containerize with Docker, export as static HTML, set up CI/CD with GitHub Actions, and manage environment variables.
 sidebar:
   order: 9
 tags: [react, javascript, frontend]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-Next.js supports multiple deployment targets — from Vercel's managed platform to self-hosted Node.js servers, Docker containers, and fully static HTML exports.
+Next.js supports multiple deployment targets — from Vercel's managed platform to self-hosted Node.js servers, Docker containers, and fully static exports.
 
 ## Vercel Deployment
 
-Vercel is the official hosting platform for Next.js, built by the same team. Deployment is essentially zero-config.
+Vercel provides the smoothest deployment experience for Next.js — zero configuration, instant preview deployments, and global edge distribution.
+
+### Git Integration
 
 <Steps>
 
-1. **Push your code to GitHub**
+1. **Push your project to GitHub, GitLab, or Bitbucket**
 
-   ```bash
-   git init
-   git add .
-   git commit -m "feat: initial Next.js app"
-   git remote add origin https://github.com/yourname/my-app.git
-   git push -u origin main
-   ```
+2. **Import the repository in Vercel**
 
-2. **Import on Vercel**
-
-   Go to [vercel.com/new](https://vercel.com/new), select your repository, and click **Deploy**. Vercel auto-detects Next.js and configures the build settings.
+   Visit [vercel.com/new](https://vercel.com/new), click **Import Git Repository**, and select your repo. Vercel auto-detects Next.js.
 
 3. **Configure environment variables**
 
-   In Vercel Dashboard → Settings → Environment Variables, add all variables from your `.env.local`. Set the correct scope (Production, Preview, Development).
+   In the project settings, add all variables from your `.env.local` under **Settings → Environment Variables**. Scope them per environment (Production, Preview, Development).
 
-4. **Your app is live**
+4. **Deploy**
 
-   Every push to `main` triggers a production deployment. Every PR gets a unique preview URL.
+   Every push to `main` triggers a production deployment. Every push to any other branch creates a preview deployment with a unique URL like `my-app-feature-branch.vercel.app`.
 
 </Steps>
 
-### Vercel Features
+### Vercel CLI
 
-**Preview Deployments** — every pull request and branch gets a unique URL like `my-app-git-feature-auth-yourname.vercel.app`. Share with stakeholders for review.
+```bash
+# Install
+npm install -g vercel
 
-**Analytics** — real user performance data (Core Web Vitals, page views) integrated with next/analytics:
+# Link project
+vercel link
+
+# Deploy preview
+vercel
+
+# Deploy production
+vercel --prod
+
+# View deployment logs
+vercel logs [deployment-url]
+
+# List deployments
+vercel ls
+
+# Pull environment variables to .env.local
+vercel env pull .env.local
+```
+
+### Preview Deployments
+
+Every pull request gets an isolated preview URL — perfect for stakeholder review and QA.
+
+```yaml
+# GitHub PR comment with preview URL (Vercel adds automatically)
+# But you can also use the Vercel GitHub App for status checks
+
+# Vercel project settings → Git → Required checks
+# Ensures deployments must pass before merging
+```
+
+### Vercel Analytics and Speed Insights
+
+```bash
+npm install @vercel/analytics @vercel/speed-insights
+```
 
 ```tsx
-// app/layout.tsx
+// src/app/layout.tsx
 import { Analytics } from '@vercel/analytics/react';
 import { SpeedInsights } from '@vercel/speed-insights/next';
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html>
       <body>
@@ -75,296 +95,278 @@ export default function RootLayout({
 }
 ```
 
-```bash
-npm install @vercel/analytics @vercel/speed-insights
-```
-
-**Edge Config** — ultra-low-latency key-value store read at the edge:
-
-```typescript
-import { get } from '@vercel/edge-config';
-
-export async function middleware(request: NextRequest) {
-  const maintenanceMode = await get<boolean>('maintenance_mode');
-  if (maintenanceMode) {
-    return NextResponse.rewrite(new URL('/maintenance', request.url));
-  }
-  return NextResponse.next();
-}
-```
-
-## Environment Variables
-
-### Naming Convention
-
-| Prefix         | Exposed to       | Usage                                            |
-| -------------- | ---------------- | ------------------------------------------------ |
-| `NEXT_PUBLIC_` | Browser + Server | Public config (API URLs, Stripe publishable key) |
-| (no prefix)    | Server only      | Secrets (DB URL, JWT secret, API private keys)   |
-
-```bash
-# .env.local — local development (never commit)
-DATABASE_URL=postgresql://localhost:5432/myapp_dev
-JWT_SECRET=your-local-32-character-secret-here
-NEXT_PUBLIC_APP_URL=http://localhost:3000
-NEXT_PUBLIC_STRIPE_KEY=pk_test_abc123
-NEXTAUTH_SECRET=local-nextauth-secret
-OPENAI_API_KEY=sk-local-openai-key
-
-# .env.production — production defaults (can be committed if non-sensitive)
-NEXT_PUBLIC_APP_URL=https://myapp.com
-
-# .env.example — template for all variables (always commit)
-DATABASE_URL=
-JWT_SECRET=
-NEXT_PUBLIC_APP_URL=
-NEXT_PUBLIC_STRIPE_KEY=
-NEXTAUTH_SECRET=
-OPENAI_API_KEY=
-```
-
-### Environment Variable Validation
-
-```typescript
-// src/env.ts — validate at startup
-import { z } from 'zod';
-
-const serverEnvSchema = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']),
-  DATABASE_URL: z.string().url(),
-  JWT_SECRET: z.string().min(32),
-  NEXTAUTH_SECRET: z.string().min(32),
-  OPENAI_API_KEY: z.string().startsWith('sk-').optional(),
-});
-
-const clientEnvSchema = z.object({
-  NEXT_PUBLIC_APP_URL: z.string().url(),
-  NEXT_PUBLIC_STRIPE_KEY: z.string().startsWith('pk_'),
-});
-
-// Validate server-side env (throws if missing)
-export const serverEnv = serverEnvSchema.parse(process.env);
-
-// Validate client-side env (only NEXT_PUBLIC_ vars)
-export const clientEnv = clientEnvSchema.parse({
-  NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
-  NEXT_PUBLIC_STRIPE_KEY: process.env.NEXT_PUBLIC_STRIPE_KEY,
-});
-```
-
-:::caution[NEXT_PUBLIC_ Security]
-Never put secrets in `NEXT_PUBLIC_` variables. Anything prefixed with `NEXT_PUBLIC_` is embedded in the JavaScript bundle and visible to everyone. Treat it as public information.
-:::
+---
 
 ## Self-Hosted Node.js
 
+### Standard Server
+
 ```bash
-# Build the production app
+# Build for production
 npm run build
 
 # Start the production server
-npm start  # Runs on PORT=3000 by default
+npm run start  # Alias for: next start
 
-# Custom port
-PORT=8080 npm start
-```
+# Specify a custom port
+next start -p 8080
 
-### PM2 Process Manager
-
-```bash
+# Or with PM2 for process management
 npm install -g pm2
+pm2 start npm --name "next-app" -- start
+pm2 save
+pm2 startup
 ```
 
-```javascript
-// ecosystem.config.js
-module.exports = {
-  apps: [
-    {
-      name: 'my-nextjs-app',
-      script: 'npm',
-      args: 'start',
-      cwd: '/var/www/my-app',
-      instances: 'max', // Use all CPU cores
-      exec_mode: 'cluster',
-      env: {
-        NODE_ENV: 'production',
-        PORT: 3000,
-      },
-      error_file: '/var/log/my-app/error.log',
-      out_file: '/var/log/my-app/out.log',
-      merge_logs: true,
-      max_memory_restart: '1G',
-      restart_delay: 4000,
-    },
-  ],
-};
-```
+### Standalone Output
 
-```bash
-# Start with PM2
-pm2 start ecosystem.config.js
-pm2 save              # persist across reboots
-pm2 startup           # generate startup script
-pm2 monit             # monitor resource usage
-pm2 logs my-nextjs-app # tail logs
-```
-
-## Docker Deployment
-
-Enable standalone output in `next.config.ts` for a minimal Docker image:
+The `standalone` output mode produces a minimal server bundle with only the files needed to run — no `node_modules` required on the deployment host.
 
 ```typescript
 // next.config.ts
-const nextConfig: NextConfig = {
+const nextConfig = {
   output: 'standalone',
 };
 ```
+
+```bash
+npm run build
+
+# The standalone build is in .next/standalone
+# Copy required files:
+cp -r public .next/standalone/public
+cp -r .next/static .next/standalone/.next/static
+
+# Run the standalone server
+node .next/standalone/server.js
+```
+
+---
+
+## Docker Deployment
 
 ```dockerfile
 # Dockerfile
 FROM node:20-alpine AS base
 
-# Dependencies stage
+# Install dependencies only when needed
 FROM base AS deps
 RUN apk add --no-cache libc6-compat
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev
+RUN npm ci
 
-# Builder stage
+# Rebuild the source code only when needed
 FROM base AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# Build environment variables (build-time only)
-ARG NEXT_PUBLIC_APP_URL
-ENV NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL
+ENV NEXT_TELEMETRY_DISABLED 1
 
 RUN npm run build
 
-# Runner stage — minimal production image
+# Production image — copy only the necessary files
 FROM base AS runner
 WORKDIR /app
 
-ENV NODE_ENV=production
-ENV NEXT_TELEMETRY_DISABLED=1
+ENV NODE_ENV production
+ENV NEXT_TELEMETRY_DISABLED 1
 
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
 
-# Copy standalone output
 COPY --from=builder /app/public ./public
+
+# Leverage output file tracing
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
 USER nextjs
 
 EXPOSE 3000
-ENV PORT=3000
-ENV HOSTNAME="0.0.0.0"
+ENV PORT 3000
+ENV HOSTNAME "0.0.0.0"
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:3000/api/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1))"
 
 CMD ["node", "server.js"]
 ```
 
 ```yaml
 # docker-compose.yml
+version: '3.8'
+
 services:
-  web:
+  app:
     build:
       context: .
-      args:
-        NEXT_PUBLIC_APP_URL: https://myapp.com
+      dockerfile: Dockerfile
     ports:
       - '3000:3000'
     environment:
-      DATABASE_URL: ${DATABASE_URL}
-      JWT_SECRET: ${JWT_SECRET}
-      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      - DATABASE_URL=${DATABASE_URL}
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+      - NEXTAUTH_URL=${NEXTAUTH_URL}
     restart: unless-stopped
-    healthcheck:
-      test: ['CMD', 'curl', '-f', 'http://localhost:3000/api/health']
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+    depends_on:
+      db:
+        condition: service_healthy
 
   db:
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: myapp
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   postgres_data:
 ```
 
 ```bash
-# Build and run with Docker Compose
+# Build and start
 docker compose up --build -d
 
 # View logs
-docker compose logs -f web
+docker compose logs -f app
 
-# Health check endpoint
-# app/api/health/route.ts
+# Stop
+docker compose down
 ```
 
-```typescript
-// app/api/health/route.ts
-import { NextResponse } from 'next/server';
-import { db } from '@/lib/db';
+:::tip[Require standalone Output for Docker]
+Always set `output: 'standalone'` in `next.config.ts` when building Docker images. It drastically reduces the image size by including only the files actually needed at runtime (typically 5-50MB vs 500MB+).
+:::
 
-export async function GET() {
-  try {
-    await db.$queryRaw`SELECT 1`; // DB connectivity check
-    return NextResponse.json({
-      status: 'ok',
-      timestamp: new Date().toISOString(),
-      version: process.env.npm_package_version,
-    });
-  } catch (error) {
-    return NextResponse.json(
-      { status: 'error', error: 'Database unreachable' },
-      { status: 503 },
-    );
-  }
-}
-```
+---
 
 ## Static Export
 
-For fully static sites with no server required:
+For sites with no server-side dynamic features, export to pure HTML/CSS/JS.
 
 ```typescript
 // next.config.ts
-const nextConfig: NextConfig = {
+const nextConfig = {
   output: 'export',
-  trailingSlash: true, // /about → /about/index.html
+  // Optional: add a base path for hosting in a subdirectory
+  // basePath: '/my-app',
+  // Required: disable image optimisation (no server to run it)
   images: {
-    unoptimized: true, // Required for static export (no Image optimization server)
+    unoptimized: true,
   },
 };
 ```
 
-:::caution[Static Export Limitations]
-Static export (`output: 'export'`) does not support: Server Components that use runtime APIs (headers, cookies), Route Handlers, API routes, Server Actions, ISR/revalidation, or middleware. It generates pure HTML/CSS/JS — no server required.
-:::
-
 ```bash
 npm run build
-# Output in ./out/ directory — deploy to any static host
+# Output is in the `out/` directory
+
+# Serve locally to test
+npx serve out
+
+# Deploy to any static host
+# GitHub Pages, Cloudflare Pages, Netlify, S3, etc.
 ```
 
-## GitHub Actions CI/CD
+### Static Export Limitations
+
+The following features are **not supported** with `output: 'export'`:
+
+- Dynamic server-side routes (`cache: 'no-store'`)
+- Route Handlers (API routes)
+- Server Actions
+- Middleware
+- Image Optimisation (needs a server)
+- Incremental Static Regeneration
+- `headers()` and `cookies()` from `next/headers`
+
+:::caution[Not for Dynamic Apps]
+Static export is only suitable for fully static sites (documentation, marketing, blogs with pre-known content). For most web apps, use Vercel, Docker, or a Node.js server.
+:::
+
+---
+
+## Environment Variables
+
+### File Hierarchy
+
+```bash
+# Loaded in all environments
+.env
+
+# Loaded in development (next dev)
+.env.local         # Never committed — gitignored
+.env.development   # Committed — shared dev defaults
+.env.development.local  # Not committed — local overrides
+
+# Loaded in production (next build + next start)
+.env.production    # Committed — shared prod defaults
+.env.production.local   # Not committed — local prod overrides
+
+# .env.local always wins
+```
+
+### Variable Types
+
+```bash
+# Exposed to the browser (embedded in JS bundle — visible to users!)
+NEXT_PUBLIC_API_URL=https://api.example.com
+NEXT_PUBLIC_STRIPE_KEY=pk_live_...
+
+# Server-only (not in the bundle — safe for secrets)
+DATABASE_URL=postgresql://...
+STRIPE_SECRET_KEY=sk_live_...
+SENDGRID_API_KEY=SG...
+JWT_SECRET=your-32-char-minimum-secret
+
+# Build-time substitution (available at build time, not runtime)
+# Used in next.config.ts's env block
+```
+
+### Runtime Validation with Zod
+
+```typescript
+// src/env.ts — validate ALL vars at startup
+import { z } from 'zod';
+
+const serverSchema = z.object({
+  NODE_ENV: z.enum(['development', 'test', 'production']),
+  DATABASE_URL: z.string().url(),
+  NEXTAUTH_SECRET: z.string().min(32),
+  NEXTAUTH_URL: z.string().url(),
+  STRIPE_SECRET_KEY: z.string().startsWith('sk_'),
+});
+
+const clientSchema = z.object({
+  NEXT_PUBLIC_APP_URL: z.string().url(),
+  NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: z.string().startsWith('pk_'),
+});
+
+const serverEnv = serverSchema.parse(process.env);
+const clientEnv = clientSchema.parse({
+  NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
+  NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY,
+});
+
+export const env = { ...serverEnv, ...clientEnv };
+```
+
+---
+
+## CI/CD with GitHub Actions
 
 ```yaml
 # .github/workflows/deploy.yml
-name: CI/CD Pipeline
+name: CI/CD
 
 on:
   push:
@@ -376,7 +378,7 @@ env:
   NODE_VERSION: '20'
 
 jobs:
-  lint-and-type-check:
+  lint-type-check:
     name: Lint & Type Check
     runs-on: ubuntu-latest
     steps:
@@ -387,13 +389,12 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
-      - run: npx tsc --noEmit
-      - run: npx prettier --check .
+      - run: npm run type-check
 
   test:
     name: Tests
     runs-on: ubuntu-latest
-    needs: lint-and-type-check
+    needs: lint-type-check
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -402,11 +403,13 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test -- --coverage --ci
+        env:
+          DATABASE_URL: ${{ secrets.TEST_DATABASE_URL }}
 
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: test
+    needs: [lint-type-check, test]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -414,30 +417,102 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
-      - name: Build Next.js
+      - run: npm run build
         env:
-          NEXT_PUBLIC_APP_URL: ${{ vars.NEXT_PUBLIC_APP_URL }}
-        run: npm run build
+          NEXT_PUBLIC_APP_URL: ${{ secrets.NEXT_PUBLIC_APP_URL }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: next-build
+          path: .next/
+          retention-days: 1
 
   deploy-production:
-    name: Deploy to Production
+    name: Deploy Production
     runs-on: ubuntu-latest
     needs: build
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment:
+      name: production
+      url: https://myapp.com
     steps:
       - uses: actions/checkout@v4
-      - name: Deploy to Vercel
-        env:
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-        run: |
-          npm install -g vercel
-          vercel pull --yes --environment=production --token=$VERCEL_TOKEN
-          vercel build --prod --token=$VERCEL_TOKEN
-          vercel deploy --prebuilt --prod --token=$VERCEL_TOKEN
+      - uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-args: '--prod'
 ```
 
-:::tip[Vercel GitHub Integration]
-If you use Vercel's native GitHub integration (recommended), you don't need the manual deployment steps above. Vercel automatically deploys on every push and creates preview deployments for PRs. Use the GitHub Actions workflow for linting, type checking, and testing only.
-:::
+---
+
+## Health Check Endpoint
+
+```typescript
+// src/app/api/health/route.ts
+import { NextResponse } from 'next/server';
+import { db } from '@/lib/db';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET() {
+  const startTime = Date.now();
+
+  const checks: Record<string, { status: 'ok' | 'error'; latencyMs?: number; error?: string }> = {};
+
+  // Database check
+  try {
+    await db.$queryRaw`SELECT 1`;
+    checks['database'] = { status: 'ok', latencyMs: Date.now() - startTime };
+  } catch (err) {
+    checks['database'] = { status: 'error', error: (err as Error).message };
+  }
+
+  const isHealthy = Object.values(checks).every((c) => c.status === 'ok');
+
+  return NextResponse.json(
+    {
+      status: isHealthy ? 'ok' : 'degraded',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      checks,
+    },
+    { status: isHealthy ? 200 : 503 },
+  );
+}
+```
+
+---
+
+## Vercel Edge Config
+
+Edge Config provides ultra-low latency reads at the edge for feature flags, A/B test configuration, and block lists.
+
+```bash
+npm install @vercel/edge-config
+```
+
+```typescript
+// src/lib/edge-config.ts
+import { createClient } from '@vercel/edge-config';
+
+const edgeConfig = createClient(process.env.EDGE_CONFIG!);
+
+export async function getFeatureFlag(flag: string): Promise<boolean> {
+  return (await edgeConfig.get<boolean>(flag)) ?? false;
+}
+
+// Use in middleware (runs on Edge — ultra fast read)
+import { getFeatureFlag } from '@/lib/edge-config';
+
+export async function middleware(request: NextRequest) {
+  const newCheckoutEnabled = await getFeatureFlag('new-checkout');
+
+  if (newCheckoutEnabled && request.nextUrl.pathname === '/checkout') {
+    return NextResponse.rewrite(new URL('/checkout-v2', request.url));
+  }
+
+  return NextResponse.next();
+}
+```

@@ -1,80 +1,110 @@
 ---
-title: SQL Aggregation and Window Functions
-description: Master aggregate functions, GROUP BY, HAVING, ROLLUP, CUBE, FILTER, and the full suite of SQL window functions.
+title: SQL Aggregation & Window Functions
+description: Master aggregate functions, GROUP BY, HAVING, ROLLUP, CUBE, GROUPING SETS, FILTER, and the full power of SQL window functions.
 sidebar:
   order: 5
 tags: [database, sql]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Aggregation and window functions are the analytical power tools of SQL. They let you compute summaries across rows while maintaining the ability to access individual row values.
 
 ## Aggregate Functions
 
-Aggregate functions compute a single value from a set of rows. They collapse multiple rows into one result per group.
+Aggregate functions operate on a set of rows and return a single value per group.
 
-### Core Aggregates
+### COUNT
 
 ```sql
--- COUNT
-SELECT COUNT(*)          FROM orders;                  -- all rows including NULLs
-SELECT COUNT(deleted_at) FROM users;                   -- only non-NULL values
-SELECT COUNT(DISTINCT customer_id) FROM orders;        -- unique values
+-- COUNT(*) counts all rows including NULLs
+SELECT COUNT(*) FROM orders;
 
--- SUM and AVG
+-- COUNT(column) counts non-NULL values only
+SELECT COUNT(cancelled_at) FROM orders;    -- Only counts rows where cancelled_at is not NULL
+
+-- COUNT(DISTINCT column) counts unique non-NULL values
+SELECT COUNT(DISTINCT customer_id) FROM orders;
+
+-- Conditional count
 SELECT
-  SUM(total)                    AS total_revenue,
-  AVG(total)                    AS avg_order_value,
-  AVG(total) FILTER (WHERE status = 'delivered') AS avg_delivered
+  COUNT(*)                                        AS total_orders,
+  COUNT(CASE WHEN status = 'completed' THEN 1 END) AS completed,
+  COUNT(CASE WHEN status = 'cancelled' THEN 1 END) AS cancelled
 FROM orders;
+```
 
--- MIN and MAX
+### SUM and AVG
+
+```sql
 SELECT
-  MIN(price)  AS lowest_price,
-  MAX(price)  AS highest_price,
+  SUM(total)                              AS revenue,
+  AVG(total)                              AS avg_order_value,
+  SUM(total) / COUNT(DISTINCT customer_id) AS revenue_per_customer
+FROM orders
+WHERE status = 'completed';
+```
+
+### MIN and MAX
+
+```sql
+SELECT
+  MIN(price)         AS cheapest,
+  MAX(price)         AS most_expensive,
   MAX(price) - MIN(price) AS price_range
 FROM products
-WHERE category_id = 3;
+WHERE category_id = 5;
+```
 
--- String aggregation
+### String Aggregation
+
+```sql
+-- PostgreSQL: STRING_AGG
 SELECT
   category_id,
-  STRING_AGG(name, ', ' ORDER BY name) AS product_names,  -- PostgreSQL
-  GROUP_CONCAT(name ORDER BY name SEPARATOR ', ')          -- MySQL
+  STRING_AGG(name, ', ' ORDER BY name)    AS product_names,
+  STRING_AGG(name, ', ' ORDER BY price DESC) AS by_price
 FROM products
 GROUP BY category_id;
 
--- Array aggregation (PostgreSQL)
-SELECT user_id, ARRAY_AGG(tag ORDER BY tag) AS tags
-FROM user_tags GROUP BY user_id;
+-- MySQL: GROUP_CONCAT
+SELECT category_id, GROUP_CONCAT(name ORDER BY name SEPARATOR ', ')
+FROM products
+GROUP BY category_id;
 
--- JSON aggregation (PostgreSQL)
+-- PostgreSQL: ARRAY_AGG (returns an array)
+SELECT customer_id, ARRAY_AGG(id ORDER BY created_at) AS order_ids
+FROM orders
+GROUP BY customer_id;
+
+-- PostgreSQL: JSON_AGG
 SELECT
-  category_id,
+  customer_id,
   JSON_AGG(
-    JSON_BUILD_OBJECT('id', id, 'name', name, 'price', price)
-    ORDER BY price
-  ) AS products
-FROM products GROUP BY category_id;
+    JSON_BUILD_OBJECT('id', id, 'total', total, 'status', status)
+    ORDER BY created_at DESC
+  ) AS orders_json
+FROM orders
+GROUP BY customer_id;
 ```
 
 ## GROUP BY
 
-`GROUP BY` partitions rows into groups and applies aggregate functions per group.
+### Single Column
 
 ```sql
--- Single column grouping
-SELECT status, COUNT(*) AS count
+SELECT
+  status,
+  COUNT(*)     AS order_count,
+  SUM(total)   AS total_revenue
 FROM orders
-GROUP BY status;
+GROUP BY status
+ORDER BY total_revenue DESC;
+```
 
--- Multiple column grouping
+### Multiple Columns
+
+```sql
 SELECT
   DATE_TRUNC('month', created_at) AS month,
   status,
@@ -82,334 +112,328 @@ SELECT
   SUM(total)                       AS revenue
 FROM orders
 GROUP BY DATE_TRUNC('month', created_at), status
-ORDER BY month DESC, revenue DESC;
-
--- Group by expression
-SELECT
-  EXTRACT(HOUR FROM created_at) AS hour_of_day,
-  COUNT(*)                       AS order_count
-FROM orders
-WHERE created_at >= NOW() - INTERVAL '30 days'
-GROUP BY EXTRACT(HOUR FROM created_at)
-ORDER BY hour_of_day;
-
--- Group by with JOIN
-SELECT
-  c.country,
-  COUNT(DISTINCT c.id)  AS customer_count,
-  COUNT(o.id)           AS order_count,
-  COALESCE(SUM(o.total), 0) AS total_revenue
-FROM customers c
-LEFT JOIN orders o ON o.customer_id = c.id
-GROUP BY c.country
-HAVING COUNT(o.id) > 0     -- only countries with orders
-ORDER BY total_revenue DESC;
+ORDER BY month, status;
 ```
 
-:::tip[GROUP BY Rules]
-Every column in the SELECT list that is not an aggregate function **must** appear in the GROUP BY clause (or be functionally dependent on a GROUP BY column). PostgreSQL is strict about this; some other databases are not.
-:::
-
-## HAVING — Filtering After Aggregation
-
-`WHERE` filters rows before aggregation. `HAVING` filters groups after aggregation.
+### GROUP BY with Expression
 
 ```sql
--- Products ordered more than 100 times
 SELECT
-  p.id,
-  p.name,
-  COUNT(oi.id) AS order_count,
-  SUM(oi.quantity) AS total_units
-FROM products p
-JOIN order_items oi ON oi.product_id = p.id
-GROUP BY p.id, p.name
-HAVING COUNT(oi.id) > 100
-ORDER BY order_count DESC;
+  EXTRACT(YEAR  FROM created_at) AS year,
+  EXTRACT(MONTH FROM created_at) AS month,
+  COUNT(*) AS orders
+FROM orders
+GROUP BY
+  EXTRACT(YEAR  FROM created_at),
+  EXTRACT(MONTH FROM created_at)
+ORDER BY year, month;
+```
 
--- Customers with more than 5 orders AND lifetime value > $500
+## HAVING
+
+`HAVING` filters groups **after** aggregation. `WHERE` filters rows **before** aggregation.
+
+```sql
+-- Only categories with more than 5 active products
+SELECT
+  c.name,
+  COUNT(p.id) AS product_count,
+  AVG(p.price) AS avg_price
+FROM categories c
+INNER JOIN products p ON p.category_id = c.id
+WHERE p.status = 'active'        -- Filter rows before grouping
+GROUP BY c.id, c.name
+HAVING COUNT(p.id) > 5           -- Filter groups after aggregation
+   AND AVG(p.price) > 20         -- Multiple HAVING conditions
+ORDER BY product_count DESC;
+
+-- Customers with high lifetime value
 SELECT
   customer_id,
-  COUNT(*) AS order_count,
-  SUM(total) AS lifetime_value
+  COUNT(*)     AS order_count,
+  SUM(total)   AS lifetime_value
 FROM orders
+WHERE status = 'completed'
 GROUP BY customer_id
-HAVING COUNT(*) > 5
-  AND SUM(total) > 500
+HAVING SUM(total) > 1000
+   AND COUNT(*) >= 3
 ORDER BY lifetime_value DESC;
-
--- WHERE + HAVING together
-SELECT
-  DATE_TRUNC('month', created_at) AS month,
-  COUNT(*) AS orders,
-  AVG(total) AS avg_total
-FROM orders
-WHERE status = 'delivered'                           -- filter rows first
-GROUP BY DATE_TRUNC('month', created_at)
-HAVING AVG(total) > 100                             -- filter groups after
-ORDER BY month;
 ```
 
 ## FILTER Clause (Conditional Aggregation)
 
-The FILTER clause applies a condition within an aggregate — cleaner than CASE WHEN inside aggregates.
+The `FILTER` clause is cleaner than `CASE` expressions inside aggregates:
 
 ```sql
 SELECT
-  DATE_TRUNC('month', created_at)                          AS month,
-  COUNT(*)                                                  AS total_orders,
-  COUNT(*) FILTER (WHERE status = 'delivered')              AS delivered,
-  COUNT(*) FILTER (WHERE status = 'cancelled')              AS cancelled,
-  COUNT(*) FILTER (WHERE status = 'refunded')               AS refunded,
-  SUM(total) FILTER (WHERE status = 'delivered')            AS delivered_revenue,
-  AVG(total) FILTER (WHERE total > 0 AND status = 'delivered') AS avg_delivered_value
-FROM orders
-WHERE created_at >= NOW() - INTERVAL '6 months'
-GROUP BY DATE_TRUNC('month', created_at)
-ORDER BY month;
+  COUNT(*)                                  AS total_orders,
+  COUNT(*) FILTER (WHERE status = 'completed')   AS completed,
+  COUNT(*) FILTER (WHERE status = 'cancelled')   AS cancelled,
+  COUNT(*) FILTER (WHERE status = 'pending')     AS pending,
+  SUM(total) FILTER (WHERE status = 'completed') AS completed_revenue,
+  AVG(total) FILTER (WHERE total > 100)          AS avg_of_large_orders
+FROM orders;
+
+-- Equivalent using CASE (more verbose)
+SELECT
+  COUNT(CASE WHEN status = 'completed' THEN 1 END) AS completed
+FROM orders;
 ```
 
-## ROLLUP, CUBE, and GROUPING SETS
+## ROLLUP, CUBE, GROUPING SETS
 
-### ROLLUP — Hierarchical Totals
+These generate subtotals and grand totals efficiently.
 
-ROLLUP adds subtotals and grand totals to GROUP BY:
+### ROLLUP
+
+Hierarchical subtotals — generates all combinations of the columns from right to left, plus a grand total:
 
 ```sql
 SELECT
-  COALESCE(category, 'ALL CATEGORIES')   AS category,
-  COALESCE(region, 'ALL REGIONS')        AS region,
-  SUM(revenue)                           AS total_revenue
+  COALESCE(region, 'ALL REGIONS')    AS region,
+  COALESCE(country, 'ALL COUNTRIES') AS country,
+  SUM(revenue)                        AS total_revenue
 FROM sales
-GROUP BY ROLLUP (category, region)
-ORDER BY GROUPING(category), category, GROUPING(region), region;
--- Produces:
--- Electronics | North | 1000
--- Electronics | South | 800
--- Electronics | NULL  | 1800   <- subtotal for Electronics
--- Clothing    | North | 500
--- Clothing    | South | 300
--- Clothing    | NULL  | 800    <- subtotal for Clothing
--- NULL        | NULL  | 2600   <- grand total
+GROUP BY ROLLUP (region, country)
+ORDER BY region NULLS LAST, country NULLS LAST;
+-- Produces: region+country, region total, grand total
 ```
 
-### CUBE — All Possible Combinations
+### CUBE
 
-CUBE generates subtotals for every possible combination of dimensions:
+All possible combinations of subtotals:
 
 ```sql
 SELECT
-  COALESCE(category, 'ALL')  AS category,
-  COALESCE(region, 'ALL')    AS region,
-  COALESCE(channel, 'ALL')   AS channel,
-  SUM(revenue)                AS revenue
-FROM sales
-GROUP BY CUBE (category, region, channel)
-ORDER BY GROUPING(category), GROUPING(region), GROUPING(channel);
--- Produces subtotals for every combination:
--- category+region+channel, category+region, category+channel,
--- region+channel, category, region, channel, grand total
+  COALESCE(year::text, 'ALL')     AS year,
+  COALESCE(quarter::text, 'ALL')  AS quarter,
+  COALESCE(product, 'ALL')        AS product,
+  SUM(sales)                       AS total
+FROM revenue_data
+GROUP BY CUBE (year, quarter, product);
+-- Produces all 8 combinations (including grand total)
 ```
 
-### GROUPING SETS — Custom Combinations
+### GROUPING SETS
 
-Specify exactly which groupings you want:
+Explicitly specify exactly which groupings you want:
 
 ```sql
-SELECT
-  category,
-  region,
-  month,
-  SUM(revenue) AS revenue
+SELECT region, country, product, SUM(revenue)
 FROM sales
 GROUP BY GROUPING SETS (
-  (category, region, month),   -- detailed
-  (category, region),          -- by category and region
-  (category, month),           -- by category and month
-  (category),                  -- by category only
-  ()                           -- grand total
-)
-ORDER BY GROUPING(category), GROUPING(region), GROUPING(month);
+  (region, country),    -- By region and country
+  (region),             -- By region only
+  (product),            -- By product only
+  ()                    -- Grand total
+);
 ```
 
 ## Window Functions
 
-Window functions compute a value for each row based on a "window" of related rows — unlike GROUP BY, they **do not collapse rows**.
+Window functions compute values across a set of rows related to the current row, **without collapsing rows into a single group**. This is their key advantage over aggregate functions.
+
+### OVER Clause
 
 ```sql
--- Basic syntax:
-function_name(args) OVER (
-  [PARTITION BY partition_expression]
-  [ORDER BY sort_expression [ASC|DESC] [NULLS FIRST|LAST]]
-  [ROWS|RANGE BETWEEN frame_start AND frame_end]
-)
-```
-
-### Ranking Functions
-
-```sql
-SELECT
-  id,
-  customer_id,
-  total,
-  -- Unique sequential rank (1, 2, 3, 4...)
-  ROW_NUMBER() OVER (ORDER BY total DESC) AS row_num,
-
-  -- Rank with gaps for ties (1, 2, 2, 4...)
-  RANK() OVER (ORDER BY total DESC) AS rank_with_gaps,
-
-  -- Dense rank — no gaps (1, 2, 2, 3...)
-  DENSE_RANK() OVER (ORDER BY total DESC) AS dense_rank,
-
-  -- Divide into N buckets (quartiles here)
-  NTILE(4) OVER (ORDER BY total DESC) AS quartile,
-
-  -- Per-customer rank by order total
-  RANK() OVER (PARTITION BY customer_id ORDER BY total DESC) AS customer_rank
-FROM orders
-WHERE status = 'delivered';
-```
-
-### Offset Functions
-
-```sql
+-- Running total without collapsing rows
 SELECT
   id,
   created_at,
   total,
-
-  -- Value from the previous row
-  LAG(total) OVER (ORDER BY created_at)              AS prev_total,
-  LAG(total, 2) OVER (ORDER BY created_at)           AS total_2_ago,
-
-  -- Value from the next row
-  LEAD(total) OVER (ORDER BY created_at)             AS next_total,
-
-  -- Value growth from previous order
-  total - LAG(total) OVER (ORDER BY created_at)      AS change_from_prev,
-
-  -- Per-customer: lag within the same customer
-  LAG(total) OVER (PARTITION BY customer_id ORDER BY created_at) AS prev_customer_order,
-
-  -- First and last values in the window
-  FIRST_VALUE(total) OVER (ORDER BY created_at
-    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS first_ever,
-  LAST_VALUE(total) OVER (ORDER BY created_at
-    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS last_ever,
-
-  -- Nth value (3rd highest order this customer made)
-  NTH_VALUE(total, 3) OVER (
-    PARTITION BY customer_id
-    ORDER BY total DESC
-    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
-  ) AS third_highest
-FROM orders;
-```
-
-### Running Totals and Moving Averages
-
-```sql
-SELECT
-  created_at::date                   AS date,
-  total,
-
-  -- Running total (cumulative sum)
-  SUM(total) OVER (ORDER BY created_at
-    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total,
-
-  -- Running total, reset per customer
-  SUM(total) OVER (
-    PARTITION BY customer_id
-    ORDER BY created_at
-    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-  ) AS customer_running_total,
-
-  -- 7-day moving average
-  AVG(total) OVER (ORDER BY created_at
-    ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS moving_avg_7d,
-
-  -- Percentage of grand total
-  total / SUM(total) OVER () * 100  AS pct_of_total,
-
-  -- Percentage of customer total
-  total / SUM(total) OVER (PARTITION BY customer_id) * 100 AS pct_of_customer_total
+  SUM(total) OVER (ORDER BY created_at)   AS running_total,
+  AVG(total) OVER ()                       AS overall_avg,     -- Entire result set
+  COUNT(*) OVER ()                         AS total_orders
 FROM orders
-WHERE status = 'delivered'
+WHERE status = 'completed'
 ORDER BY created_at;
 ```
 
-### Frame Specification
+### PARTITION BY
 
-```sql
-ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW   -- from start to current row
-ROWS BETWEEN 3 PRECEDING AND CURRENT ROW           -- last 4 rows (3 + current)
-ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING           -- sliding 3-row window
-ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING   -- current row to end
-RANGE BETWEEN INTERVAL '7 days' PRECEDING AND CURRENT ROW  -- time-based window
-```
-
-### Named Windows (WINDOW Clause)
-
-When using the same window definition multiple times:
+Divide rows into groups (partitions) — like GROUP BY, but rows are not collapsed:
 
 ```sql
 SELECT
-  id,
   customer_id,
+  id AS order_id,
   total,
-  created_at,
-  SUM(total)   OVER w AS running_total,
-  AVG(total)   OVER w AS running_avg,
-  COUNT(*)     OVER w AS orders_so_far,
-  MAX(total)   OVER w AS max_so_far,
-  RANK()       OVER (w ORDER BY total DESC) AS rank
+  SUM(total)   OVER (PARTITION BY customer_id) AS customer_total,
+  COUNT(*)     OVER (PARTITION BY customer_id) AS customer_order_count,
+  AVG(total)   OVER (PARTITION BY customer_id) AS customer_avg_order,
+  MAX(total)   OVER (PARTITION BY customer_id) AS customer_max_order
 FROM orders
-WINDOW w AS (
-  PARTITION BY customer_id
-  ORDER BY created_at
-  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-)
+WHERE status = 'completed'
 ORDER BY customer_id, created_at;
 ```
 
-## Practical Window Function Patterns
-
-### Top-N Per Group
-
-```sql
--- Top 3 products by revenue per category
-WITH ranked AS (
-  SELECT
-    p.category_id,
-    p.name,
-    SUM(oi.quantity * oi.unit_price) AS revenue,
-    ROW_NUMBER() OVER (
-      PARTITION BY p.category_id
-      ORDER BY SUM(oi.quantity * oi.unit_price) DESC
-    ) AS rn
-  FROM products p
-  JOIN order_items oi ON oi.product_id = p.id
-  GROUP BY p.category_id, p.id, p.name
-)
-SELECT category_id, name, revenue
-FROM ranked
-WHERE rn <= 3
-ORDER BY category_id, revenue DESC;
-```
-
-### Year-Over-Year Comparison
+### Frame Specification (ROWS/RANGE BETWEEN)
 
 ```sql
 SELECT
-  DATE_TRUNC('month', created_at)  AS month,
-  SUM(total)                        AS revenue,
-  LAG(SUM(total), 12) OVER (ORDER BY DATE_TRUNC('month', created_at))
-                                    AS revenue_same_month_last_year,
-  SUM(total) / NULLIF(LAG(SUM(total), 12)
-    OVER (ORDER BY DATE_TRUNC('month', created_at)), 0) - 1
-                                    AS yoy_growth_pct
-FROM orders
-WHERE status = 'delivered'
-GROUP BY DATE_TRUNC('month', created_at)
+  created_at::date AS day,
+  total,
+  -- 7-day rolling average (current row + 6 preceding rows)
+  AVG(total) OVER (
+    ORDER BY created_at
+    ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+  ) AS rolling_7day_avg,
+
+  -- Running total from the beginning
+  SUM(total) OVER (
+    ORDER BY created_at
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  ) AS running_total,
+
+  -- Cumulative from start of partition
+  SUM(total) OVER (
+    PARTITION BY DATE_TRUNC('month', created_at)
+    ORDER BY created_at
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  ) AS monthly_running_total
+FROM orders;
+```
+
+## Ranking Functions
+
+```sql
+SELECT
+  name,
+  department,
+  salary,
+
+  -- ROW_NUMBER: unique sequential number, no ties
+  ROW_NUMBER() OVER (PARTITION BY department ORDER BY salary DESC) AS row_num,
+
+  -- RANK: tied values get the same rank; next rank skips (1,1,3)
+  RANK()       OVER (PARTITION BY department ORDER BY salary DESC) AS rank,
+
+  -- DENSE_RANK: tied values get same rank; no gaps (1,1,2)
+  DENSE_RANK() OVER (PARTITION BY department ORDER BY salary DESC) AS dense_rank,
+
+  -- NTILE: divide into N buckets (quartiles = 4)
+  NTILE(4)     OVER (ORDER BY salary)                              AS quartile
+FROM employees
+ORDER BY department, salary DESC;
+```
+
+### Top N Per Group Pattern
+
+```sql
+-- Top 3 most expensive products per category
+SELECT *
+FROM (
+  SELECT
+    p.*,
+    ROW_NUMBER() OVER (
+      PARTITION BY category_id
+      ORDER BY price DESC
+    ) AS price_rank
+  FROM products
+  WHERE status = 'active'
+) ranked
+WHERE price_rank <= 3
+ORDER BY category_id, price DESC;
+```
+
+## Offset Functions
+
+Access values from other rows in the window:
+
+```sql
+SELECT
+  created_at::date AS sale_date,
+  revenue,
+
+  -- Previous row's value
+  LAG(revenue, 1)  OVER (ORDER BY created_at) AS prev_day_revenue,
+
+  -- Value 7 rows ahead
+  LEAD(revenue, 7) OVER (ORDER BY created_at) AS next_week_revenue,
+
+  -- First value in the partition
+  FIRST_VALUE(revenue) OVER (
+    ORDER BY created_at
+    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+  ) AS first_day_revenue,
+
+  -- Last value in the partition
+  LAST_VALUE(revenue) OVER (
+    ORDER BY created_at
+    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+  ) AS latest_revenue,
+
+  -- Day-over-day growth
+  (revenue - LAG(revenue, 1) OVER (ORDER BY created_at))
+    / NULLIF(LAG(revenue, 1) OVER (ORDER BY created_at), 0) * 100
+  AS pct_change
+FROM daily_revenue
+ORDER BY sale_date;
+```
+
+## Named Windows (WINDOW Clause)
+
+Avoid repeating the same window definition:
+
+```sql
+SELECT
+  employee_id,
+  department_id,
+  salary,
+  RANK()       OVER dept_window AS dept_rank,
+  PERCENT_RANK() OVER dept_window AS dept_percentile,
+  NTILE(4)     OVER dept_window AS quartile,
+  AVG(salary)  OVER dept_window AS dept_avg
+FROM employees
+
+WINDOW dept_window AS (
+  PARTITION BY department_id
+  ORDER BY salary DESC
+)
+
+ORDER BY department_id, dept_rank;
+```
+
+:::tip[Window vs GROUP BY]
+Use window functions when you need both the detail rows AND aggregate values. Use GROUP BY when you only need the summary. Window functions never reduce the row count.
+:::
+
+## Complete Analytical Query Example
+
+```sql
+WITH monthly_revenue AS (
+  SELECT
+    DATE_TRUNC('month', created_at)  AS month,
+    SUM(total)                        AS revenue,
+    COUNT(*)                          AS order_count,
+    COUNT(DISTINCT customer_id)       AS unique_customers
+  FROM orders
+  WHERE status = 'completed'
+  GROUP BY DATE_TRUNC('month', created_at)
+),
+with_metrics AS (
+  SELECT
+    month,
+    revenue,
+    order_count,
+    unique_customers,
+    LAG(revenue)     OVER (ORDER BY month) AS prev_month_revenue,
+    AVG(revenue)     OVER (
+      ORDER BY month
+      ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+    ) AS rolling_3m_avg,
+    SUM(revenue)     OVER (ORDER BY month) AS ytd_revenue,
+    RANK()           OVER (ORDER BY revenue DESC) AS revenue_rank
+  FROM monthly_revenue
+)
+SELECT
+  TO_CHAR(month, 'YYYY-MM')   AS month,
+  revenue,
+  ROUND((revenue - prev_month_revenue) / NULLIF(prev_month_revenue, 0) * 100, 1)
+                               AS mom_growth_pct,
+  ROUND(rolling_3m_avg, 2)    AS rolling_3m_avg,
+  ytd_revenue,
+  revenue_rank
+FROM with_metrics
 ORDER BY month;
 ```

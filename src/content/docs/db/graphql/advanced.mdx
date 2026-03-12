@@ -1,140 +1,165 @@
 ---
 title: GraphQL Advanced
-description: Apollo Federation, schema stitching, code-first with TypeGraphQL and Strawberry, authentication, file uploads, subscriptions at scale, GraphQL Codegen, and testing.
+description: Apollo Federation, schema stitching, TypeGraphQL, Strawberry, authentication, rate limiting, file uploads, GraphQL Codegen, and testing.
 sidebar:
   order: 6
 tags: [database, api]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
 # GraphQL Advanced
 
+This section covers production-grade patterns: federation for microservices, code-first approaches, auth strategies, performance controls, and testing.
+
 ## Apollo Federation
 
-Apollo Federation lets you split a large GraphQL API into multiple independent **subgraphs** (microservices), each owning a portion of the schema. A **router** (Apollo Router or Apollo Gateway) composes them into a unified supergraph.
+Apollo Federation enables you to split a large GraphQL schema across multiple **subgraph** services while presenting a unified graph to clients through a **router** (gateway).
 
-### Subgraph Setup
+### Subgraph: Users Service
 
-```bash
-npm install @apollo/subgraph @apollo/server graphql
-```
-
-#### Users Subgraph
-
-```javascript
-// users-subgraph/index.js
-import { ApolloServer } from '@apollo/server';
+```typescript
+// users-service/src/schema.ts
 import { buildSubgraphSchema } from '@apollo/subgraph';
-import { startStandaloneServer } from '@apollo/server/standalone';
 import { gql } from 'graphql-tag';
 
 const typeDefs = gql`
   extend schema
-    @link(
-      url: "https://specs.apollo.dev/federation/v2.0"
-      import: ["@key", "@shareable"]
-    )
+    @link(url: "https://specs.apollo.dev/federation/v2.3", import: ["@key", "@shareable"])
 
   type User @key(fields: "id") {
     id: ID!
     name: String!
     email: String!
-    createdAt: String!
+    role: UserRole!
   }
 
+  enum UserRole { ADMIN MEMBER GUEST }
+
   type Query {
-    user(id: ID!): User
-    users: [User!]!
     me: User
+    user(id: ID!): User
+    users(first: Int): [User!]!
+  }
+
+  type Mutation {
+    createUser(input: CreateUserInput!): User!
+  }
+
+  input CreateUserInput {
+    name: String!
+    email: String!
+    password: String!
   }
 `;
 
 const resolvers = {
   User: {
-    // Entity resolver — called by router when other subgraphs need a User
-    __resolveReference: async ({ id }, { db }) => db.users.findById(id),
+    // Entity resolver: given a key ({ id }), return the full User
+    __resolveReference: async (ref: { id: string }, context: Context) => {
+      return context.db.users.findById(ref.id);
+    },
   },
   Query: {
-    user: (_, { id }, { db }) => db.users.findById(id),
-    users: (_, __, { db }) => db.users.findAll(),
+    me: (_parent, _args, context: Context) => context.user,
+    user: (_parent, args: { id: string }, context: Context) =>
+      context.db.users.findById(args.id),
   },
 };
 
 const server = new ApolloServer({
   schema: buildSubgraphSchema({ typeDefs, resolvers }),
 });
-const { url } = await startStandaloneServer(server, { listen: { port: 4001 } });
-console.log(`Users subgraph ready at ${url}`);
 ```
 
-#### Orders Subgraph
+### Subgraph: Posts Service
 
-```javascript
-// orders-subgraph/index.js
+```typescript
 const typeDefs = gql`
-  extend schema @link(url: "https://specs.apollo.dev/federation/v2.0",
-    import: ["@key", "@external", "@requires", "@provides"])
+  extend schema
+    @link(url: "https://specs.apollo.dev/federation/v2.3",
+      import: ["@key", "@external", "@requires", "@provides"])
 
-  # Reference the User type defined in the users subgraph
+  # Reference the User type from the users subgraph
   type User @key(fields: "id") {
     id: ID!
-    # @external means this field is defined in another subgraph
+    # @external: field is defined in another subgraph
     name: String! @external
-    # Access fields from the users subgraph to compute this field
-    orders: [Order!]!
+    posts: [Post!]!  # Extending User with posts field
   }
 
-  type Order @key(fields: "id") {
+  type Post @key(fields: "id") {
     id: ID!
-    total: Float!
-    status: OrderStatus!
-    createdAt: String!
-    # @requires: needs the `name` field from users subgraph (via @external)
-    customerName: String! @requires(fields: "name")
-    customerId: ID!
-    customer: User!
+    title: String!
+    slug: String!
+    # @requires: this subgraph needs author.name from users subgraph
+    authorId: ID!
+    author: User! @provides(fields: "name")
+    body: String
+    publishedAt: DateTime
   }
-
-  enum OrderStatus { PENDING PROCESSING SHIPPED DELIVERED CANCELLED }
 
   type Query {
-    order(id: ID!): Order
-    orders(userId: ID): [Order!]!
+    post(slug: String!): Post
+    posts(first: Int, after: String): PostConnection!
   }
 `;
+
+const resolvers = {
+  Post: {
+    __resolveReference: async (ref: { id: string }, context: Context) =>
+      context.db.posts.findById(ref.id),
+
+    author: (parent: Post) => ({ __typename: 'User', id: parent.authorId }),
+  },
+  User: {
+    posts: (parent: { id: string }, _args, context: Context) =>
+      context.db.posts.findByAuthorId(parent.id),
+  },
+};
 ```
 
-### Federation Directives
+### Router Configuration
 
-| Directive                     | Purpose                                                            |
-| ----------------------------- | ------------------------------------------------------------------ |
-| `@key(fields: "id")`          | Marks a type as an entity (can be referenced across subgraphs)     |
-| `@external`                   | Field is defined in another subgraph                               |
-| `@requires(fields: "...")`    | Field needs values from @external fields (computes cross-subgraph) |
-| `@provides(fields: "...")`    | Optimizer hint that this resolver can provide fields cheaply       |
-| `@shareable`                  | Type/field can be defined in multiple subgraphs                    |
-| `@override(from: "subgraph")` | Migrate a field from one subgraph to another                       |
-| `@inaccessible`               | Hide field from the supergraph schema                              |
+```yaml
+# router.yaml
+supergraph:
+  path: /graphql
+
+health_check:
+  enabled: true
+
+sandbox:
+  enabled: true
+
+include_subgraph_errors:
+  all: false  # Don't expose internal subgraph errors in production
+
+traffic_shaping:
+  all:
+    deduplicate_query: true  # Deduplicate identical in-flight requests
+```
+
+```bash
+# Compose supergraph schema from subgraphs
+npx @apollo/rover supergraph compose --config supergraph.yaml > supergraph.graphql
+
+# Start the router
+./router --config router.yaml --supergraph supergraph.graphql
+```
 
 ## Code-First with TypeGraphQL
 
-TypeGraphQL lets you define your schema using TypeScript classes and decorators.
+TypeGraphQL lets you define your schema with TypeScript classes and decorators:
 
 ```bash
-npm install type-graphql graphql reflect-metadata class-validator
+npm install type-graphql reflect-metadata class-validator class-transformer
 ```
 
 ```typescript
-// schema/types/User.ts
+// src/types/User.ts
 import { ObjectType, Field, ID, Int } from 'type-graphql';
+import { IsEmail, MinLength, MaxLength } from 'class-validator';
 
 @ObjectType({ description: 'Represents a registered user' })
 export class User {
@@ -150,9 +175,6 @@ export class User {
   @Field(() => Int)
   age: number;
 
-  @Field({ nullable: true })
-  bio?: string;
-
   @Field(() => [Post])
   posts: Post[];
 
@@ -160,9 +182,9 @@ export class User {
   createdAt: Date;
 }
 
-// schema/inputs/CreateUserInput.ts
+// src/inputs/CreateUserInput.ts
 import { InputType, Field } from 'type-graphql';
-import { IsEmail, MinLength, MaxLength, IsEnum } from 'class-validator';
+import { IsEmail, MinLength } from 'class-validator';
 
 @InputType()
 export class CreateUserInput {
@@ -178,77 +200,70 @@ export class CreateUserInput {
   @Field()
   @MinLength(8)
   password: string;
-
-  @Field(() => UserRole, { defaultValue: UserRole.USER })
-  @IsEnum(UserRole)
-  role: UserRole;
 }
 
-// schema/resolvers/UserResolver.ts
-import {
-  Resolver,
-  Query,
-  Mutation,
-  Arg,
-  Ctx,
-  ID,
-  Authorized,
-} from 'type-graphql';
+// src/resolvers/UserResolver.ts
+import { Resolver, Query, Mutation, Arg, Ctx, ID, Authorized } from 'type-graphql';
 
 @Resolver(() => User)
 export class UserResolver {
-  @Query(() => User, { nullable: true })
-  async user(
-    @Arg('id', () => ID) id: string,
-    @Ctx() ctx: Context,
-  ): Promise<User | null> {
+  @Query(() => User, { nullable: true, description: 'Find a user by ID' })
+  async user(@Arg('id', () => ID) id: string, @Ctx() ctx: Context): Promise<User | null> {
     return ctx.db.users.findById(id);
   }
 
   @Query(() => [User])
-  @Authorized(['ADMIN']) // role-based authorization
   async users(@Ctx() ctx: Context): Promise<User[]> {
     return ctx.db.users.findAll();
   }
 
-  @Mutation(() => CreateUserPayload)
+  @Authorized()  // Requires authenticated user
+  @Mutation(() => User)
   async createUser(
     @Arg('input') input: CreateUserInput,
-    @Ctx() ctx: Context,
-  ): Promise<CreateUserPayload> {
-    const user = await ctx.db.users.create(input);
-    return { user, errors: [] };
+    @Ctx() ctx: Context
+  ): Promise<User> {
+    return ctx.db.users.create(input);
   }
 
-  // Field resolver for computed/relational fields
-  @FieldResolver(() => [Post])
-  async posts(@Root() user: User, @Ctx() ctx: Context): Promise<Post[]> {
-    return ctx.loaders.postsByUser.load(user.id);
+  @Authorized('ADMIN')  // Requires ADMIN role
+  @Mutation(() => Boolean)
+  async deleteUser(
+    @Arg('id', () => ID) id: string,
+    @Ctx() ctx: Context
+  ): Promise<boolean> {
+    await ctx.db.users.delete(id);
+    return true;
   }
 }
 
-// Building the schema
-import { buildSchema } from 'type-graphql';
+// src/index.ts
 import 'reflect-metadata';
+import { buildSchema } from 'type-graphql';
 
 const schema = await buildSchema({
-  resolvers: [UserResolver, PostResolver, OrderResolver],
-  authChecker: ({ context: { currentUser } }, roles) => {
-    if (!currentUser) return false;
+  resolvers: [UserResolver, PostResolver],
+  authChecker: ({ context }, roles) => {
+    if (!context.user) return false;
     if (roles.length === 0) return true;
-    return roles.some((role) => currentUser.roles.includes(role));
+    return roles.includes(context.user.role);
   },
-  validate: true, // use class-validator automatically
+  validate: { forbidUnknownValues: true },
 });
 ```
 
 ## Strawberry (Python Code-First)
 
 ```python
-# schema.py
+# pip install strawberry-graphql[fastapi] uvicorn
+
 import strawberry
-from typing import Optional, List
+from strawberry.types import Info
+from strawberry.fastapi import GraphQLRouter
+from fastapi import FastAPI
 from datetime import datetime
+from typing import Optional
+import asyncio
 
 @strawberry.type
 class User:
@@ -258,8 +273,8 @@ class User:
     created_at: datetime
 
     @strawberry.field
-    async def posts(self, info: strawberry.types.Info, first: int = 10) -> List["Post"]:
-        return await info.context["loaders"]["posts_by_user"].load(self.id)
+    def posts(self, root: "User", info: Info) -> list["Post"]:
+        return info.context["db"].posts.find_by_author(root.id)
 
 @strawberry.input
 class CreateUserInput:
@@ -268,107 +283,94 @@ class CreateUserInput:
     password: str
 
 @strawberry.type
-class CreateUserPayload:
-    user: Optional[User]
-    errors: List[str]
-
-@strawberry.type
 class Query:
     @strawberry.field
-    async def user(self, info: strawberry.types.Info, id: strawberry.ID) -> Optional[User]:
-        db = info.context["db"]
-        return await db.users.find_by_id(id)
+    async def user(self, id: strawberry.ID, info: Info) -> Optional[User]:
+        return await info.context["db"].users.find_by_id(id)
 
     @strawberry.field
-    async def users(self, info: strawberry.types.Info) -> List[User]:
-        db = info.context["db"]
-        return await db.users.find_all()
+    async def users(self, info: Info) -> list[User]:
+        return await info.context["db"].users.find_all()
 
 @strawberry.type
 class Mutation:
     @strawberry.mutation
-    async def create_user(
-        self,
-        info: strawberry.types.Info,
-        input: CreateUserInput
-    ) -> CreateUserPayload:
-        db = info.context["db"]
-        user = await db.users.create(input)
-        return CreateUserPayload(user=user, errors=[])
+    async def create_user(self, input: CreateUserInput, info: Info) -> User:
+        if not info.context["current_user"]:
+            raise Exception("Authentication required")
+        return await info.context["db"].users.create(input)
 
-schema = strawberry.Schema(query=Query, mutation=Mutation)
+@strawberry.type
+class Subscription:
+    @strawberry.subscription
+    async def user_online(self, user_id: strawberry.ID) -> User:
+        async for user in info.context["pubsub"].subscribe(f"user:{user_id}"):
+            yield user
 
-# FastAPI integration
-import strawberry.fastapi
-from fastapi import FastAPI
+schema = strawberry.Schema(query=Query, mutation=Mutation, subscription=Subscription)
 
 app = FastAPI()
-
-async def get_context(request: Request) -> dict:
-    return {
-        "db": db,
-        "current_user": await get_current_user(request),
-        "loaders": create_loaders(db),
-    }
-
-graphql_app = strawberry.fastapi.GraphQLRouter(
-    schema,
-    context_getter=get_context,
-)
+graphql_app = GraphQLRouter(schema, context_getter=get_context)
 app.include_router(graphql_app, prefix="/graphql")
 ```
 
 ## Authentication Patterns
 
-```javascript
-// Pattern 1: JWT in Authorization header → context
-const server = new ApolloServer({ typeDefs, resolvers });
+### JWT in Context
 
-await startStandaloneServer(server, {
-  context: async ({ req }) => {
-    const token = req.headers.authorization?.replace('Bearer ', '');
-    let currentUser = null;
-
-    if (token) {
-      try {
-        const payload = jwt.verify(token, process.env.JWT_SECRET);
-        currentUser = await db.users.findById(payload.sub);
-      } catch {
-        /* invalid or expired token */
-      }
+```typescript
+// Inject authenticated user into context
+context: async ({ req }): Promise<Context> => {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  let user = null;
+  if (token) {
+    try {
+      const payload = jwt.verify(token, process.env.JWT_SECRET!) as JWTPayload;
+      user = await db.users.findById(payload.sub);
+    } catch (e) {
+      // Token invalid or expired — user remains null
     }
+  }
+  return { db, user };
+},
 
-    return { db, currentUser, loaders: createLoaders(db) };
-  },
-});
+// In resolvers:
+Query: {
+  me: (_p, _a, ctx) => {
+    if (!ctx.user) throw new GraphQLError('Not authenticated', {
+      extensions: { code: 'UNAUTHENTICATED' }
+    });
+    return ctx.user;
+  }
+}
+```
 
-// Pattern 2: @auth custom directive
-const { mapSchema, getDirective, MapperKind } = require('@graphql-tools/utils');
-const { defaultFieldResolver } = require('graphql');
+### @auth Directive
 
-function authDirectiveTransformer(schema) {
+```typescript
+import { MapperKind, getDirective, mapSchema } from '@graphql-tools/utils';
+
+function authDirectiveTransformer(schema: GraphQLSchema) {
   return mapSchema(schema, {
-    [MapperKind.OBJECT_FIELD]: (fieldConfig) => {
+    [MapperKind.OBJECT_FIELD](fieldConfig) {
       const authDirective = getDirective(schema, fieldConfig, 'auth')?.[0];
-      if (!authDirective) return fieldConfig;
-
-      const { requires } = authDirective;
-      const { resolve = defaultFieldResolver } = fieldConfig;
-
-      fieldConfig.resolve = async function (source, args, context, info) {
-        if (!context.currentUser) {
-          throw new GraphQLError('Unauthenticated', {
-            extensions: { code: 'UNAUTHENTICATED' },
-          });
-        }
-        if (requires && !context.currentUser.roles.includes(requires)) {
-          throw new GraphQLError('Forbidden', {
-            extensions: { code: 'FORBIDDEN' },
-          });
-        }
-        return resolve(source, args, context, info);
-      };
-
+      if (authDirective) {
+        const { resolve = defaultFieldResolver } = fieldConfig;
+        const requiredRole = authDirective['requires'] ?? 'MEMBER';
+        fieldConfig.resolve = async (source, args, context, info) => {
+          if (!context.user) {
+            throw new GraphQLError('Authentication required', {
+              extensions: { code: 'UNAUTHENTICATED' }
+            });
+          }
+          if (requiredRole !== 'MEMBER' && context.user.role !== requiredRole) {
+            throw new GraphQLError('Insufficient permissions', {
+              extensions: { code: 'FORBIDDEN' }
+            });
+          }
+          return resolve(source, args, context, info);
+        };
+      }
       return fieldConfig;
     },
   });
@@ -382,99 +384,82 @@ npm install graphql-upload
 ```
 
 ```graphql
-# Schema
 scalar Upload
 
 type Mutation {
-  uploadFile(file: Upload!): UploadResult!
-  uploadProfilePhoto(userId: ID!, photo: Upload!): User!
+  uploadAvatar(file: Upload!): User!
+  uploadDocument(file: Upload!, title: String!): Document!
 }
 ```
 
-```javascript
-import { GraphQLUpload, processRequest } from 'graphql-upload';
+```typescript
+import { GraphQLUpload } from 'graphql-upload';
+import type { FileUpload } from 'graphql-upload';
+import { createWriteStream } from 'fs';
+import path from 'path';
 
 const resolvers = {
   Upload: GraphQLUpload,
 
   Mutation: {
-    uploadFile: async (_, { file }) => {
-      const { createReadStream, filename, mimetype, encoding } = await file;
+    uploadAvatar: async (_parent, { file }: { file: Promise<FileUpload> }, context: Context) => {
+      const { createReadStream, filename, mimetype } = await file;
 
-      // Validate
-      const allowedTypes = ['image/jpeg', 'image/png', 'application/pdf'];
-      if (!allowedTypes.includes(mimetype)) {
-        throw new GraphQLError('Unsupported file type', {
-          extensions: { code: 'UNSUPPORTED_MEDIA_TYPE' },
+      // Validate MIME type
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimetype)) {
+        throw new GraphQLError('Invalid file type. Only JPEG, PNG, and WebP allowed.', {
+          extensions: { code: 'BAD_USER_INPUT' }
         });
       }
 
-      const MAX_SIZE = 10 * 1024 * 1024; // 10 MB
-      let size = 0;
-      const stream = createReadStream();
-      stream.on('data', (chunk) => {
-        size += chunk.length;
-        if (size > MAX_SIZE) stream.destroy(new Error('File too large'));
+      const uniqueName = `${Date.now()}-${filename}`;
+      const uploadPath = path.join('/uploads/avatars', uniqueName);
+
+      await new Promise<void>((resolve, reject) => {
+        createReadStream()
+          .pipe(createWriteStream(uploadPath))
+          .on('finish', resolve)
+          .on('error', reject);
       });
 
-      // Stream to storage (S3, local filesystem, etc.)
-      const key = `uploads/${Date.now()}-${filename}`;
-      await s3
-        .upload({
-          Bucket: 'my-bucket',
-          Key: key,
-          Body: stream,
-          ContentType: mimetype,
-        })
-        .promise();
-
-      return { url: `https://cdn.example.com/${key}`, filename, mimetype };
+      return context.db.users.updateAvatar(context.user!.id, `/uploads/avatars/${uniqueName}`);
     },
   },
 };
 ```
 
-## Subscriptions at Scale with Redis PubSub
-
-The default in-memory PubSub doesn't work across multiple server instances. Use Redis for horizontal scaling:
+## Rate Limiting and Depth Limiting
 
 ```bash
-npm install graphql-redis-subscriptions ioredis
+npm install graphql-depth-limit graphql-query-complexity
 ```
 
-```javascript
-import { RedisPubSub } from 'graphql-redis-subscriptions';
-import Redis from 'ioredis';
+```typescript
+import depthLimit from 'graphql-depth-limit';
+import { createComplexityLimitRule } from 'graphql-validation-complexity';
 
-const options = {
-  host: process.env.REDIS_HOST,
-  port: parseInt(process.env.REDIS_PORT ?? '6379'),
-  retryStrategy: (times) => Math.min(times * 50, 2000),
-};
-
-const pubsub = new RedisPubSub({
-  publisher: new Redis(options),
-  subscriber: new Redis(options),
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  validationRules: [
+    depthLimit(10),  // Max query depth of 10
+    createComplexityLimitRule(1000, {
+      onCost: (cost) => console.log('Query cost:', cost),
+    }),
+  ],
 });
-
-// Usage is identical to in-memory PubSub
-await pubsub.publish('ORDER_UPDATED', { orderUpdated: order });
-pubsub.asyncIterator(['ORDER_UPDATED']);
 ```
 
 ## GraphQL Codegen
 
-GraphQL Code Generator generates TypeScript types and React hooks from your schema and operations.
-
 ```bash
-npm install -D @graphql-codegen/cli @graphql-codegen/typescript @graphql-codegen/typescript-operations @graphql-codegen/typescript-react-apollo
-npx graphql-codegen init
+npm install --save-dev @graphql-codegen/cli @graphql-codegen/typescript @graphql-codegen/typescript-operations @graphql-codegen/typescript-react-apollo
 ```
 
 ```yaml
-# codegen.yml
+# codegen.ts (or codegen.yml)
 schema: http://localhost:4000/graphql
-documents: 'src/**/*.graphql'
+documents: src/**/*.graphql
 generates:
   src/generated/graphql.ts:
     plugins:
@@ -484,164 +469,108 @@ generates:
     config:
       withHooks: true
       withComponent: false
-      withRefetchFn: true
+      withHOC: false
       scalars:
         DateTime: string
+        Date: string
         Upload: File
 ```
 
 ```bash
-# Generate types
+# Generate types and hooks
 npx graphql-codegen
-# Watch mode
-npx graphql-codegen --watch
 ```
 
-Generated code usage:
-
-```typescript
-// Instead of writing hooks manually, use generated typed hooks
-import { useGetUsersQuery, useCreateUserMutation } from './generated/graphql';
-
-function UserList() {
-  // Fully typed! data.users is User[]
-  const { data, loading } = useGetUsersQuery({
-    variables: { role: 'ADMIN' },
-  });
-
-  const [createUser] = useCreateUserMutation({
-    refetchQueries: [{ query: GetUsersDocument }],
-  });
-}
-```
+The generated file includes TypeScript types for every schema type, fully-typed operation variables, and React hooks (`useGetUserQuery`, `useCreatePostMutation`, etc.).
 
 ## Testing GraphQL
 
-### Server-Side Testing (Jest + Supertest)
+### Server-Side Testing
 
-```javascript
-// __tests__/users.test.js
+```typescript
+// tests/user.test.ts
 import { ApolloServer } from '@apollo/server';
-import request from 'supertest';
-import express from 'express';
-import { expressMiddleware } from '@apollo/server/express4';
-import { typeDefs, resolvers } from '../schema';
+import { typeDefs } from '../src/schema';
+import { resolvers } from '../src/resolvers';
+import { createTestContext } from './helpers';
 
-describe('User API', () => {
-  let app;
-  let server;
-  let mockDb;
+const server = new ApolloServer({ typeDefs, resolvers });
 
-  beforeAll(async () => {
-    mockDb = {
-      users: {
-        findById: jest.fn(),
-        findAll: jest.fn(),
-        create: jest.fn(),
-      },
-    };
-
-    server = new ApolloServer({ typeDefs, resolvers });
-    await server.start();
-
-    app = express();
-    app.use(
-      '/graphql',
-      express.json(),
-      expressMiddleware(server, {
-        context: async () => ({ db: mockDb }),
-      }),
+describe('User queries', () => {
+  it('returns a user by id', async () => {
+    const context = createTestContext({ user: { id: '1', role: 'ADMIN' } });
+    const response = await server.executeOperation(
+      { query: `query { user(id: "1") { id name email } }` },
+      { contextValue: context }
     );
+
+    expect(response.body.kind).toBe('single');
+    if (response.body.kind === 'single') {
+      expect(response.body.singleResult.errors).toBeUndefined();
+      expect(response.body.singleResult.data?.user).toEqual({
+        id: '1',
+        name: 'Alice',
+        email: 'alice@example.com',
+      });
+    }
   });
 
-  afterAll(async () => await server.stop());
-
-  test('query user by id', async () => {
-    mockDb.users.findById.mockResolvedValue({
-      id: '1',
-      name: 'Alice',
-      email: 'alice@test.com',
-    });
-
-    const res = await request(app).post('/graphql').send({
-      query: `query { user(id: "1") { id name email } }`,
-    });
-
-    expect(res.status).toBe(200);
-    expect(res.body.errors).toBeUndefined();
-    expect(res.body.data.user).toEqual({
-      id: '1',
-      name: 'Alice',
-      email: 'alice@test.com',
-    });
-  });
-
-  test('returns null for non-existent user', async () => {
-    mockDb.users.findById.mockResolvedValue(null);
-
-    const res = await request(app)
-      .post('/graphql')
-      .send({ query: `query { user(id: "999") { id } }` });
-
-    expect(res.body.data.user).toBeNull();
+  it('returns null for unknown user', async () => {
+    const response = await server.executeOperation(
+      { query: `query { user(id: "999") { id name } }` },
+      { contextValue: createTestContext() }
+    );
+    expect(response.body.singleResult.data?.user).toBeNull();
   });
 });
 ```
 
 ### Client-Side Testing with MSW
 
-```javascript
-// mocks/handlers.js
+```typescript
+// src/mocks/handlers.ts
 import { graphql, HttpResponse } from 'msw';
 
 export const handlers = [
-  graphql.query('GetUsers', () => {
+  graphql.query('GetUser', ({ variables }) => {
     return HttpResponse.json({
       data: {
-        users: [
-          { id: '1', name: 'Alice', email: 'alice@test.com' },
-          { id: '2', name: 'Bob', email: 'bob@test.com' },
-        ],
+        user: {
+          id: variables.id,
+          name: 'Alice',
+          email: 'alice@example.com',
+        },
       },
     });
   }),
 
-  graphql.mutation('CreateUser', ({ variables }) => {
+  graphql.mutation('CreatePost', ({ variables }) => {
     return HttpResponse.json({
       data: {
-        createUser: {
-          user: { id: '3', ...variables.input },
-          errors: [],
+        createPost: {
+          id: 'new-id',
+          title: variables.input.title,
+          slug: 'new-slug',
         },
       },
     });
   }),
 ];
 
-// Component test
-import { render, screen, waitFor } from '@testing-library/react';
+// In tests:
+import { render, screen } from '@testing-library/react';
 import { MockedProvider } from '@apollo/client/testing';
-import { UserList } from './UserList';
 
-test('renders user list', async () => {
+test('displays user profile', async () => {
   render(
     <MockedProvider mocks={mocks} addTypename={false}>
-      <UserList />
-    </MockedProvider>,
+      <UserProfile userId="1" />
+    </MockedProvider>
   );
-
-  await waitFor(() => {
-    expect(screen.getByText('Alice')).toBeInTheDocument();
-  });
+  expect(await screen.findByText('Alice')).toBeInTheDocument();
 });
 ```
 
 :::tip[Schema Registry]
-For teams maintaining multiple GraphQL APIs, a schema registry (Apollo Studio, GraphQL Inspector, Hive) tracks schema changes, detects breaking changes in CI, and enforces schema review before deployment.
-
-```bash
-# Check for breaking changes with GraphQL Inspector
-npx graphql-inspector diff old-schema.graphql new-schema.graphql
-```
-
+For teams, use a schema registry (Apollo GraphOS, Stellate) to manage schema versions, detect breaking changes before deployment, and enforce governance rules across subgraphs.
 :::

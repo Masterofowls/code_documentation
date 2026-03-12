@@ -1,294 +1,233 @@
 ---
 title: Docker Volumes
-description: Persist container data with named volumes, bind mounts, and tmpfs. Backup, restore, share data, and understand volume drivers.
+description: Persist and share data with Docker named volumes, bind mounts, and tmpfs. Backup, restore, and volume driver patterns.
 sidebar:
   order: 6
 tags: [devops, docker]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
 # Docker Volumes
 
-Containers are **ephemeral** — their writable layer is deleted when the container is removed. Volumes solve this by providing persistent storage that lives outside the container lifecycle.
+Containers are ephemeral — when a container is removed, all data written to its writable layer is lost. Docker volumes provide persistent storage that exists independently of any container's lifecycle.
 
-## Volume Types Overview
+## Volume Types Comparison
 
-| Type                 | Managed By      | Persists After Container Removal           | Best For                              |
-| -------------------- | --------------- | ------------------------------------------ | ------------------------------------- |
-| **Named volume**     | Docker          | ✅ Yes                                     | Database data, app state              |
-| **Bind mount**       | Host filesystem | ✅ Yes (it's a host path)                  | Development hot-reload, configs       |
-| **tmpfs mount**      | Host memory     | ❌ No (in-memory)                          | Temp files, sensitive runtime data    |
-| **Anonymous volume** | Docker          | ❌ No (auto-named, removed with container) | Temporary per-container scratch space |
+| Type | Managed by | Host Path | Persistence | Best for |
+|---|---|---|---|---|
+| Named volume | Docker | `/var/lib/docker/volumes/<name>` | Survives container removal | Production databases, stateful apps |
+| Bind mount | User | Any host path | Depends on host | Development (source code), config files |
+| tmpfs | Kernel | Memory only | Lost on container stop | Sensitive data, temp files, performance |
 
 ## Named Volumes
 
-Named volumes are the recommended way to persist data. Docker manages the storage location (under `/var/lib/docker/volumes/` on Linux).
+Named volumes are managed by Docker and stored under `/var/lib/docker/volumes/` on the host.
 
-### Managing Named Volumes
+### CLI Operations
 
 ```bash
+# Create a named volume
+docker volume create pgdata
+
+# Create with options (NFS example)
+docker volume create \
+  --driver local \
+  --opt type=nfs \
+  --opt o=addr=192.168.1.100,rw \
+  --opt device=:/path/to/nfs \
+  nfs-volume
+
 # List all volumes
 docker volume ls
 
-# Create a volume explicitly
-docker volume create my-data
-docker volume create --driver local \
-  --opt type=nfs \
-  --opt o=addr=192.168.1.100,rw \
-  --opt device=:/path/to/export \
-  nfs-volume
+# Filter volumes
+docker volume ls -f dangling=true    # unused volumes
 
 # Inspect a volume
-docker volume inspect my-data
-# Output:
-# [
-#   {
-#     "Name": "my-data",
-#     "Driver": "local",
-#     "Mountpoint": "/var/lib/docker/volumes/my-data/_data",
-#     "Labels": {},
-#     "Scope": "local"
-#   }
-# ]
+docker volume inspect pgdata
 
-# Remove a volume (only works if no containers are using it)
-docker volume rm my-data
+# Remove a specific volume
+docker volume rm pgdata
 
-# Remove all unused volumes (caution!)
+# Remove all unused (dangling) volumes
 docker volume prune
 
-# Remove specific unused volumes
-docker volume prune --filter label=temporary=true
-```
-
-### Using Named Volumes
-
-```bash
-# docker run — mount named volume
-docker run -d \
-  --name postgres \
-  -v postgres-data:/var/lib/postgresql/data \
-  postgres:16-alpine
-
-# Multiple volumes
-docker run -d \
-  --name app \
-  -v app-logs:/var/log/app \
-  -v app-uploads:/app/uploads \
-  myapp:latest
-
-# Inspect which volumes a container uses
-docker inspect --format '{{json .Mounts}}' postgres | python3 -m json.tool
-```
-
-```yaml
-# In Docker Compose
-services:
-  db:
-    image: postgres:16-alpine
-    volumes:
-      - postgres-data:/var/lib/postgresql/data # named volume mount
-
-  redis:
-    image: redis:7-alpine
-    volumes:
-      - redis-data:/data
-      - ./redis.conf:/etc/redis/redis.conf:ro # bind mount for config
-
-volumes:
-  postgres-data: # declared — Docker creates it
-  redis-data:
-    driver: local # explicit driver (default)
-    labels:
-      app.component: cache
-
-  external-vol:
-    external: true # must exist before compose up
-    name: my-pre-created-volume
+# Remove all volumes (including those in use)
+docker volume prune -a
 ```
 
 ### Volume Lifecycle
 
-Named volumes **survive** container removal:
+```bash
+# The volume persists even after the container is removed
+docker run -d -v pgdata:/var/lib/postgresql/data postgres:16-alpine
+docker rm -f postgres_container    # container gone — data stays
+
+# A new container can reattach to the existing volume
+docker run -d -v pgdata:/var/lib/postgresql/data postgres:16-alpine
+```
+
+:::tip[Named volumes survive `docker rm`]
+Named volumes are not deleted when a container is removed. They are only removed with `docker volume rm` or `docker volume prune`. This is the key difference from anonymous volumes.
+:::
+
+### Anonymous Volumes
+
+Anonymous volumes are named volumes created without a name — Docker assigns a UUID.
 
 ```bash
-docker run -d --name db -v mydb-data:/var/lib/postgresql/data postgres:16
-docker stop db && docker rm db           # container gone
-docker volume ls | grep mydb-data        # volume still exists!
+# Anonymous volume created by -v /data
+docker run -d -v /data myapp
 
-# Create a new container reusing the same volume
-docker run -d --name db-v2 -v mydb-data:/var/lib/postgresql/data postgres:16
-# Data is preserved
+# Also created by VOLUME instruction in Dockerfile with no explicit mapping
+docker run -d myapp   # creates anonymous volume for each VOLUME declaration
 ```
+
+:::caution[Anonymous volumes accumulate]
+Anonymous volumes are not automatically removed when a container stops. They remain until `docker volume prune` or `docker rm -v`. Use named volumes in production to avoid leaking disk space.
+:::
 
 ## Bind Mounts
 
-Bind mounts map a **host path** directly into a container. Changes on either side are immediately reflected.
+Bind mounts mount a directory or file from the host filesystem directly into the container.
 
 ```bash
-# Absolute host path : container path
+# Mount a directory (read-write)
 docker run -d \
-  -v /home/user/myapp:/app \
-  -v /home/user/config/nginx.conf:/etc/nginx/nginx.conf:ro \
-  myapp:latest
+  -v /host/path:/container/path \
+  myapp
 
-# Current directory ($(pwd) on Linux/macOS, %cd% on Windows cmd)
-docker run -d -v $(pwd):/app node:20-alpine
+# Current working directory
+docker run -d \
+  -v $(pwd)/src:/app/src \
+  myapp
 
-# Read-only bind mount
-docker run -d -v $(pwd)/config:/etc/app:ro myapp
+# Read-only mount
+docker run -d \
+  -v $(pwd)/config:/app/config:ro \
+  myapp
 
-# Long-form syntax (clearer)
+# Single file mount
+docker run -d \
+  -v $(pwd)/nginx.conf:/etc/nginx/nginx.conf:ro \
+  nginx:alpine
+
+# Using --mount syntax (more explicit)
 docker run -d \
   --mount type=bind,source=$(pwd)/src,target=/app/src,readonly \
   myapp
 ```
 
-### Bind Mounts in Compose (Development Workflow)
+### Development Workflow with Bind Mounts
+
+Bind mounts enable live code reloading without rebuilding images:
 
 ```yaml
+# compose.yml for development
 services:
-  app:
-    build: .
+  api:
+    build:
+      context: .
+      target: development    # dev stage with nodemon/hot reload
     volumes:
-      # Mount source code for hot-reload
-      - .:/app
-      # Prevent host node_modules from overwriting container's
+      # Source code — live reload
+      - ./src:/app/src
+      # Preserve container's node_modules (faster than host)
       - /app/node_modules
-    command: npm run dev
     environment:
       NODE_ENV: development
-
-  python-app:
-    build: .
-    volumes:
-      - ./src:/app/src # only mount source, not entire context
-      - ./tests:/app/tests
 ```
 
-:::tip[node_modules Trick]
-When you bind-mount your project into a Node container, the host's `node_modules` (built for your OS) overwrites the container's `node_modules` (built for Linux). Fix it by declaring an anonymous volume on `node_modules`:
-
-```yaml
-volumes:
-  - .:/app
-  - /app/node_modules # anonymous volume "shadows" the bind mount here
-```
-
+:::caution[Bind mount performance on macOS and Windows]
+Bind mounts have lower I/O performance on macOS (hypervisor overhead) and Windows (WSL2 filesystem boundary). Use Docker's `virtiofs` (macOS) or keep source code in the WSL2 filesystem (Windows) for best performance.
 :::
-
-### Bind Mount Permissions
-
-```bash
-# Container process writes files owned by its UID
-# On the host, those files are owned by that UID
-
-# Ensure the host directory is writable by the container user
-# Option 1: Make directory world-writable (quick but insecure)
-chmod 777 ./data
-
-# Option 2: Change ownership to container UID
-sudo chown -R 1001:1001 ./data
-
-# Option 3: Use --user to run as your host UID
-docker run --user $(id -u):$(id -g) -v $(pwd):/app myapp
-```
 
 ## tmpfs Mounts
 
-tmpfs mounts are stored in the host's memory. They're never written to disk — perfect for sensitive data that shouldn't persist.
+tmpfs mounts are stored in host memory. They are never written to disk and are lost when the container stops.
 
 ```bash
-# tmpfs via --tmpfs flag
+# Basic tmpfs
+docker run -d --tmpfs /tmp myapp
+
+# With options (size limit, noexec, nosuid)
 docker run -d \
-  --tmpfs /tmp \
-  --tmpfs /run:rw,noexec,nosuid,size=65536k \
+  --tmpfs /tmp:noexec,nosuid,size=128m \
   myapp
 
-# tmpfs via --mount
+# Using --mount syntax
 docker run -d \
-  --mount type=tmpfs,target=/tmp,tmpfs-size=64m,tmpfs-mode=1777 \
+  --mount type=tmpfs,target=/tmp,tmpfs-size=128m,tmpfs-mode=1777 \
   myapp
 ```
+
+Use cases for tmpfs:
+- Session data that should never persist to disk
+- Temporary processing files (image transforms, archives)
+- In-memory SQLite databases for testing
+- Sensitive intermediate data
+
+## Volumes in Compose
 
 ```yaml
-# Compose tmpfs
+volumes:
+  pgdata:           # Docker-managed named volume
+    driver: local
+  redisdata:
+    driver: local
+  nfs-data:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: "addr=192.168.1.100,rw,nfsvers=4"
+      device: ":/exports/data"
+  external-vol:
+    external: true  # must exist before `docker compose up`
+    name: legacy-pgdata
+
 services:
-  app:
-    tmpfs:
-      - /tmp
-      - /run
-    # Or with options
+  postgres:
+    image: postgres:16-alpine
     volumes:
+      # Named volume
+      - pgdata:/var/lib/postgresql/data
+      # Bind mount for init scripts
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+      # tmpfs for tmp
       - type: tmpfs
         target: /tmp
-        tmpfs:
-          size: 67108864 # 64MB in bytes
+
+  api:
+    volumes:
+      # Development bind mount
+      - ./src:/app/src
+      # Preserve container's node_modules
+      - type: volume
+        target: /app/node_modules
 ```
-
-## Volume in Dockerfile
-
-```dockerfile
-# Declare a mount point in the image
-# If no volume is mounted at runtime, Docker creates an anonymous volume
-VOLUME /var/lib/postgresql/data
-VOLUME ["/app/uploads", "/app/logs"]
-```
-
-:::caution[VOLUME in Dockerfile Pitfall]
-If you declare `VOLUME /data` in a Dockerfile, **any `COPY` or `RUN` commands that write to `/data` after that line are discarded** — because Docker has already initialised an anonymous volume there. Always copy data **before** the `VOLUME` instruction.
-:::
 
 ## Sharing Volumes Between Containers
 
 ```bash
-# Share a volume between multiple containers
-docker volume create shared-uploads
+# Share a named volume between two containers
+docker run -d --name writer -v shared:/data alpine \
+  sh -c "while true; do date >> /data/log.txt; sleep 5; done"
 
-docker run -d --name writer -v shared-uploads:/uploads myapp-writer
-docker run -d --name reader -v shared-uploads:/uploads:ro myapp-reader
-```
+docker run -d --name reader -v shared:/data alpine \
+  sh -c "while true; do tail -5 /data/log.txt; sleep 5; done"
 
-```yaml
-# Compose: multiple services sharing a volume
+# In Compose
 services:
-  uploader:
-    image: myapp-uploader
+  writer:
     volumes:
-      - uploads:/app/uploads
-
-  processor:
-    image: myapp-processor
+      - shared:/data
+  reader:
     volumes:
-      - uploads:/data/incoming:ro
-
-  cdn-sync:
-    image: myapp-cdn-sync
-    volumes:
-      - uploads:/sync/source:ro
+      - shared:/data:ro
 
 volumes:
-  uploads:
-```
-
-### Volumes-From (Legacy)
-
-```bash
-# Share all volumes from another container (legacy approach)
-docker run -d --name data-container -v /data busybox
-
-docker run -d --volumes-from data-container myapp
-
-# Compose equivalent — use named volumes instead:
-# volumes: [shared-data:/data]
+  shared:
 ```
 
 ## Backup and Restore
@@ -296,202 +235,177 @@ docker run -d --volumes-from data-container myapp
 ### Backup a Named Volume
 
 ```bash
-# Create a backup of a named volume using a temporary container
-docker run --rm \
-  -v my-volume:/source:ro \
-  -v $(pwd):/backup \
-  alpine \
-  tar czf /backup/my-volume-backup.tar.gz -C /source .
+# Backup pattern: run a temporary container that mounts the volume,
+# tars it, and streams the tar to the host
 
-# Or using docker cp if the container is running
-docker run -d --name temp-backup -v my-volume:/data busybox sleep infinity
-docker cp temp-backup:/data ./backup-data
-docker rm -f temp-backup
+docker run --rm \
+  -v pgdata:/data \
+  -v $(pwd)/backups:/backup \
+  alpine \
+  tar czf /backup/pgdata-$(date +%Y%m%d-%H%M%S).tar.gz -C /data .
 ```
 
 ### Restore a Volume
 
 ```bash
-# Restore from backup archive
-docker volume create my-volume-restored
+# Create a new volume and restore from backup
+docker volume create pgdata-restored
 
 docker run --rm \
-  -v my-volume-restored:/target \
-  -v $(pwd):/backup:ro \
+  -v pgdata-restored:/data \
+  -v $(pwd)/backups:/backup:ro \
   alpine \
-  tar xzf /backup/my-volume-backup.tar.gz -C /target
+  sh -c "cd /data && tar xzf /backup/pgdata-20240115-120000.tar.gz"
 ```
 
-### Backup a Running Database
+### Using --volumes-from
 
 ```bash
-# PostgreSQL backup
-docker exec postgres \
-  pg_dump -U myuser mydb | gzip > backup-$(date +%Y%m%d_%H%M%S).sql.gz
+# Clone volumes from one container to another
+docker run --rm \
+  --volumes-from source-container \
+  -v $(pwd)/backups:/backup \
+  alpine \
+  tar czf /backup/backup.tar.gz /app/data
+```
 
-# PostgreSQL restore
-gunzip -c backup.sql.gz | docker exec -i postgres psql -U myuser mydb
+### PostgreSQL-Specific Backup
 
-# MySQL backup
-docker exec mysql \
-  mysqldump -u root -p"${MYSQL_ROOT_PASSWORD}" mydb \
-  > backup-$(date +%Y%m%d).sql
+```bash
+# Dump database using pg_dump (better than raw volume backup)
+docker exec postgres pg_dump -U app myapp > backup.sql
 
-# Redis backup (copy RDB file)
-docker exec redis redis-cli BGSAVE
-docker cp redis:/data/dump.rdb ./redis-backup.rdb
+# Restore
+docker exec -i postgres psql -U app myapp < backup.sql
+
+# Compressed dump
+docker exec postgres pg_dump -U app -Fc myapp > backup.dump
+docker exec -i postgres pg_restore -U app -d myapp < backup.dump
 ```
 
 ## Volume Drivers
 
-```bash
-# Local driver (default) — stores on host filesystem
-docker volume create --driver local mydata
+The default `local` driver supports basic NFS and tmpfs options. Extend with third-party drivers for cloud storage.
 
-# NFS volume (shares across multiple hosts)
+```bash
+# NFS volume
 docker volume create \
   --driver local \
   --opt type=nfs \
-  --opt o=addr=nfs-server.example.com,rw,nfsvers=4 \
-  --opt device=:/exports/data \
-  nfs-data
+  --opt o=nfsvers=4,addr=192.168.1.50,rw \
+  --opt device=:/mnt/data \
+  nfs-vol
 
 # CIFS/SMB volume
 docker volume create \
   --driver local \
   --opt type=cifs \
-  --opt o=addr=smb-server,username=user,password=pass \
-  --opt device=//smb-server/share \
-  smb-data
+  --opt o=username=user,password=pass,domain=DOMAIN \
+  --opt device=//server/share \
+  smb-vol
 ```
 
-### Third-Party Volume Drivers
-
-| Driver             | Storage Backend       |
-| ------------------ | --------------------- |
-| `rexray/ebs`       | AWS EBS               |
-| `cloudstor:aws`    | AWS EFS / NFS         |
-| `rexray/gcepd`     | GCE Persistent Disk   |
-| `rexray/azuredisk` | Azure Disk            |
-| `nfs`              | NFS shares            |
-| `local-persist`    | Extended local driver |
+Popular third-party volume drivers:
+- **rexray/ebs** — AWS Elastic Block Store
+- **rexray/gcepd** — Google Compute Engine Persistent Disk
+- **rexray/azureud** — Azure Unmanaged Disk
+- **vieux/sshfs** — SSH/SFTP
+- **Portworx** — Enterprise distributed storage
 
 ## Database Data Persistence Patterns
 
-### Pattern 1: Named Volume (Recommended)
+### PostgreSQL
 
 ```yaml
 services:
   postgres:
     image: postgres:16-alpine
-    volumes:
-      - pgdata:/var/lib/postgresql/data
     environment:
+      POSTGRES_DB: myapp
+      POSTGRES_USER: app
       POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data          # persistent data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro  # init scripts
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
 
 volumes:
   pgdata:
 ```
 
-### Pattern 2: Custom Volume with Backup Labels
+### Redis
 
 ```yaml
 services:
-  postgres:
-    image: postgres:16-alpine
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --save 60 1
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - redisdata:/data
 
 volumes:
-  pgdata:
-    labels:
-      backup.enabled: 'true'
-      backup.schedule: '0 2 * * *'
-      backup.retention: '7d'
+  redisdata:
 ```
 
-### Pattern 3: Pre-initialise Database
+### MongoDB
 
 ```yaml
 services:
-  postgres:
-    image: postgres:16-alpine
+  mongo:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
     volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./init-scripts:/docker-entrypoint-initdb.d:ro # runs on first start
-```
+      - mongodata:/data/db
+      - ./mongo/init:/docker-entrypoint-initdb.d:ro
 
-```bash
-# init-scripts/01-schema.sql
-# init-scripts/02-seed-data.sql
-# Scripts run alphabetically on first volume init
+volumes:
+  mongodata:
 ```
 
 ## Volume Performance on macOS and Windows
 
-Docker Desktop runs Linux containers inside a VM. File I/O between the host and the VM adds latency.
+### macOS — VirtioFS
 
-<Tabs>
-  <TabItem label="macOS (VirtioFS)">
-    Docker Desktop uses **VirtioFS** for file sharing — significantly faster than the older gRPC-FUSE.
+Docker Desktop for macOS mounts volumes via a Linux VM. Enable VirtioFS for the best bind mount performance:
 
-    ```bash
-    # Check VirtioFS is enabled (Settings → Resources → File Sharing)
-    # Enabled by default in Docker Desktop 4.6+
-
-    # For maximum performance, use named volumes for heavy I/O (e.g., databases)
-    # Use bind mounts only for source code (read-heavy, occasional writes)
-    ```
-
-</TabItem>
-  <TabItem label="Windows (WSL2)">
-    Bind mounts to Windows paths (`C:\Users\...`) go through WSL2 filesystem translation — slow for I/O-intensive workloads.
-
-    ```bash
-    # Fastest option: keep files in the WSL2 filesystem
-    # Access them at \\wsl$\Ubuntu\home\user\project in Windows
-
-    # In WSL2 terminal — work here for best performance
-    cd ~/projects/myapp
-    docker compose up
-
-    # Named volumes are stored inside WSL2 VM — fast
-    # Bind mounts from /home/... are fast (native WSL2 path)
-    # Bind mounts from /mnt/c/... are slow (cross-OS boundary)
-    ```
-
-    :::tip[WSL2 Performance Tip]
-    Clone your repos into the WSL2 filesystem (`~/projects/`) instead of the Windows filesystem (`/mnt/c/Users/`). Bind mounts from the WSL2 filesystem are 5–10× faster for I/O-heavy workloads like `npm install` or database writes.
-    :::
-
-</TabItem>
-</Tabs>
-
-## Volume Inspection and Cleanup
+1. Docker Desktop → Settings → General → **Use VirtioFS** (default in recent versions)
+2. VirtioFS uses Apple's Virtualization.framework for near-native I/O
 
 ```bash
-# See how much space volumes are using
-docker system df -v
-
-# Remove dangling volumes (not referenced by any container)
-docker volume prune
-
-# Force remove with confirmation bypass
-docker volume prune -f
-
-# Remove specific volume
-docker volume rm myapp_postgres-data
-
-# Remove all volumes (DANGER — irreversible data loss)
-docker volume prune -a
-
-# Find which container is using a volume
-docker ps -a --filter volume=my-volume
-
-# Inspect volume details
-docker volume inspect my-volume
+# Check mount type
+docker run --rm -it -v $(pwd):/test alpine \
+  dd if=/dev/zero of=/test/testfile bs=1M count=100
 ```
 
-:::caution[Volume Prune is Irreversible]
-`docker volume prune` permanently deletes data. Always ensure you have backups before running prune commands, especially in environments where you manage stateful services.
-:::
+### Windows — WSL 2
+
+Keep source code inside the WSL 2 filesystem (`/home/user/projects`) rather than the Windows filesystem (`/mnt/c/Users`). Cross-filesystem I/O is significantly slower.
+
+```bash
+# Good — project in WSL filesystem
+cd ~/projects/myapp
+docker run -v $(pwd):/app myapp
+
+# Slow — project on Windows drive
+cd /mnt/c/Users/user/projects/myapp
+docker run -v $(pwd):/app myapp   # poor I/O performance
+```
+
+## Inspect Volume Contents
+
+```bash
+# Mount a volume to explore its contents
+docker run --rm -it \
+  -v pgdata:/data:ro \
+  alpine \
+  sh -c "ls -la /data && du -sh /data/*"
+
+# Find large files in a volume
+docker run --rm \
+  -v pgdata:/data:ro \
+  alpine \
+  find /data -size +10M -exec ls -lh {} \;
+```

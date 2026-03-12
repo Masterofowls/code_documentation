@@ -1,71 +1,68 @@
 ---
-title: Page Objects in Playwright
-description: Structure Playwright tests with the Page Object Model, reusable fixtures, auth state sharing, global setup/teardown, and TypeScript-typed test fixtures.
+title: Page Object Model in Playwright
+description: Structure Playwright tests with the Page Object Model pattern, fixtures for dependency injection, shared authentication state, and TypeScript-typed fixtures.
 sidebar:
   order: 6
 tags: [testing, javascript]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-The Page Object Model (POM) is a design pattern that encapsulates page-specific locators and interactions into dedicated classes. This keeps tests readable, eliminates duplication, and makes tests resilient to UI changes — update the page object once instead of every test.
+The Page Object Model (POM) is a design pattern that encapsulates page-specific interactions behind a clean API. Instead of repeating locators and actions across tests, you create reusable Page classes that centralize all interactions with a particular page or component.
 
-## Why Page Objects?
+## Why Use Page Objects?
 
-Without page objects, tests contain repeated locator definitions scattered across many files:
+Without Page Objects:
 
 ```typescript
-// ❌ Without page objects — duplicated locator logic
-test('login then view profile', async ({ page }) => {
+// ❌ Repeated locators across multiple test files
+test('admin can delete a user', async ({ page }) => {
   await page.goto('/login');
-  await page.getByLabel('Email').fill('alice@example.com');
-  await page.getByLabel('Password').fill('secret');
+  await page.getByLabel('Email').fill('admin@example.com');
+  await page.getByLabel('Password').fill('adminPass123');
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await page.waitForURL('/dashboard');
-  await page.getByRole('link', { name: 'Profile' }).click();
-  // ...
+  await expect(page).toHaveURL('/dashboard');
+  // ... more test steps
 });
 
-test('login then place an order', async ({ page }) => {
+test('admin can create a user', async ({ page }) => {
+  // ❌ Login steps repeated identically
   await page.goto('/login');
-  await page.getByLabel('Email').fill('alice@example.com'); // duplicated!
-  await page.getByLabel('Password').fill('secret'); // duplicated!
-  await page.getByRole('button', { name: 'Sign in' }).click(); // duplicated!
+  await page.getByLabel('Email').fill('admin@example.com');
+  await page.getByLabel('Password').fill('adminPass123');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page).toHaveURL('/dashboard');
   // ...
 });
 ```
 
-With page objects, locators and interactions are defined once:
+With Page Objects:
 
 ```typescript
-// ✅ With page objects — centralized, reusable
-test('login then view profile', async ({ page }) => {
+// ✅ Login encapsulated in LoginPage
+test('admin can delete a user', async ({ page }) => {
   const loginPage = new LoginPage(page);
-  await loginPage.goto();
-  await loginPage.login('alice@example.com', 'secret');
+  await loginPage.loginAs('admin@example.com', 'adminPass123');
   // ...
 });
 ```
 
 ## Base Page Class
 
-Define a base class with shared utilities:
+Create a base class with common utilities shared across all page objects:
 
 ```typescript
-// tests/page-objects/BasePage.ts
-import type { Page, Locator } from '@playwright/test';
+// pages/BasePage.ts
+import { type Page, type Locator } from '@playwright/test';
 
 export abstract class BasePage {
-  constructor(protected readonly page: Page) {}
+  protected readonly page: Page;
 
-  async goto(path: string = '/'): Promise<void> {
+  constructor(page: Page) {
+    this.page = page;
+  }
+
+  async navigate(path: string): Promise<void> {
     await this.page.goto(path);
   }
 
@@ -73,359 +70,415 @@ export abstract class BasePage {
     await this.page.waitForLoadState('networkidle');
   }
 
-  async getTitle(): Promise<string> {
+  async getPageTitle(): Promise<string> {
     return this.page.title();
   }
 
-  async takeScreenshot(name: string): Promise<void> {
-    await this.page.screenshot({ path: `screenshots/${name}.png` });
+  async getFlashMessage(): Promise<string | null> {
+    const flash = this.page.getByRole('alert');
+    if (await flash.isVisible()) {
+      return flash.textContent();
+    }
+    return null;
   }
 
-  // Helper to get current URL
-  get url(): string {
-    return this.page.url();
+  async dismissModal(): Promise<void> {
+    await this.page.keyboard.press('Escape');
+  }
+
+  async scrollToBottom(): Promise<void> {
+    await this.page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
   }
 }
 ```
 
-## LoginPage
+## Concrete Page Classes
 
 ```typescript
-// tests/page-objects/LoginPage.ts
+// pages/LoginPage.ts
 import { type Page, expect } from '@playwright/test';
 import { BasePage } from './BasePage';
 
 export class LoginPage extends BasePage {
-  // Declare locators as readonly class properties
-  private readonly emailInput = this.page.getByLabel('Email');
-  private readonly passwordInput = this.page.getByLabel('Password');
-  private readonly submitButton = this.page.getByRole('button', {
-    name: 'Sign in',
-  });
-  private readonly errorMessage = this.page.getByRole('alert');
-  private readonly rememberMeCheckbox = this.page.getByLabel('Remember me');
+  private readonly emailInput: Locator;
+  private readonly passwordInput: Locator;
+  private readonly submitButton: Locator;
+  private readonly errorMessage: Locator;
+  private readonly forgotPasswordLink: Locator;
 
   constructor(page: Page) {
     super(page);
+    this.emailInput = page.getByLabel('Email');
+    this.passwordInput = page.getByLabel('Password');
+    this.submitButton = page.getByRole('button', { name: 'Sign in' });
+    this.errorMessage = page.getByRole('alert');
+    this.forgotPasswordLink = page.getByRole('link', { name: 'Forgot password?' });
   }
 
   async goto(): Promise<void> {
-    await this.page.goto('/login');
-    await expect(this.submitButton).toBeVisible();
+    await this.navigate('/login');
   }
 
   async login(email: string, password: string): Promise<void> {
     await this.emailInput.fill(email);
     await this.passwordInput.fill(password);
     await this.submitButton.click();
-    await this.page.waitForURL('/dashboard');
   }
 
-  async loginExpectingError(email: string, password: string): Promise<void> {
-    await this.emailInput.fill(email);
-    await this.passwordInput.fill(password);
-    await this.submitButton.click();
+  async loginAs(email: string, password: string): Promise<void> {
+    await this.goto();
+    await this.login(email, password);
+    await expect(this.page).not.toHaveURL('/login');
   }
 
   async getErrorMessage(): Promise<string | null> {
-    return this.errorMessage.textContent();
+    if (await this.errorMessage.isVisible()) {
+      return this.errorMessage.textContent();
+    }
+    return null;
   }
 
-  async checkRememberMe(): Promise<void> {
-    await this.rememberMeCheckbox.check();
-  }
-
-  async isErrorVisible(): Promise<boolean> {
-    return this.errorMessage.isVisible();
+  async clickForgotPassword(): Promise<void> {
+    await this.forgotPasswordLink.click();
   }
 }
 ```
 
-## DashboardPage
-
 ```typescript
-// tests/page-objects/DashboardPage.ts
+// pages/DashboardPage.ts
 import { type Page, expect } from '@playwright/test';
 import { BasePage } from './BasePage';
 
 export class DashboardPage extends BasePage {
-  private readonly welcomeHeading = this.page.getByRole('heading', {
-    level: 1,
-  });
-  private readonly userMenu = this.page.getByRole('button', {
-    name: /account menu/i,
-  });
-  private readonly navLinks = this.page
-    .getByRole('navigation')
-    .getByRole('link');
-  private readonly notificationBadge =
-    this.page.getByTestId('notification-count');
+  private readonly userMenuButton: Locator;
+  private readonly logoutMenuItem: Locator;
+  private readonly notificationBell: Locator;
+  private readonly searchInput: Locator;
 
-  async expectLoaded(): Promise<void> {
-    await expect(this.page).toHaveURL('/dashboard');
-    await expect(this.welcomeHeading).toBeVisible();
+  constructor(page: Page) {
+    super(page);
+    this.userMenuButton = page.getByRole('button', { name: /account menu/i });
+    this.logoutMenuItem = page.getByRole('menuitem', { name: 'Sign out' });
+    this.notificationBell = page.getByRole('button', { name: 'Notifications' });
+    this.searchInput = page.getByRole('searchbox');
   }
 
-  async getWelcomeMessage(): Promise<string | null> {
-    return this.welcomeHeading.textContent();
+  async goto(): Promise<void> {
+    await this.navigate('/dashboard');
   }
 
-  async openUserMenu(): Promise<void> {
-    await this.userMenu.click();
-  }
-
-  async navigateTo(linkName: string): Promise<void> {
-    await this.navLinks.filter({ hasText: linkName }).click();
-  }
-
-  async getNotificationCount(): Promise<number> {
-    const text = await this.notificationBadge.textContent();
-    return parseInt(text ?? '0', 10);
+  async getWelcomeText(): Promise<string | null> {
+    return this.page.getByRole('heading', { level: 1 }).textContent();
   }
 
   async logout(): Promise<void> {
-    await this.openUserMenu();
-    await this.page.getByRole('menuitem', { name: 'Sign out' }).click();
-    await this.page.waitForURL('/login');
-  }
-}
-```
-
-## Component Objects — Reusable UI Parts
-
-For UI components that appear in multiple pages (data tables, navigation bars, modals), create component objects:
-
-```typescript
-// tests/page-objects/components/DataTable.ts
-import type { Page, Locator } from '@playwright/test';
-import { expect } from '@playwright/test';
-
-export class DataTable {
-  private readonly table: Locator;
-  private readonly rows: Locator;
-  private readonly searchInput: Locator;
-
-  constructor(page: Page, testId: string) {
-    this.table = page.getByTestId(testId);
-    this.rows = this.table
-      .getByRole('row')
-      .filter({ hasNot: page.getByRole('columnheader') });
-    this.searchInput = this.table.getByRole('textbox', { name: /search/i });
+    await this.userMenuButton.click();
+    await this.logoutMenuItem.click();
+    await expect(this.page).toHaveURL('/login');
   }
 
   async search(query: string): Promise<void> {
     await this.searchInput.fill(query);
-    await expect(this.searchInput).toHaveValue(query);
+    await this.searchInput.press('Enter');
+  }
+
+  async getNotificationCount(): Promise<number> {
+    const badge = this.page.getByTestId('notification-count');
+    if (await badge.isVisible()) {
+      const text = await badge.textContent();
+      return parseInt(text ?? '0', 10);
+    }
+    return 0;
+  }
+
+  async navigateTo(section: string): Promise<void> {
+    await this.page.getByRole('navigation').getByRole('link', { name: section }).click();
+  }
+}
+```
+
+## Component Objects
+
+For reusable UI components that appear across multiple pages:
+
+```typescript
+// pages/components/DataTable.ts
+import { type Locator, type Page, expect } from '@playwright/test';
+
+export class DataTable {
+  private readonly root: Locator;
+
+  constructor(page: Page, testId: string) {
+    this.root = page.getByTestId(testId);
   }
 
   async getRowCount(): Promise<number> {
-    return this.rows.count();
+    return this.root
+      .getByRole('row')
+      .filter({ hasNot: this.root.getByRole('columnheader') })
+      .count();
   }
 
-  async getRowByText(text: string): Promise<Locator> {
-    return this.rows.filter({ hasText: text });
+  async getCell(row: number, column: number): Promise<string | null> {
+    const rows = this.root.getByRole('row').filter({ hasNot: this.root.getByRole('columnheader') });
+    const cells = rows.nth(row).getByRole('cell');
+    return cells.nth(column).textContent();
   }
 
-  async clickRowAction(rowText: string, actionName: string): Promise<void> {
-    const row = this.rows.filter({ hasText: rowText });
-    await row.getByRole('button', { name: actionName }).click();
+  async clickRowAction(rowText: string, action: string): Promise<void> {
+    const row = this.root
+      .getByRole('row')
+      .filter({ hasText: rowText });
+    await row.getByRole('button', { name: action }).click();
   }
 
   async sortBy(columnName: string): Promise<void> {
-    await this.table.getByRole('columnheader', { name: columnName }).click();
+    await this.root.getByRole('columnheader', { name: columnName }).click();
+  }
+
+  async filterBy(column: string, value: string): Promise<void> {
+    await this.root.getByRole('columnheader', { name: column })
+      .getByRole('textbox')
+      .fill(value);
+  }
+
+  async expectRowCount(count: number): Promise<void> {
+    const rows = this.root
+      .getByRole('row')
+      .filter({ hasNot: this.root.getByRole('columnheader') });
+    await expect(rows).toHaveCount(count);
   }
 }
-
-// Usage in a test:
-const usersTable = new DataTable(page, 'users-table');
-await usersTable.search('Alice');
-expect(await usersTable.getRowCount()).toBe(1);
-await usersTable.clickRowAction('Alice', 'Edit');
 ```
 
-## Fixtures — Dependency Injection
+## Fixtures for Dependency Injection
 
-Playwright's fixture system is the recommended way to share page objects, authenticated sessions, and test utilities across test files.
+Playwright fixtures extend the base `test` object to inject pre-built page objects and shared state:
 
 ```typescript
-// tests/fixtures.ts
+// fixtures/index.ts
 import { test as base, expect } from '@playwright/test';
-import { LoginPage } from './page-objects/LoginPage';
-import { DashboardPage } from './page-objects/DashboardPage';
+import { LoginPage } from '../pages/LoginPage';
+import { DashboardPage } from '../pages/DashboardPage';
+import { UsersPage } from '../pages/UsersPage';
 
-// Define the shape of your custom fixtures
-type AppFixtures = {
+// Define the fixture types
+interface AppFixtures {
   loginPage: LoginPage;
   dashboardPage: DashboardPage;
-  authenticatedPage: DashboardPage; // pre-logged-in fixture
-};
+  usersPage: UsersPage;
+  authenticatedPage: Page;
+}
 
 export const test = base.extend<AppFixtures>({
-  // Create a fresh LoginPage for each test
+  // Page object fixtures (test scope — new instance per test)
   loginPage: async ({ page }, use) => {
-    const loginPage = new LoginPage(page);
-    await loginPage.goto();
-    await use(loginPage);
+    await use(new LoginPage(page));
   },
 
-  // Create a fresh DashboardPage for each test
   dashboardPage: async ({ page }, use) => {
-    const dashboardPage = new DashboardPage(page);
-    await use(dashboardPage);
+    await use(new DashboardPage(page));
   },
 
-  // Pre-authenticated DashboardPage — runs login before yielding
-  authenticatedPage: async ({ page }, use) => {
-    const loginPage = new LoginPage(page);
-    await loginPage.goto();
-    await loginPage.login('alice@example.com', 'testpassword');
-    const dashboardPage = new DashboardPage(page);
-    await dashboardPage.expectLoaded();
-    await use(dashboardPage);
+  usersPage: async ({ page }, use) => {
+    await use(new UsersPage(page));
+  },
+
+  // Pre-authenticated page (loads stored auth state)
+  authenticatedPage: async ({ browser }, use) => {
+    const context = await browser.newContext({
+      storageState: '.auth/user.json',
+    });
+    const page = await context.newPage();
+    await use(page);
+    await context.close();
   },
 });
 
-export { expect };
+export { expect } from '@playwright/test';
 ```
 
-Use in tests:
+Use fixtures in tests:
 
 ```typescript
-// tests/dashboard.spec.ts
+// tests/users.spec.ts
 import { test, expect } from '../fixtures';
 
-test('shows welcome message after login', async ({ authenticatedPage }) => {
-  const message = await authenticatedPage.getWelcomeMessage();
-  expect(message).toContain('Welcome');
+test('admin can view users list', async ({ authenticatedPage, usersPage }) => {
+  usersPage.attachPage(authenticatedPage);
+  await usersPage.goto();
+
+  await expect(usersPage.userCount).toBeGreaterThan(0);
 });
 
-test('login page shows error on wrong password', async ({ loginPage }) => {
-  await loginPage.loginExpectingError('alice@example.com', 'wrongpassword');
-  expect(await loginPage.isErrorVisible()).toBe(true);
+test('shows login error for invalid credentials', async ({ loginPage }) => {
+  await loginPage.goto();
+  await loginPage.login('bad@example.com', 'wrongpassword');
+
+  expect(await loginPage.getErrorMessage()).toContain('Invalid credentials');
 });
 ```
 
-## Fixture Scope — Sharing Between Tests
+## Fixture Scope
 
-Fixtures can be scoped to `test` (default — new instance per test) or `worker` (shared across all tests in the same worker):
+Control how fixtures are initialized:
 
 ```typescript
-export const test = base.extend<AppFixtures, WorkerFixtures>(
-  {
-    // Worker-scoped: created once per worker, shared across tests in that worker
-    // Declare in second type parameter
-  },
-  {
-    workerApiClient: [
-      async ({}, use) => {
-        const client = new ApiClient(process.env.API_URL!);
-        await client.authenticate();
-        await use(client);
-        await client.cleanup();
-      },
-      { scope: 'worker' },
-    ],
-  },
-);
+export const test = base.extend<{}, WorkerFixtures>({
+  // Worker scope — shared across all tests in the same worker
+  // Useful for expensive setup (database seeding, server startup)
+  dbConnection: [async ({}, use) => {
+    const db = await DatabaseClient.connect(process.env.TEST_DB_URL!);
+    await db.seed();
+    await use(db);
+    await db.cleanup();
+    await db.disconnect();
+  }, { scope: 'worker' }],
+});
 ```
 
-## Storing Auth State — storageState
+## Storing Auth State — global-setup.ts
 
-The most efficient way to handle authentication in tests is to log in once and reuse the browser storage state (cookies + localStorage) across tests:
+Log in once and reuse the session across all tests to avoid logging in on every test:
 
 ```typescript
-// global-setup.ts — runs once before all tests
+// tests/global-setup.ts
 import { chromium, type FullConfig } from '@playwright/test';
 
-async function globalSetup(config: FullConfig): Promise<void> {
+export default async function globalSetup(config: FullConfig) {
   const { baseURL } = config.projects[0]!.use;
   const browser = await chromium.launch();
-  const page = await browser.newPage();
+  const context = await browser.newContext();
+  const page = await context.newPage();
 
-  // Log in to the application
+  // Log in
   await page.goto(`${baseURL}/login`);
   await page.getByLabel('Email').fill(process.env.TEST_USER_EMAIL!);
   await page.getByLabel('Password').fill(process.env.TEST_USER_PASSWORD!);
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await page.waitForURL('**/dashboard');
+  await page.waitForURL('/dashboard');
 
-  // Save authenticated state to disk
-  await page.context().storageState({ path: 'playwright/.auth/user.json' });
+  // Save auth state to a file
+  await context.storageState({ path: '.auth/user.json' });
 
   await browser.close();
 }
-
-export default globalSetup;
 ```
 
-Configure in `playwright.config.ts`:
-
 ```typescript
+// playwright.config.ts
 export default defineConfig({
-  globalSetup: require.resolve('./global-setup'),
-
+  globalSetup: require.resolve('./tests/global-setup'),
   projects: [
-    // Run all auth-dependent tests with the saved storage state
     {
-      name: 'authenticated',
+      name: 'chromium',
       use: {
-        storageState: 'playwright/.auth/user.json',
+        ...devices['Desktop Chrome'],
+        // Use stored auth state for all tests in this project
+        storageState: '.auth/user.json',
       },
-      testMatch: 'tests/authenticated/**/*.spec.ts',
-    },
-    // Run auth tests without storage state
-    {
-      name: 'auth',
-      testMatch: 'tests/auth/**/*.spec.ts',
     },
   ],
 });
 ```
 
-Add the auth directory to `.gitignore`:
+Add `.auth/` to `.gitignore` (it contains credentials):
 
 ```
-playwright/.auth/
+# .gitignore
+.auth/
+playwright-report/
+test-results/
 ```
 
-## TypeScript Types for Fixtures
+## Multiple Auth States
+
+Support different user roles:
 
 ```typescript
-// tests/types.ts
-import type { Page, Locator, BrowserContext } from '@playwright/test';
-
-export interface UserCredentials {
-  email: string;
-  password: string;
-  role: 'admin' | 'user' | 'viewer';
+// tests/global-setup.ts
+async function saveAuthState(
+  page: Page,
+  email: string,
+  password: string,
+  path: string,
+) {
+  await page.goto('/login');
+  await page.getByLabel('Email').fill(email);
+  await page.getByLabel('Password').fill(password);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.waitForURL('/dashboard');
+  await page.context().storageState({ path });
 }
 
-export interface TestFixtures {
-  loginPage: import('./page-objects/LoginPage').LoginPage;
-  dashboardPage: import('./page-objects/DashboardPage').DashboardPage;
-  adminUser: UserCredentials;
-  regularUser: UserCredentials;
+export default async function globalSetup() {
+  const browser = await chromium.launch();
+
+  const adminContext = await browser.newContext();
+  await saveAuthState(
+    await adminContext.newPage(),
+    process.env.ADMIN_EMAIL!,
+    process.env.ADMIN_PASSWORD!,
+    '.auth/admin.json',
+  );
+
+  const userContext = await browser.newContext();
+  await saveAuthState(
+    await userContext.newPage(),
+    process.env.USER_EMAIL!,
+    process.env.USER_PASSWORD!,
+    '.auth/user.json',
+  );
+
+  await browser.close();
 }
+```
 
-// fixtures.ts
-import { test as base } from '@playwright/test';
-import type { TestFixtures } from './types';
-
-export const test = base.extend<TestFixtures>({
-  adminUser: async ({}, use) => {
-    await use({
-      email: process.env.ADMIN_EMAIL ?? 'admin@example.com',
-      password: process.env.ADMIN_PASSWORD ?? 'adminpass',
-      role: 'admin',
-    });
+```typescript
+// fixtures/index.ts
+export const test = base.extend<AppFixtures>({
+  adminPage: async ({ browser }, use) => {
+    const context = await browser.newContext({ storageState: '.auth/admin.json' });
+    await use(await context.newPage());
+    await context.close();
   },
 
-  regularUser: async ({}, use) => {
-    await use({
-      email: process.env.USER_EMAIL ?? 'user@example.com',
-      password: process.env.USER_PASSWORD ?? 'userpass',
-      role: 'user',
-    });
+  userPage: async ({ browser }, use) => {
+    const context = await browser.newContext({ storageState: '.auth/user.json' });
+    await use(await context.newPage());
+    await context.close();
   },
 });
 ```
+
+## test.use — Per-Test Options
+
+Override options for a specific test or describe block:
+
+```typescript
+// Override options for all tests in this file
+test.use({ viewport: { width: 375, height: 812 } }); // iPhone SE
+
+describe('Mobile navigation', () => {
+  test.use({ viewport: { width: 390, height: 844 } }); // iPhone 14
+
+  test('shows hamburger menu on mobile', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.getByRole('button', { name: 'Menu' })).toBeVisible();
+    await expect(page.getByRole('navigation')).toBeHidden();
+  });
+});
+
+// Use a specific timezone
+test.use({ timezoneId: 'America/New_York' });
+
+// Use a specific locale
+test.use({ locale: 'fr-FR' });
+
+// Use a specific color scheme
+test.use({ colorScheme: 'dark' });
+```
+
+:::tip[Composing Page Objects and Fixtures]
+The best pattern is to define page objects as plain classes (no Playwright-specific base), then inject them through fixtures. This makes page objects unit-testable and decoupled from the test runner.
+:::

@@ -1,467 +1,435 @@
 ---
 title: React Testing with Jest
-description: Test React components using @testing-library/react — queries, user interactions, hooks, context, routing, waitFor, and the accessibility-first testing philosophy.
+description: Test React components, hooks, context, and routing with @testing-library/react, user-event, waitFor, and renderHook using accessibility-first query strategies.
 sidebar:
   order: 6
 tags: [testing, javascript]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-`@testing-library/react` is the de-facto standard for testing React components. Its philosophy is to test components the way users interact with them — through the DOM and accessible semantics — rather than testing implementation details.
+React Testing Library (RTL) combined with Jest is the standard for testing React components. RTL encourages testing from the user's perspective — interacting with components the way a real user would — rather than testing implementation details.
 
 ## Setup
 
 ```bash
-npm install --save-dev @testing-library/react @testing-library/user-event @testing-library/jest-dom jest-environment-jsdom
+npm install --save-dev @testing-library/react @testing-library/user-event @testing-library/jest-dom
 ```
 
-Configure Jest to use jsdom and import jest-dom's custom matchers:
+Configure `jest.config.ts` to use jsdom and load jest-dom matchers:
 
 ```typescript
-// jest.config.ts
 import type { Config } from 'jest';
 
 const config: Config = {
-  testEnvironment: 'jest-environment-jsdom',
-  setupFilesAfterFramework: ['<rootDir>/src/setupTests.ts'],
+  testEnvironment: 'jsdom',
+  setupFilesAfterFramework: ['<rootDir>/jest.setup.ts'],
 };
 
 export default config;
 ```
 
 ```typescript
-// src/setupTests.ts
+// jest.setup.ts
 import '@testing-library/jest-dom';
 ```
 
-Now every test file has access to custom matchers like `toBeInTheDocument()`, `toBeVisible()`, `toHaveTextContent()`, and 30+ more.
+`@testing-library/jest-dom` adds custom matchers like `toBeInTheDocument()`, `toHaveTextContent()`, `toBeVisible()`, `toBeDisabled()`, and more.
 
-## `render()` — Mounting Components
+## `render()`
 
-```typescript
-import { render } from '@testing-library/react';
-import { UserCard } from './UserCard';
-
-test('renders the user name', () => {
-  const { getByText, getByRole, container } = render(
-    <UserCard name="Alice" role="Admin" email="alice@example.com" />
-  );
-
-  expect(getByText('Alice')).toBeInTheDocument();
-  expect(getByRole('heading', { name: 'Alice' })).toBeInTheDocument();
-});
-```
-
-`render()` returns queries scoped to the rendered component. It also mounts the component into a `div` appended to `document.body`.
-
-### The `screen` object
-
-Prefer using the globally accessible `screen` object instead of destructuring from `render()`:
+`render()` mounts a component into a real DOM node (provided by jsdom) and returns a set of query utilities scoped to that component.
 
 ```typescript
 import { render, screen } from '@testing-library/react';
+import { UserCard } from './UserCard';
 
-test('renders a submit button', () => {
-  render(<LoginForm />);
+it('displays the user name and role', () => {
+  render(<UserCard name="Alice Chen" role="Administrator" />);
 
-  // Using screen is recommended — easier to use in multi-render tests
-  expect(screen.getByRole('button', { name: /submit/i })).toBeInTheDocument();
+  expect(screen.getByText('Alice Chen')).toBeInTheDocument();
+  expect(screen.getByText('Administrator')).toBeInTheDocument();
 });
 ```
 
-## Screen Queries Reference
-
-| Query type      | 0 matches      | 1 match                 | 2+ matches            | Use case                     |
-| --------------- | -------------- | ----------------------- | --------------------- | ---------------------------- |
-| `getBy...`      | Throws         | Returns element         | Throws                | Element must exist           |
-| `queryBy...`    | Returns `null` | Returns element         | Throws                | Element may not exist        |
-| `findBy...`     | Throws (async) | Returns element (async) | Throws                | Element appears async        |
-| `getAllBy...`   | Throws         | Returns array           | Returns array         | Multiple elements must exist |
-| `queryAllBy...` | Returns `[]`   | Returns array           | Returns array         | Multiple elements (optional) |
-| `findAllBy...`  | Throws (async) | Returns array (async)   | Returns array (async) | Multiple async elements      |
-
-### Available query selectors
+`render()` returns several utilities you can destructure:
 
 ```typescript
-// By ARIA role (most preferred — tests accessibility)
-screen.getByRole('button', { name: /submit/i });
-screen.getByRole('heading', { level: 1 });
-screen.getByRole('textbox', { name: /email/i });
-screen.getByRole('checkbox', { name: /agree/i });
-screen.getByRole('combobox', { name: /country/i });
-screen.getByRole('listitem');
-screen.getByRole('dialog', { name: /confirm delete/i });
+const {
+  getByText,        // Direct query (scoped to rendered component)
+  asFragment,       // Serialize the current DOM for snapshot testing
+  container,        // The raw DOM node (avoid using this)
+  rerender,         // Re-render with new props
+  unmount,          // Unmount the component
+} = render(<MyComponent />);
 
-// By text content
-screen.getByText('Submit');
-screen.getByText(/submit/i); // case-insensitive regex
-screen.getByText('Submit', { exact: false }); // substring match
-
-// By label (form elements)
-screen.getByLabelText('Email address');
-screen.getByLabelText(/email/i);
-
-// By placeholder
-screen.getByPlaceholderText('Enter your email');
-
-// By test ID (last resort — not tied to UI or accessibility)
-screen.getByTestId('submit-button');
-
-// By alt text (images)
-screen.getByAltText('Company logo');
-
-// By title attribute
-screen.getByTitle('Close dialog');
+// Prefer screen.* over destructured queries — screen is always up to date
 ```
 
-:::tip[Accessibility-First Query Priority]
-Use queries in this order of preference:
+## Screen Queries
 
-1. `getByRole` — most resilient, tests accessibility
-2. `getByLabelText` — great for form fields
-3. `getByPlaceholderText` — fallback for unlabelled inputs
-4. `getByText` — for non-interactive content
-5. `getByTestId` — last resort, add `data-testid` to the DOM
+`screen` provides query functions that search the entire rendered DOM. Queries come in three families:
 
-This order encourages building accessible UIs.
+| Family | Throws if missing? | Waits for async? | Use case |
+|---|---|---|---|
+| `getBy*` | ✅ Yes | ❌ No | Element that must be present synchronously |
+| `queryBy*` | ❌ Returns null | ❌ No | Asserting an element is NOT present |
+| `findBy*` | ✅ Yes (after timeout) | ✅ Yes (awaitable) | Element that appears asynchronously |
+| `getAllBy*` | ✅ Yes (needs ≥1) | ❌ No | Multiple elements (returns array) |
+| `queryAllBy*` | ❌ Returns [] | ❌ No | Multiple elements, may return empty |
+| `findAllBy*` | ✅ Yes (after timeout) | ✅ Yes | Multiple async elements |
+
+### Query Priority — Accessibility First
+
+RTL recommends this priority order for queries. Higher priority = more accessible and resilient tests:
+
+```typescript
+// 1. getByRole — BEST: matches ARIA roles and accessible names
+screen.getByRole('button', { name: 'Submit Order' });
+screen.getByRole('heading', { level: 1 });
+screen.getByRole('textbox', { name: 'Email address' });
+screen.getByRole('checkbox', { name: 'Accept terms' });
+screen.getByRole('combobox', { name: 'Country' });
+screen.getByRole('link', { name: 'Learn more' });
+screen.getByRole('dialog', { name: 'Confirm deletion' });
+screen.getByRole('listitem');
+
+// 2. getByLabelText — for form fields associated with a label
+screen.getByLabelText('Email address');
+screen.getByLabelText(/password/i);
+
+// 3. getByPlaceholderText — only when no label is available
+screen.getByPlaceholderText('Search...');
+
+// 4. getByText — for non-interactive elements with text content
+screen.getByText('Your order has been placed');
+screen.getByText(/welcome/i);
+
+// 5. getByDisplayValue — for pre-populated form elements
+screen.getByDisplayValue('alice@example.com');
+
+// 6. getByAltText — for images
+screen.getByAltText('User profile photo');
+
+// 7. getByTitle — for title attributes (tooltip text)
+screen.getByTitle('Close dialog');
+
+// 8. getByTestId — LAST RESORT: use data-testid attribute
+screen.getByTestId('loading-spinner');
+```
+
+:::tip[Use getByRole First]
+`getByRole` is the most powerful query because it maps to how assistive technologies like screen readers see your page. If you can query by role + accessible name, your component is accessible to all users.
 :::
+
+```typescript
+// Real component test using role queries
+it('submits the login form', async () => {
+  const user = userEvent.setup();
+  render(<LoginForm onSuccess={jest.fn()} />);
+
+  await user.type(screen.getByRole('textbox', { name: /email/i }), 'alice@example.com');
+  await user.type(screen.getByLabelText(/password/i), 'securepassword');
+  await user.click(screen.getByRole('button', { name: /sign in/i }));
+
+  expect(screen.queryByText(/invalid credentials/i)).not.toBeInTheDocument();
+});
+```
 
 ## `userEvent` vs `fireEvent`
 
-`@testing-library/user-event` simulates real user interactions, triggering all the browser events a real interaction would produce. `fireEvent` dispatches a single synthetic DOM event.
-
-| Feature                       | `userEvent`                                                                                                         | `fireEvent`                   |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
-| Simulates real browser events | Yes (full event sequence)                                                                                           | No (single event)             |
-| Typing                        | Triggers `keydown`, `keypress`, `input`, `keyup` per character                                                      | Dispatches one `change` event |
-| Clicking                      | `pointerover`, `mouseover`, `pointermove`, `mousemove`, `pointerdown`, `mousedown`, `pointerup`, `mouseup`, `click` | Single `click` event          |
-| Keyboard shortcuts            | Yes                                                                                                                 | Manual                        |
-| Async                         | Returns a Promise (v14+)                                                                                            | Synchronous                   |
-
-**Always prefer `userEvent`** for tests that reflect real user interactions:
+| | `userEvent` (v14+) | `fireEvent` |
+|---|---|---|
+| Accuracy | High — simulates real browser events | Low — dispatches single DOM events |
+| Event sequence | Full sequence (pointerover, pointerdown, focus, keydown, input, keyup, click, …) | Single event only |
+| Async | `await user.click()` | Synchronous |
+| Typing | Fires keydown, keypress, input, keyup per character | Single `change` event |
+| Setup required | `const user = userEvent.setup()` | None |
+| Use case | All new tests | Only when you specifically need a single DOM event |
 
 ```typescript
 import userEvent from '@testing-library/user-event';
-import { render, screen } from '@testing-library/react';
-import { LoginForm } from './LoginForm';
 
-test('submits the form with email and password', async () => {
-  const user = userEvent.setup();
-  const mockSubmit = jest.fn();
+// Always set up userEvent at the top of describe/test
+const user = userEvent.setup();
 
-  render(<LoginForm onSubmit={mockSubmit} />);
+it('handles user interactions correctly', async () => {
+  render(<SearchInput onSearch={mockSearch} />);
 
-  await user.type(screen.getByLabelText(/email/i), 'alice@example.com');
-  await user.type(screen.getByLabelText(/password/i), 'secret123');
-  await user.click(screen.getByRole('button', { name: /sign in/i }));
+  // Type characters one at a time (fires all keyboard events)
+  await user.type(screen.getByRole('searchbox'), 'react testing');
 
-  expect(mockSubmit).toHaveBeenCalledWith({
-    email: 'alice@example.com',
-    password: 'secret123',
-  });
+  // Click a button
+  await user.click(screen.getByRole('button', { name: /search/i }));
+
+  // Clear a field
+  await user.clear(screen.getByRole('searchbox'));
+
+  // Select an option from a <select>
+  await user.selectOptions(
+    screen.getByRole('combobox', { name: /sort by/i }),
+    'relevance',
+  );
+
+  // Check/uncheck a checkbox
+  await user.click(screen.getByRole('checkbox', { name: /remember me/i }));
+
+  // Type into a field then press Enter
+  await user.type(screen.getByRole('textbox', { name: /email/i }), 'alice@example.com');
+  await user.keyboard('{Enter}');
 });
 ```
 
-### Common `userEvent` interactions
-
-```typescript
-const user = userEvent.setup();
-
-// Typing
-await user.type(input, 'Hello World');
-await user.clear(input); // clear existing value
-await user.type(input, '{Enter}'); // special keys
-
-// Clicking
-await user.click(button);
-await user.dblClick(element);
-await user.rightClick(element);
-
-// Select dropdown
-await user.selectOptions(select, 'option-value');
-await user.selectOptions(select, ['value1', 'value2']); // multi-select
-await user.deselectOptions(select, 'option-value');
-
-// Keyboard
-await user.keyboard('{Tab}');
-await user.keyboard('{Escape}');
-await user.keyboard('{Control>}a{/Control}'); // Ctrl+A
-
-// Hover
-await user.hover(element);
-await user.unhover(element);
-
-// File upload
-await user.upload(fileInput, new File(['content'], 'test.txt'));
-```
+:::caution[Don't Forget to await userEvent]
+`userEvent` v14+ is fully async — all interactions return promises. Forgetting `await` leads to tests that pass unexpectedly because assertions run before the interactions complete.
+:::
 
 ## `waitFor` and `waitForElementToBeRemoved`
 
-Use these utilities for content that appears or disappears asynchronously:
+Use these utilities to wait for asynchronous DOM changes:
 
 ```typescript
 import { render, screen, waitFor, waitForElementToBeRemoved } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 
-test('shows user list after loading', async () => {
+it('displays user list after loading', async () => {
   render(<UserList />);
 
-  // Wait for loading spinner to disappear
-  await waitForElementToBeRemoved(screen.getByText(/loading/i));
+  // Wait for the loading spinner to disappear
+  await waitForElementToBeRemoved(() => screen.queryByRole('progressbar'));
 
   // Now assert on the loaded content
-  expect(screen.getByText('Alice')).toBeInTheDocument();
-  expect(screen.getByText('Bob')).toBeInTheDocument();
+  expect(screen.getByText('Alice Chen')).toBeInTheDocument();
+  expect(screen.getByText('Bob Smith')).toBeInTheDocument();
 });
 
-test('displays error message on failed submission', async () => {
-  const user = userEvent.setup();
-  render(<ContactForm />);
+it('shows error message when fetch fails', async () => {
+  mockFetch.mockRejectedValueOnce(new Error('Network error'));
 
-  await user.click(screen.getByRole('button', { name: /submit/i }));
+  render(<UserList />);
 
-  // Wait for async validation or API response
+  // Wait for the error to appear
   await waitFor(() => {
-    expect(screen.getByRole('alert')).toHaveTextContent(/email is required/i);
+    expect(screen.getByRole('alert')).toBeInTheDocument();
   });
+
+  expect(screen.getByText(/failed to load/i)).toBeInTheDocument();
 });
-```
 
-`waitFor` polls the assertion until it passes or the timeout expires (default: 1000ms). Use `screen.findBy*` as a shorthand for `waitFor` + `getBy*`:
-
-```typescript
-// These are equivalent:
-await waitFor(() => screen.getByText('Alice'));
-await screen.findByText('Alice');
+// waitFor with custom timeout
+await waitFor(
+  () => expect(screen.getByText('Data loaded')).toBeInTheDocument(),
+  { timeout: 5000, interval: 100 },
+);
 ```
 
 ## Testing Forms
 
 ```typescript
-// src/components/RegistrationForm.tsx
-function RegistrationForm({ onSuccess }: { onSuccess: (user: User) => void }) {
-  const [errors, setErrors] = useState<Record<string, string>>({});
-
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault();
-    const formData = new FormData(e.target as HTMLFormElement);
-    const data = Object.fromEntries(formData);
-
-    const validation = validateRegistration(data);
-    if (!validation.valid) {
-      setErrors(validation.errors);
-      return;
-    }
-
-    const user = await registerUser(data);
-    onSuccess(user);
-  };
-
-  return (
-    <form onSubmit={handleSubmit}>
-      <label>
-        Name
-        <input name="name" aria-describedby={errors.name ? 'name-error' : undefined} />
-      </label>
-      {errors.name && <p id="name-error" role="alert">{errors.name}</p>}
-      <label>
-        Email
-        <input name="email" type="email" />
-      </label>
-      {errors.email && <p role="alert">{errors.email}</p>}
-      <button type="submit">Register</button>
-    </form>
-  );
-}
-```
-
-```typescript
-// src/components/RegistrationForm.test.tsx
-import { render, screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
-import { RegistrationForm } from './RegistrationForm';
-
-jest.mock('../services/userService', () => ({
-  registerUser: jest.fn().mockResolvedValue({ id: 1, name: 'Alice' }),
-}));
-
-describe('RegistrationForm', () => {
+it('validates required fields on submit', async () => {
   const user = userEvent.setup();
+  const onSubmit = jest.fn();
 
-  it('calls onSuccess with user data on valid submission', async () => {
-    const onSuccess = jest.fn();
-    render(<RegistrationForm onSuccess={onSuccess} />);
+  render(<RegistrationForm onSubmit={onSubmit} />);
 
-    await user.type(screen.getByLabelText(/name/i), 'Alice');
-    await user.type(screen.getByLabelText(/email/i), 'alice@example.com');
-    await user.click(screen.getByRole('button', { name: /register/i }));
+  // Submit without filling required fields
+  await user.click(screen.getByRole('button', { name: /register/i }));
 
-    await waitFor(() => {
-      expect(onSuccess).toHaveBeenCalledWith({ id: 1, name: 'Alice' });
-    });
-  });
+  // Validation errors should appear
+  expect(screen.getByText(/name is required/i)).toBeInTheDocument();
+  expect(screen.getByText(/email is required/i)).toBeInTheDocument();
+  expect(onSubmit).not.toHaveBeenCalled();
+});
 
-  it('shows validation errors for empty fields', async () => {
-    render(<RegistrationForm onSuccess={jest.fn()} />);
+it('calls onSubmit with form data when valid', async () => {
+  const user = userEvent.setup();
+  const onSubmit = jest.fn();
 
-    await user.click(screen.getByRole('button', { name: /register/i }));
+  render(<RegistrationForm onSubmit={onSubmit} />);
 
-    expect(await screen.findAllByRole('alert')).toHaveLength(2);
+  await user.type(screen.getByLabelText(/full name/i), 'Alice Chen');
+  await user.type(screen.getByLabelText(/email/i), 'alice@example.com');
+  await user.type(screen.getByLabelText(/^password$/i), 'SecurePass1!');
+  await user.type(screen.getByLabelText(/confirm password/i), 'SecurePass1!');
+  await user.click(screen.getByLabelText(/accept terms/i));
+
+  await user.click(screen.getByRole('button', { name: /register/i }));
+
+  expect(onSubmit).toHaveBeenCalledWith({
+    name: 'Alice Chen',
+    email: 'alice@example.com',
+    password: 'SecurePass1!',
+    acceptedTerms: true,
   });
 });
 ```
 
-## Testing Custom Hooks with `renderHook`
+## Testing Hooks with `renderHook`
 
 ```typescript
-// src/hooks/useCounter.ts
-import { useState } from 'react';
-
-export function useCounter(initialValue = 0) {
-  const [count, setCount] = useState(initialValue);
-  const increment = () => setCount((c) => c + 1);
-  const decrement = () => setCount((c) => c - 1);
-  const reset = () => setCount(initialValue);
-  return { count, increment, decrement, reset };
-}
-```
-
-```typescript
-// src/hooks/useCounter.test.ts
 import { renderHook, act } from '@testing-library/react';
 import { useCounter } from './useCounter';
 
-describe('useCounter', () => {
-  it('initialises with the provided value', () => {
-    const { result } = renderHook(() => useCounter(10));
-    expect(result.current.count).toBe(10);
+it('initializes with the provided value', () => {
+  const { result } = renderHook(() => useCounter(10));
+  expect(result.current.count).toBe(10);
+});
+
+it('increments the count', () => {
+  const { result } = renderHook(() => useCounter(0));
+
+  act(() => {
+    result.current.increment();
   });
 
-  it('increments the count', () => {
-    const { result } = renderHook(() => useCounter());
+  expect(result.current.count).toBe(1);
+});
 
-    act(() => {
-      result.current.increment();
-    });
+it('resets to the initial value', () => {
+  const { result } = renderHook(() => useCounter(5));
 
-    expect(result.current.count).toBe(1);
+  act(() => {
+    result.current.increment();
+    result.current.increment();
+    result.current.reset();
   });
 
-  it('resets to the initial value', () => {
-    const { result } = renderHook(() => useCounter(5));
+  expect(result.current.count).toBe(5);
+});
+```
 
-    act(() => {
-      result.current.increment();
-      result.current.increment();
-      result.current.reset();
-    });
+### Testing Async Hooks
 
-    expect(result.current.count).toBe(5);
+```typescript
+import { renderHook, waitFor } from '@testing-library/react';
+import { useUserData } from './useUserData';
+
+it('fetches and returns user data', async () => {
+  mockFetch.mockResolvedValueOnce({
+    ok: true,
+    json: async () => ({ id: 1, name: 'Alice' }),
+  } as Response);
+
+  const { result } = renderHook(() => useUserData(1));
+
+  // Initially loading
+  expect(result.current.isLoading).toBe(true);
+  expect(result.current.data).toBeNull();
+
+  // Wait for data to load
+  await waitFor(() => {
+    expect(result.current.isLoading).toBe(false);
   });
+
+  expect(result.current.data).toEqual({ id: 1, name: 'Alice' });
+  expect(result.current.error).toBeNull();
 });
 ```
 
 ## Testing Context
 
 ```typescript
-// src/context/ThemeContext.tsx
-export const ThemeContext = createContext<{ theme: string; toggle: () => void } | null>(null);
+// ThemeContext.tsx
+export const ThemeContext = React.createContext<{ theme: string; toggle: () => void } | null>(null);
 
-export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
-  const toggle = () => setTheme(t => t === 'light' ? 'dark' : 'light');
-  return (
+// Test helper: wrap component with context provider
+const renderWithTheme = (
+  ui: React.ReactElement,
+  { theme = 'light' } = {},
+) => {
+  const toggle = jest.fn();
+  return render(
     <ThemeContext.Provider value={{ theme, toggle }}>
-      {children}
-    </ThemeContext.Provider>
+      {ui}
+    </ThemeContext.Provider>,
   );
-}
-```
+};
 
-```typescript
-// src/components/ThemedButton.test.tsx
-import { render, screen } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
-import { ThemeProvider } from '../context/ThemeContext';
-import { ThemedButton } from './ThemedButton';
-
-function renderWithTheme(ui: ReactElement) {
-  return render(<ThemeProvider>{ui}</ThemeProvider>);
-}
-
-test('applies the current theme class', () => {
-  renderWithTheme(<ThemedButton>Click me</ThemedButton>);
-  expect(screen.getByRole('button')).toHaveClass('theme-light');
+it('applies dark theme class when theme is dark', () => {
+  renderWithTheme(<ThemeToggle />, { theme: 'dark' });
+  expect(screen.getByRole('button')).toHaveClass('toggle--dark');
 });
 
-test('updates when theme is toggled', async () => {
+it('calls toggle when button is clicked', async () => {
   const user = userEvent.setup();
-  renderWithTheme(
-    <>
+  const mockToggle = jest.fn();
+
+  render(
+    <ThemeContext.Provider value={{ theme: 'light', toggle: mockToggle }}>
       <ThemeToggle />
-      <ThemedButton>Click me</ThemedButton>
-    </>
+    </ThemeContext.Provider>,
   );
 
   await user.click(screen.getByRole('button', { name: /toggle theme/i }));
-  expect(screen.getByRole('button', { name: /click me/i })).toHaveClass('theme-dark');
+  expect(mockToggle).toHaveBeenCalledTimes(1);
 });
 ```
 
 ## Testing with React Router
 
 ```typescript
-import { render, screen } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { UserProfile } from './UserProfile';
+import { MemoryRouter, Routes, Route } from 'react-router-dom';
 
-function renderWithRouter(ui: ReactElement, { route = '/' } = {}) {
+const renderWithRouter = (
+  ui: React.ReactElement,
+  { initialEntries = ['/'] } = {},
+) => {
   return render(
-    <MemoryRouter initialEntries={[route]}>
+    <MemoryRouter initialEntries={initialEntries}>
       {ui}
-    </MemoryRouter>
+    </MemoryRouter>,
   );
-}
+};
 
-test('renders user profile for the given ID', async () => {
+it('renders the profile page for /profile/:id', async () => {
   renderWithRouter(
     <Routes>
-      <Route path="/users/:id" element={<UserProfile />} />
+      <Route path="/profile/:id" element={<ProfilePage />} />
     </Routes>,
-    { route: '/users/42' }
+    { initialEntries: ['/profile/42'] },
   );
 
-  await screen.findByRole('heading', { name: /user profile/i });
-  expect(screen.getByText('ID: 42')).toBeInTheDocument();
+  await waitFor(() => {
+    expect(screen.getByRole('heading', { name: 'Alice Chen' })).toBeInTheDocument();
+  });
+});
+
+it('navigates to login when accessing a protected route unauthenticated', () => {
+  renderWithRouter(<ProtectedRoute component={<Dashboard />} />, {
+    initialEntries: ['/dashboard'],
+  });
+
+  expect(screen.getByRole('heading', { name: /sign in/i })).toBeInTheDocument();
 });
 ```
 
 ## The `act()` Wrapper
 
-React Testing Library wraps most interactions in `act()` automatically. You need to call it manually only when triggering state updates outside of RTL's utilities:
+React requires that state updates happening outside of its event system are wrapped in `act()`. RTL wraps its interactions automatically, but sometimes you need to wrap direct imperative calls.
 
 ```typescript
 import { act } from '@testing-library/react';
 
-test('updates count after external event', () => {
-  const { result } = renderHook(() => useExternalCounter());
+it('updates when an external store changes', () => {
+  render(<Counter store={externalStore} />);
 
+  // External state change must be wrapped in act()
   act(() => {
-    externalEventEmitter.emit('increment');
+    externalStore.dispatch({ type: 'INCREMENT' });
   });
 
-  expect(result.current.count).toBe(1);
+  expect(screen.getByText('Count: 1')).toBeInTheDocument();
+});
+
+// Async act for async state updates
+it('fetches data on mount', async () => {
+  await act(async () => {
+    render(<DataLoader />);
+  });
+
+  expect(screen.getByText('Data loaded')).toBeInTheDocument();
 });
 ```
 
-:::caution[act() warning in tests]
-If you see "An update to Component inside a test was not wrapped in act()" in your test output, it means an async state update is happening outside of RTL's wrapped interactions. Wrap the triggering action in `act()` or use `waitFor()` to wait for the update to complete.
+:::tip[When You See the act() Warning]
+If Jest warns: _"An update to Component inside a test was not wrapped in act(…)"_, it usually means an async state update happened after your test assertions ran. Fix by using `waitFor()` to wait for the update, or wrapping the trigger in `await act(async () => { ... })`.
 :::

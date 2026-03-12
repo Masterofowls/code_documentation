@@ -1,286 +1,302 @@
 ---
 title: Getting Started with GraphQL
-description: Set up Apollo Server 4, define your first schema, run your first query, and understand how GraphQL works over HTTP.
+description: Build your first GraphQL server with Apollo Server 4, understand the SDL, and make your first queries.
 sidebar:
   order: 2
 tags: [database, api]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
 # Getting Started with GraphQL
 
+This guide walks you through setting up a GraphQL server with **Apollo Server 4**, writing your first schema, and executing queries.
+
 ## Installation
 
-<Tabs>
-  <TabItem label="Apollo Server 4 (Node.js)">
-    ```bash mkdir my-graphql-api && cd my-graphql-api npm init -y npm install
-    @apollo/server graphql # For TypeScript: npm install -D typescript
-    @types/node ts-node tsx npx tsc --init ```
-  </TabItem>
-  <TabItem label="GraphQL Yoga (Node.js)">
-    ```bash npm install graphql-yoga graphql ```
-  </TabItem>
-  <TabItem label="Strawberry (Python)">
-    ```bash pip install "strawberry-graphql[debug-server]" ```
-  </TabItem>
-</Tabs>
+<Steps>
+1. Create a new project and install dependencies:
+
+   ```bash
+   mkdir my-graphql-api
+   cd my-graphql-api
+   npm init -y
+   npm install @apollo/server graphql
+   npm install --save-dev typescript @types/node tsx
+   ```
+
+2. Initialize TypeScript:
+
+   ```bash
+   npx tsc --init
+   ```
+
+3. Update `tsconfig.json` to use `NodeNext` modules:
+
+   ```json
+   {
+     "compilerOptions": {
+       "target": "ES2022",
+       "module": "NodeNext",
+       "moduleResolution": "NodeNext",
+       "outDir": "./dist",
+       "strict": true
+     }
+   }
+   ```
+
+4. Add to `package.json`:
+
+   ```json
+   {
+     "type": "module",
+     "scripts": {
+       "dev": "tsx watch src/index.ts",
+       "build": "tsc",
+       "start": "node dist/index.js"
+     }
+   }
+   ```
+</Steps>
 
 ## Minimal Apollo Server
 
-```javascript
-// server.js
+```typescript
+// src/index.ts
 import { ApolloServer } from '@apollo/server';
 import { startStandaloneServer } from '@apollo/server/standalone';
 
-// 1. Define the schema using SDL (Schema Definition Language)
+// 1. Define your schema using SDL (Schema Definition Language)
 const typeDefs = `#graphql
   type Book {
     id: ID!
     title: String!
     author: String!
     publishedYear: Int
-    genre: String
+    genres: [String!]!
   }
 
   type Query {
     books: [Book!]!
     book(id: ID!): Book
   }
+
+  type Mutation {
+    addBook(title: String!, author: String!, publishedYear: Int): Book!
+  }
 `;
 
-// 2. Sample data
+// In-memory data store
 const books = [
-  {
-    id: '1',
-    title: 'The Pragmatic Programmer',
-    author: 'David Thomas',
-    publishedYear: 1999,
-    genre: 'Technology',
-  },
-  {
-    id: '2',
-    title: 'Clean Code',
-    author: 'Robert Martin',
-    publishedYear: 2008,
-    genre: 'Technology',
-  },
-  {
-    id: '3',
-    title: 'Design Patterns',
-    author: 'Gang of Four',
-    publishedYear: 1994,
-    genre: 'Technology',
-  },
+  { id: '1', title: 'The Pragmatic Programmer', author: 'Dave Thomas', publishedYear: 1999, genres: ['programming'] },
+  { id: '2', title: 'Clean Code', author: 'Robert C. Martin', publishedYear: 2008, genres: ['programming'] },
 ];
+let nextId = 3;
 
-// 3. Define resolvers — functions that return data for each field
+// 2. Define resolvers — functions that return data for each field
 const resolvers = {
   Query: {
     books: () => books,
-    book: (_, { id }) => books.find((b) => b.id === id),
+    book: (_: unknown, args: { id: string }) =>
+      books.find(b => b.id === args.id) ?? null,
+  },
+  Mutation: {
+    addBook: (_: unknown, args: { title: string; author: string; publishedYear?: number }) => {
+      const book = {
+        id: String(nextId++),
+        title: args.title,
+        author: args.author,
+        publishedYear: args.publishedYear ?? null,
+        genres: [],
+      };
+      books.push(book);
+      return book;
+    },
   },
 };
 
-// 4. Create and start the server
+// 3. Create the server
 const server = new ApolloServer({ typeDefs, resolvers });
 
+// 4. Start the standalone server (includes a built-in HTTP server)
 const { url } = await startStandaloneServer(server, {
   listen: { port: 4000 },
+  context: async ({ req }) => ({
+    // Put shared objects here (db connections, auth, etc.)
+    authToken: req.headers.authorization,
+  }),
 });
 
-console.log(`🚀 Server ready at ${url}`);
-// Open http://localhost:4000 for Apollo Sandbox
+console.log(`🚀 GraphQL server ready at ${url}`);
 ```
 
-Run it:
+## SDL Type Definitions
 
-```bash
-node server.js
-# or with live-reload:
-npx tsx --watch server.js
-```
-
-## Schema Definition Language (SDL)
-
-GraphQL schemas are written in **SDL** (Schema Definition Language). The schema is the contract between client and server.
-
-### Types
+The Schema Definition Language (SDL) is a human-readable syntax for defining your GraphQL schema.
 
 ```graphql
-# Object type — the most common type
-type User {
-  id: ID! # Non-null ID
-  name: String! # Non-null string
-  email: String!
-  bio: String # Nullable string
-  age: Int
-  score: Float
-  isVerified: Boolean!
-  role: UserRole! # Enum
-  posts: [Post!]! # Non-null list of non-null Posts
-  createdAt: String!
+# ---- SCALAR TYPES ----
+# Built-in: Int, Float, String, Boolean, ID
+# Custom scalars (must be implemented in resolvers)
+scalar Date
+scalar DateTime
+scalar JSON
+scalar Upload
+
+# ---- ENUM ----
+enum OrderStatus {
+  PENDING
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
 }
 
-# Enum type
-enum UserRole {
-  ADMIN
-  MODERATOR
-  USER
-  GUEST
+enum SortOrder {
+  ASC
+  DESC
 }
 
-# Input type (used for mutation arguments)
-input CreateUserInput {
-  name: String!
-  email: String!
-  password: String!
-  role: UserRole = USER # Default value
-}
-
-# Interface
+# ---- INTERFACE ----
 interface Node {
   id: ID!
 }
 
-# Types implementing an interface
-type Post implements Node {
+interface Timestamps {
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+# ---- OBJECT TYPES ----
+type User implements Node & Timestamps {
+  id: ID!
+  name: String!
+  email: String!
+  role: UserRole!
+  posts(first: Int, after: String): PostConnection!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type Post implements Node & Timestamps {
   id: ID!
   title: String!
-  content: String!
+  slug: String!
+  body: String
+  status: PostStatus!
   author: User!
-  publishedAt: String
+  tags: [String!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
 }
 
-type Comment implements Node {
-  id: ID!
-  body: String!
-  author: User!
-  post: Post!
+# ---- INPUT TYPES ----
+# Used for mutation arguments — cannot have resolvers, cannot be circular
+input CreateUserInput {
+  name: String!
+  email: String!
+  password: String!
+  role: UserRole = MEMBER
 }
-```
 
-### The Query Type
+input UpdateUserInput {
+  name: String
+  email: String
+}
 
-The `Query` type is the entry point for all read operations. Every GraphQL server must define a `Query` type.
+# ---- UNION ----
+union SearchResult = User | Post | Comment
 
-```graphql
+# ---- ROOT TYPES ----
 type Query {
-  # Simple field
-  me: User
-
-  # With required argument
   user(id: ID!): User
-
-  # With optional arguments
-  users(
-    limit: Int = 20
-    offset: Int = 0
-    role: UserRole
-    search: String
-  ): [User!]!
-
-  # Deeply nested
-  post(id: ID!): Post
-  posts(authorId: ID, first: Int, after: String): PostConnection!
+  users(first: Int = 10, after: String, search: String): UserConnection!
+  post(slug: String!): Post
+  search(query: String!): [SearchResult!]!
 }
-```
 
-### The Mutation Type
-
-```graphql
 type Mutation {
-  createUser(input: CreateUserInput!): CreateUserPayload!
-  updateUser(id: ID!, input: UpdateUserInput!): UpdateUserPayload!
-  deleteUser(id: ID!): DeleteUserPayload!
-  login(email: String!, password: String!): AuthPayload!
+  createUser(input: CreateUserInput!): User!
+  updateUser(id: ID!, input: UpdateUserInput!): User!
+  deleteUser(id: ID!): Boolean!
 }
 
-type CreateUserPayload {
-  user: User
-  errors: [UserError!]!
-}
-
-type UserError {
-  field: String
-  message: String!
-  code: String!
-}
-```
-
-### The Subscription Type
-
-```graphql
 type Subscription {
-  messageAdded(channelId: ID!): Message!
-  userTyping(channelId: ID!): TypingIndicator!
-  orderStatusChanged(orderId: ID!): Order!
+  postPublished: Post!
+  userOnline(userId: ID!): User!
 }
 ```
 
 ## Your First Query
 
-With the server running, open **Apollo Sandbox** at `http://localhost:4000`.
+Once the server is running at `http://localhost:4000`, open **Apollo Sandbox** (automatically available in development):
 
 ```graphql
-# Query all books
+# Query — get all books
 query GetAllBooks {
   books {
     id
     title
     author
     publishedYear
+    genres
   }
 }
 
-# Query a specific book
-query GetBook($bookId: ID!) {
-  book(id: $bookId) {
+# Query — get a specific book by ID
+query GetBook($id: ID!) {
+  book(id: $id) {
     id
     title
     author
-    genre
   }
 }
-```
 
-Variables panel (for the second query):
+# Variables panel (JSON):
+# { "id": "1" }
 
-```json
-{
-  "bookId": "1"
+# Mutation — add a new book
+mutation AddBook($title: String!, $author: String!) {
+  addBook(title: $title, author: $author) {
+    id
+    title
+    author
+  }
 }
 ```
 
 ## Introspection
 
-Introspection is a built-in GraphQL feature that lets you query the schema itself.
+GraphQL APIs are **self-documenting** through introspection. The server exposes its entire schema via the `__schema` and `__type` meta-fields.
 
 ```graphql
-# Get all types in the schema
-query IntrospectSchema {
+# Get the full schema
+query IntrospectionQuery {
   __schema {
     types {
       name
       kind
       description
+      fields {
+        name
+        type {
+          name
+          kind
+        }
+      }
     }
   }
 }
 
-# Get fields of a specific type
-query IntrospectUser {
+# Inspect a specific type
+query GetUserType {
   __type(name: "User") {
     name
+    kind
+    description
     fields {
       name
+      description
       type {
         name
         kind
@@ -289,14 +305,12 @@ query IntrospectUser {
           kind
         }
       }
-      isDeprecated
-      deprecationReason
     }
   }
 }
 
-# Get available queries
-query IntrospectQueryType {
+# Get available query operations
+query GetQueryFields {
   __schema {
     queryType {
       fields {
@@ -304,10 +318,8 @@ query IntrospectQueryType {
         description
         args {
           name
-          type {
-            name
-            kind
-          }
+          type { name kind }
+          defaultValue
         }
       }
     }
@@ -315,55 +327,49 @@ query IntrospectQueryType {
 }
 ```
 
-:::caution[Disable Introspection in Production]
-Introspection exposes your entire schema to anyone who can reach the endpoint. Disable it in production for security:
+:::tip[Disable Introspection in Production]
+Introspection reveals your entire schema, which can aid attackers in crafting targeted queries. Disable it in production:
 
-```javascript
+```typescript
 const server = new ApolloServer({
   typeDefs,
   resolvers,
   introspection: process.env.NODE_ENV !== 'production',
 });
 ```
-
 :::
 
-## Field Arguments and Non-Null/List Modifiers
+## Non-Null and List Modifiers
+
+The type modifier syntax controls nullability and lists:
 
 ```graphql
-type Query {
-  # String  — nullable string
-  # String! — non-null string (must return a value, never null)
-  # [String] — nullable list of nullable strings
-  # [String!] — nullable list of non-null strings
-  # [String]! — non-null list of nullable strings
-  # [String!]! — non-null list of non-null strings (most common for collections)
+String     # Nullable string — can be null
+String!    # Non-null string — never null
+[String]   # Nullable list of nullable strings
+[String!]  # Nullable list of non-null strings
+[String]!  # Non-null list of nullable strings
+[String!]! # Non-null list of non-null strings (most common for collections)
+```
 
-  users(first: Int = 20, after: String): [User!]!
-  user(id: ID!): User # nullable — returns null if not found (not an error)
+```graphql
+type User {
+  id: ID!              # Never null
+  name: String!        # Never null
+  bio: String          # Can be null (optional field)
+  posts: [Post!]!      # Never null list, never null items (always returns array, possibly empty)
+  tags: [String]       # Nullable list with nullable strings (avoid — too permissive)
 }
 ```
 
-### Non-Null and List Combinations
-
-| Type         | Meaning                               |
-| ------------ | ------------------------------------- |
-| `String`     | Can be null                           |
-| `String!`    | Cannot be null                        |
-| `[String]`   | Can be null, may contain nulls        |
-| `[String!]`  | Can be null, but items cannot be null |
-| `[String]!`  | Cannot be null, items can be null     |
-| `[String!]!` | Cannot be null, items cannot be null  |
-
 ## GraphQL over HTTP
 
-GraphQL uses a single HTTP endpoint (typically `/graphql`).
-
-### POST request (standard)
+### POST (Standard)
 
 ```bash
-curl -X POST http://localhost:4000/ \
-  -H 'Content-Type: application/json' \
+# POST request with JSON body
+curl -X POST http://localhost:4000/graphql \
+  -H "Content-Type: application/json" \
   -d '{
     "query": "query GetBook($id: ID!) { book(id: $id) { title author } }",
     "variables": { "id": "1" },
@@ -371,79 +377,30 @@ curl -X POST http://localhost:4000/ \
   }'
 ```
 
-Response:
-
-```json
-{
-  "data": {
-    "book": {
-      "title": "The Pragmatic Programmer",
-      "author": "David Thomas"
-    }
-  }
-}
-```
-
-### GET request (for queries, enables CDN caching)
+### GET (for Queries)
 
 ```bash
-curl "http://localhost:4000/?query={books{title}}&operationName=GetBooks"
+# GET request — query must be URL-encoded
+curl "http://localhost:4000/graphql?query=%7B%20books%20%7B%20title%20%7D%20%7D"
+
+# With variables
+curl "http://localhost:4000/graphql?query=query+GetBook(%24id%3AID!)%7Bbook(id%3A%24id)%7Btitle%7D%7D&variables=%7B%22id%22%3A%221%22%7D"
 ```
 
-### Error responses
+:::caution[Only Queries via GET]
+Mutations must always use `POST`. Some GraphQL servers reject mutation requests via GET. The `graphql-http` spec requires this.
+:::
 
-GraphQL always returns HTTP 200 (even for errors). Errors are in the `errors` array:
+## graphql-ws for Subscriptions
 
-```json
-{
-  "data": null,
-  "errors": [
-    {
-      "message": "Book not found",
-      "locations": [{ "line": 2, "column": 3 }],
-      "path": ["book"],
-      "extensions": {
-        "code": "NOT_FOUND"
-      }
-    }
-  ]
-}
-```
-
-## Persisted Queries
-
-Persisted queries send a hash instead of the full query string, reducing bandwidth and enabling GET-based CDN caching.
-
-<Steps>
-1. Client sends the query to the server and stores the hash
-2. On subsequent requests, client sends only `{ "extensions": { "persistedQuery": { "version": 1, "sha256Hash": "abc123..." } } }`
-3. Server looks up the query by hash
-4. If not found, client resends with full query text
-</Steps>
-
-```javascript
-// Apollo Client automatic persisted queries (APQ)
-import { ApolloClient, InMemoryCache, createHttpLink } from '@apollo/client';
-import { createPersistedQueryLink } from '@apollo/client/link/persisted-queries';
-import { sha256 } from 'crypto-hash';
-
-const persistedLink = createPersistedQueryLink({ sha256 });
-const httpLink = createHttpLink({ uri: '/graphql' });
-
-const client = new ApolloClient({
-  cache: new InMemoryCache(),
-  link: persistedLink.concat(httpLink),
-});
-```
-
-## Subscriptions with graphql-ws
+Subscriptions require a WebSocket connection. The `graphql-ws` protocol is the modern standard (replacing the older `subscriptions-transport-ws`).
 
 ```bash
 npm install graphql-ws ws
 ```
 
-```javascript
-// Server setup
+```typescript
+// src/index.ts — add subscriptions to Apollo Server
 import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
 import { ApolloServerPluginDrainHttpServer } from '@apollo/server/plugin/drainHttpServer';
@@ -451,37 +408,14 @@ import { makeExecutableSchema } from '@graphql-tools/schema';
 import { WebSocketServer } from 'ws';
 import { useServer } from 'graphql-ws/lib/use/ws';
 import express from 'express';
-import { createServer } from 'http';
-import { PubSub } from 'graphql-subscriptions';
+import http from 'http';
 
-const pubsub = new PubSub();
-
-const typeDefs = `#graphql
-  type Message { id: ID!, content: String!, author: String! }
-  type Query { messages: [Message!]! }
-  type Mutation { sendMessage(content: String!, author: String!): Message! }
-  type Subscription { messageSent: Message! }
-`;
-
-const resolvers = {
-  Mutation: {
-    sendMessage: (_, { content, author }) => {
-      const message = { id: String(Date.now()), content, author };
-      pubsub.publish('MESSAGE_SENT', { messageSent: message });
-      return message;
-    },
-  },
-  Subscription: {
-    messageSent: {
-      subscribe: () => pubsub.asyncIterator(['MESSAGE_SENT']),
-    },
-  },
-};
+const app = express();
+const httpServer = http.createServer(app);
 
 const schema = makeExecutableSchema({ typeDefs, resolvers });
-const app = express();
-const httpServer = createServer(app);
 
+// WebSocket server for subscriptions
 const wsServer = new WebSocketServer({ server: httpServer, path: '/graphql' });
 const serverCleanup = useServer({ schema }, wsServer);
 
@@ -489,21 +423,34 @@ const server = new ApolloServer({
   schema,
   plugins: [
     ApolloServerPluginDrainHttpServer({ httpServer }),
-    {
-      async serverWillStart() {
-        return {
-          async drainServer() {
-            await serverCleanup.dispose();
-          },
-        };
-      },
-    },
+    { async serverWillStart() {
+      return { async drainServer() { await serverCleanup.dispose(); } };
+    }},
   ],
 });
 
 await server.start();
-app.use('/graphql', expressMiddleware(server));
-httpServer.listen(4000, () =>
-  console.log('🚀 Server ready at http://localhost:4000/graphql'),
+app.use('/graphql', express.json(), expressMiddleware(server));
+
+httpServer.listen(4000, () => console.log('🚀 Server ready at http://localhost:4000/graphql'));
+```
+
+## Persisted Queries
+
+Persisted queries (also called Automatic Persisted Queries, APQ) store query documents by hash on the server to reduce request size and enable GET-based caching:
+
+```typescript
+// Client side (Apollo Client)
+import { ApolloClient, InMemoryCache, HttpLink } from '@apollo/client';
+import { createPersistedQueryLink } from '@apollo/client/link/persisted-queries';
+import { sha256 } from 'crypto-hash';
+
+const link = createPersistedQueryLink({ sha256 }).concat(
+  new HttpLink({ uri: 'http://localhost:4000/graphql' })
 );
+
+const client = new ApolloClient({ cache: new InMemoryCache(), link });
+// First request: sends hash → server misses → responds with PersistedQueryNotFound
+// Client retries with full query + hash → server stores it
+// Subsequent requests: sends hash only → server responds from cache
 ```

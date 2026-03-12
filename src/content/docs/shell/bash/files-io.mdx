@@ -1,385 +1,374 @@
 ---
-title: Bash Files & I/O
-description: File descriptors, redirection, pipes, process substitution, find, xargs, awk, and sed in Bash.
+title: Bash Files and I/O
+description: File descriptors, redirection, pipes, process substitution, find, awk, sed, and text processing in Bash.
 sidebar:
   order: 6
 tags: [cli, shell, scripting]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-# Bash Files & I/O
+# Bash Files and I/O
 
 ## File Descriptors
 
-Every process has three standard file descriptors:
+Every process has three standard file descriptors (FDs):
 
-| FD  | Name   | Default  | Description     |
-| --- | ------ | -------- | --------------- |
-| 0   | stdin  | keyboard | Standard input  |
-| 1   | stdout | terminal | Standard output |
-| 2   | stderr | terminal | Standard error  |
+| FD | Name | Default | Symbol |
+|----|------|---------|--------|
+| 0 | stdin | Keyboard | `<` |
+| 1 | stdout | Terminal | `>` |
+| 2 | stderr | Terminal | `2>` |
 
 ```bash
-# Check open file descriptors
-ls -la /proc/$$/fd
+# Custom file descriptors (3-9 available by default)
+exec 3> output.log           # open FD 3 for writing
+exec 4< input.txt            # open FD 4 for reading
+exec 5<> bidirectional.txt   # open FD 5 for reading AND writing
 
-# Create custom file descriptors
-exec 3>/tmp/logfile.txt    # open FD 3 for writing
-echo "log message" >&3     # write to FD 3
-exec 3>&-                  # close FD 3
+echo "Writing to FD 3" >&3   # write to output.log
+read -r line <&4             # read from input.txt
+echo "Line: $line"
 
-exec 4</etc/hosts          # open FD 4 for reading
-read -r line <&4           # read from FD 4
-exec 4<&-                  # close FD 4
+# Close file descriptors
+exec 3>&-    # close FD 3
+exec 4<&-    # close FD 4
+
+# Duplicate FDs
+exec 6>&1    # FD 6 is a copy of stdout
+exec 1>logfile.txt  # redirect stdout to file
+echo "Goes to logfile"
+exec 1>&6    # restore stdout from FD 6
+exec 6>&-    # close FD 6
 ```
 
 ## Redirection
 
 ```bash
-# ─── Output Redirection ───────────────────────────────────
-command > file.txt          # redirect stdout, truncate file
-command >> file.txt         # redirect stdout, append to file
-command 2> error.txt        # redirect stderr only
-command 2>> error.txt       # append stderr
-command 2>&1                # redirect stderr TO stdout (merge)
-command > file.txt 2>&1     # both stdout and stderr to file
-command &> file.txt         # shorthand for > file 2>&1 (bash 4+)
-command &>> file.txt        # append both to file
+# Output redirection
+command > file.txt       # redirect stdout to file (overwrite)
+command >> file.txt      # redirect stdout to file (append)
+command 2> errors.txt    # redirect stderr to file
+command 2>> errors.txt   # append stderr to file
+
+# Both stdout and stderr
+command > out.txt 2>&1   # redirect stdout, then stderr to same place
+command &> out.txt       # bash shorthand: same as above
+command &>> out.txt      # append both stdout and stderr
+command > out.txt 2> err.txt  # separate files
 
 # Discard output
-command > /dev/null         # discard stdout
-command 2>/dev/null         # discard stderr
-command &>/dev/null         # discard both
-command > /dev/null 2>&1    # older equivalent, works in sh too
+command > /dev/null      # discard stdout
+command 2> /dev/null     # discard stderr
+command &> /dev/null     # discard both (silent)
+command > /dev/null 2>&1 # equivalent, POSIX-compatible form
 
-# Write stderr to terminal even when stdout is redirected
-echo "Error message" >&2   # write this message to stderr
+# Input redirection
+command < input.txt      # read stdin from file
 
-# ─── Input Redirection ────────────────────────────────────
-command < file.txt          # redirect file to stdin
-command << EOF              # here-doc as stdin
-content here
-EOF
-command <<< "string"        # here-string as stdin
+# Write stderr to stdout (redirect error messages to log tools)
+something_that_errors 2>&1 | logger  # pipe both to syslog
 
-# ─── Order Matters! ──────────────────────────────────────
-# 2>&1 > file  ≠  > file 2>&1
-command 2>&1 > file   # stderr to current stdout (terminal), then stdout to file
-command > file 2>&1   # stdout to file, stderr to (new) stdout (also file) — CORRECT
+# tee — write to file AND stdout
+command | tee output.txt        # stdout goes to both terminal and file
+command | tee -a output.txt     # append mode
+command 2>&1 | tee combined.log # both stdout and stderr
 ```
 
-:::caution[2>&1 Order Matters]
-`command > file 2>&1` redirects stdout to file first, then stderr to wherever stdout points (the file). Reversing to `command 2>&1 > file` sends stderr to the terminal and stdout to the file — almost never what you want.
+:::tip[Order matters for 2>&1]
+`command > file.txt 2>&1` means "redirect stdout to file, then redirect stderr to wherever stdout is now (file)". The order matters: `command 2>&1 > file.txt` would redirect stderr to the terminal (old stdout), then stdout to the file — wrong!
 :::
-
-## exec for Permanent Redirection
-
-```bash
-# Redirect all subsequent output in the script
-exec > /var/log/myscript.log 2>&1   # all output goes to log file
-echo "This goes to the log"
-echo "Error here too" >&2           # stderr also goes to log
-
-# Useful pattern: tee output to both terminal and log
-exec > >(tee -a "$LOG_FILE") 2>&1
-
-# Redirect stdin from a file for the whole script
-exec 0< input_data.txt
-
-# Save and restore
-exec 3>&1 4>&2         # save stdout(3) and stderr(4)
-exec > /tmp/output.log 2>&1  # redirect
-do_work
-exec 1>&3 2>&4         # restore
-exec 3>&- 4>&-         # close saved FDs
-```
 
 ## Pipes
 
 ```bash
-# Basic pipe: stdout of left → stdin of right
-cat /etc/passwd | grep alice
-ls -la | head -20
-ps aux | grep nginx | grep -v grep
+# Basic pipe: stdout of cmd1 → stdin of cmd2
+ls -la | grep ".sh"
+cat access.log | grep "404" | wc -l
 
-# Exit code of a pipeline (without pipefail)
-# is the exit code of the LAST command
-# With set -o pipefail: is exit code of FIRST failed command
+# Long pipelines
+cat /etc/passwd |
+  grep -v "^#" |
+  awk -F: '{print $1, $3}' |
+  sort -k2 -n |
+  tail -10
 
-# Check individual pipeline exit codes with PIPESTATUS
-command1 | command2 | command3
-echo "${PIPESTATUS[@]}"  # e.g. "0 0 0" or "1 0 0"
+# tee in pipeline — split the pipe
+cat data.txt | tee raw.txt | sort | tee sorted.txt | uniq > unique.txt
 
-# tee: write to file AND pass through to next pipe stage
-cat big_file.txt | tee /tmp/copy.txt | wc -l
-command | tee >(gzip > output.gz) | other_command   # tee with process substitution
-
-# Named pipes (FIFO)
+# Named pipes (FIFOs)
 mkfifo /tmp/mypipe
-producer_command > /tmp/mypipe &    # background producer
-consumer_command < /tmp/mypipe      # consumer reads
+command_producer > /tmp/mypipe &   # must background
+command_consumer < /tmp/mypipe
 rm /tmp/mypipe
+
+# Multiple writers to a named pipe (log aggregation)
+mkfifo /tmp/log_pipe
+cat /tmp/log_pipe >> /var/log/combined.log &
+./server_a 2>&1 > /tmp/log_pipe &
+./server_b 2>&1 > /tmp/log_pipe &
 ```
 
 ## Process Substitution
 
+Process substitution creates a temporary file descriptor connected to a command:
+
 ```bash
 # <(command) — treat command output as a file (for reading)
-diff <(sort file1.txt) <(sort file2.txt)   # diff sorted versions
-comm <(sort list1) <(sort list2)           # compare sorted lists
-
-while IFS= read -r line; do
-  echo "Line: $line"
-done < <(find . -name "*.log")   # process each line from find
+diff <(sort file1.txt) <(sort file2.txt)    # compare sorted versions
+comm -23 <(sort a.txt) <(sort b.txt)        # lines in a but not b
+wc -l <(find . -name "*.sh")               # count found scripts
 
 # >(command) — treat command input as a file (for writing)
-tee >(gzip > output.gz) > /dev/null <<< "data to compress"
-command | tee >(grep ERROR > errors.txt) >(grep WARN > warnings.txt) > /dev/null
+tee >(gzip > backup.tar.gz) >(sha256sum > backup.sha256) > /dev/null
 
-# Compare two command outputs side by side
-diff <(command1 --output1) <(command1 --output2)
+# Compare live command output
+diff <(ssh server1 "ls /app/bin") <(ssh server2 "ls /app/bin")
 
-# Use with mapfile to avoid subshell issues
-# WRONG: command | while read ... done  # loop runs in subshell
-# RIGHT: while read ... done < <(command)  # loop in same shell
+# Avoid subshell in while loops (vs piping)
+count=0
 while IFS= read -r line; do
-  processed_count=$(( processed_count + 1 ))  # THIS works (same shell)
-done < <(cat large_file.txt)
-echo "Processed: $processed_count"  # accessible here
+  (( count++ ))
+  process_line "$line"
+done < <(find . -name "*.log" -newer checkpoint.txt)
+echo "Processed $count files"
 ```
 
-## find Command
+## exec for Permanent Redirection
 
 ```bash
-# Basic syntax: find [path] [expression]
-find /var/log -name "*.log"              # by name
-find . -type f -name "*.sh"             # regular files only
-find . -type d -name "node_modules"     # directories only
-find . -type l                          # symbolic links only
+# Redirect script's stdout to a log file for the rest of execution
+exec 1> >(tee -a "$LOG_FILE")   # stdout to tee (file + terminal)
+exec 2>&1                        # stderr → stdout → tee
 
-# Time-based
-find /tmp -mtime -1                     # modified in last 1 day
-find /tmp -mtime +7                     # modified more than 7 days ago
-find /tmp -mmin -60                     # modified in last 60 minutes
-find /var/log -newer /etc/passwd        # newer than passwd file
+echo "This goes to log"
+ls /nonexistent   # error also goes to log
 
-# Size-based
-find . -size +1M                        # larger than 1 megabyte
-find . -size -100k                      # smaller than 100 kilobytes
-find . -size +100k -size -1M            # between 100k and 1MB
-find . -empty                           # empty files or directories
+# Redirect entire script output
+exec > /tmp/script-output.log 2>&1
+echo "All output captured"
 
-# Permission-based
-find . -perm 644                        # exact permissions
-find . -perm /755                       # any of these bits set
-find . -user alice                      # owned by alice
-find . -group developers               # owned by group
+# Reopen terminal for interactive prompts even when stdout is redirected
+exec 3> /tmp/output.log
+echo "to file" >&3
+read -r -p "Enter value: " val </dev/tty  # read from real terminal
+echo "You entered: $val" >&3
+```
 
-# Execute action on results
-find . -name "*.pyc" -delete            # delete matching files
-find . -name "*.sh" -exec chmod +x {} \;     # run command for each
-find . -name "*.sh" -exec chmod +x {} +      # batch (more efficient)
-find . -type f -print0 | xargs -0 grep "TODO"  # with xargs (handles spaces)
+## File Operations
 
-# Complex expressions
-find . \( -name "*.jpg" -o -name "*.png" \) -size +500k  # OR
-find . -not -name "*.log" -type f       # NOT
-find . -name "test_*" -prune -o -type f -print  # exclude test_ directories
+```bash
+# cat — concatenate files
+cat file.txt
+cat file1.txt file2.txt > combined.txt
+cat -n file.txt    # with line numbers
+cat -A file.txt    # show non-printing characters
 
-# Find and act conditionally
-find . -name "*.log" -size +100M | while IFS= read -r file; do
-  echo "Large log found: $file ($(du -sh "$file" | cut -f1))"
-  read -r -p "Delete? (y/n): " answer
-  [[ "$answer" == "y" ]] && rm "$file" && echo "Deleted"
-done
+# head and tail
+head -n 20 file.txt         # first 20 lines
+tail -n 20 file.txt         # last 20 lines
+tail -f /var/log/syslog     # follow (live view)
+tail -n +5 file.txt         # from line 5 onwards
+
+# wc — word count
+wc -l file.txt    # line count
+wc -w file.txt    # word count
+wc -c file.txt    # byte count
+wc -m file.txt    # character count (handles multibyte)
+
+# cut — extract fields
+cut -d: -f1 /etc/passwd          # first field, colon delimiter
+cut -d, -f2,4 data.csv           # fields 2 and 4
+cut -c1-10 file.txt              # characters 1-10
+echo "hello world" | cut -d' ' -f2  # world
+
+# sort
+sort file.txt                   # alphabetical
+sort -n numbers.txt             # numeric sort
+sort -rn scores.txt             # reverse numeric
+sort -t: -k3 -n /etc/passwd     # sort by 3rd field (UID)
+sort -u file.txt                # sort + deduplicate
+sort -k1,1 -k2,2n data.txt     # primary sort col1, secondary numeric col2
+
+# uniq — remove adjacent duplicates (sort first!)
+sort file.txt | uniq             # unique lines
+sort file.txt | uniq -c          # count occurrences
+sort file.txt | uniq -d          # only show duplicates
+sort file.txt | uniq -u          # only show unique (non-duplicated)
+
+# tr — translate characters
+echo "hello" | tr 'a-z' 'A-Z'   # HELLO
+echo "hello world" | tr ' ' '\n' # one word per line
+cat file.txt | tr -d '\r'        # remove carriage returns (Windows line endings)
+echo "aabbccdd" | tr -s 'a-z'   # squeeze: aabcd (single consecutive occurrences)
+```
+
+## find
+
+```bash
+# Basic find
+find /path -name "*.sh"           # by name (glob)
+find /path -iname "*.SH"          # case-insensitive name
+find /path -type f                # files only
+find /path -type d                # directories only
+find /path -type l                # symlinks only
+
+# By modification time
+find . -mtime -7                  # modified in last 7 days
+find . -mtime +30                 # modified more than 30 days ago
+find . -newer reference.txt       # newer than reference.txt
+find . -mmin -60                  # modified in last 60 minutes
+
+# By size
+find . -size +1M                  # larger than 1 MB
+find . -size -100k                # smaller than 100 KB
+find . -size +10M -size -100M     # between 10 and 100 MB
+
+# By permissions
+find . -perm 644                  # exact permissions
+find . -perm /u+x                 # any executable bit set for user
+find . -perm -0600                # at least owner r+w
+
+# Execute command on found files
+find . -name "*.log" -exec rm {} \;      # delete each file
+find . -name "*.log" -exec rm {} +       # faster: batch multiple args
+find . -name "*.sh" -exec chmod +x {} +  # make all .sh executable
+
+# Complex conditions
+find . -type f \( -name "*.jpg" -o -name "*.png" \)   # OR
+find . -type f -not -name "*.bak"                       # NOT
+find . -type f -name "*.log" -newer checkpoint.log \
+       -size +1k -not -name "debug.log"                 # combined
+
+# Prune directories
+find . -path ./node_modules -prune -o -name "*.js" -print
+
+# Find empty files/dirs
+find . -empty -type f
+find . -empty -type d
+
+# Print0 for safe handling of filenames with spaces
+find . -name "*.txt" -print0 | xargs -0 wc -l
 ```
 
 ## xargs
 
 ```bash
-# xargs: build and execute commands from stdin
+# Basic xargs
+find . -name "*.log" | xargs rm         # remove found files
+find . -name "*.sh" | xargs chmod +x
 
-# Basic usage
-find . -name "*.txt" | xargs wc -l          # word count all txt files
+# -I {}: replace pattern
+find . -name "*.txt" | xargs -I{} cp {} /backup/
 
-# Handle files with spaces (-0 with find -print0)
-find . -name "*.txt" -print0 | xargs -0 grep "search term"
+# -P: parallel execution
+find . -name "*.jpg" | xargs -P4 -I{} convert {} -resize 800x {}-thumb.jpg
 
-# Replace {} with filename (-I {})
-find . -name "*.jpg" | xargs -I {} convert {} {}.png
+# -0: null-delimited (safe for filenames with spaces)
+find . -name "*.txt" -print0 | xargs -0 grep -l "pattern"
 
-# Parallel execution (-P)
-find . -name "*.gz" -print0 | xargs -0 -P4 -I {} gunzip {}  # 4 parallel
+# Limit args per command (-n)
+echo {1..100} | xargs -n10 echo  # 10 args per command
 
-# Limit arguments per invocation (-n)
-echo {1..100} | xargs -n 10 echo   # 10 arguments at a time
+# With confirmation (-p)
+find . -name "*.bak" | xargs -p rm
 
-# Show commands before executing (-t)
-find . -name "*.bak" | xargs -t rm
-
-# Dry run — print what would run
-find . -name "*.tmp" | xargs -t -I {} echo rm {}
-
-# With multiple commands (bash -c)
-find . -name "*.log" -print0 | xargs -0 -I {} bash -c '
-  size=$(wc -c < "$1")
-  echo "File: $1, Size: $size bytes"
-' -- {}
+# Building commands
+ls *.txt | xargs -I{} bash -c 'wc -l "$1"; echo "---"' _ {}
 ```
 
 ## awk
 
 ```bash
-# awk: pattern scanning and processing language
-# awk 'pattern { action }' file
+# Basic awk: process field-separated data
+awk '{print $1}' file.txt           # first field (space-separated)
+awk -F: '{print $1}' /etc/passwd    # first field, colon-separated
+awk '{print NR, $0}' file.txt       # line numbers + content
 
-# Basic field printing
-awk '{print $1, $3}' file.txt           # print columns 1 and 3
-awk -F: '{print $1}' /etc/passwd        # colon-delimited, print first field
-awk -F',' '{print $2}' data.csv         # CSV, second column
+# Key variables
+# NR — current record (line) number
+# NF — number of fields in current record
+# $0 — entire current line
+# $1, $2 ... — individual fields
+# FS — input field separator (default: space/tab)
+# OFS — output field separator
+# RS — record separator (default: newline)
+# ORS — output record separator
 
-# NR (Number of Records/lines), NF (Number of Fields)
-awk '{print NR, NF, $0}' file           # line num, field count, line
-awk 'NR==5' file                         # print line 5
-awk 'NR>=2 && NR<=5' file               # print lines 2-5
-awk 'NF>0' file                          # skip empty lines
-
-# Pattern matching
-awk '/error/' logfile                    # print lines matching /error/
-awk '!/^#/' config.txt                   # skip comment lines
-awk '$3 > 100' data.txt                  # print if 3rd field > 100
-awk '$2 ~ /^alice/' /etc/passwd          # field 2 matches regex
+# Patterns and actions
+awk 'NR > 5 { print $1 }' file.txt          # skip first 5 lines
+awk '/error/ { print NR, $0 }' app.log      # lines matching pattern
+awk 'NF > 3 { print }' data.txt            # lines with > 3 fields
+awk '$3 > 1000 { print $1, $3 }' data.txt  # condition on field 3
 
 # BEGIN and END blocks
-awk 'BEGIN {FS=","; OFS="\t"} {print $1,$2}' data.csv
-awk 'BEGIN {total=0} {total+=$3} END {print "Total:", total}' data.txt
+awk 'BEGIN { print "Start"; total=0 }
+     { total += $2 }
+     END { print "Total:", total }' sales.txt
 
-# Compute statistics
-awk '{sum+=$1; count++} END {printf "Average: %.2f\n", sum/count}' nums.txt
+# printf formatting
+awk -F: 'NR <= 5 { printf "%-20s uid=%-5d home=%s\n", $1, $3, $6 }' /etc/passwd
 
-# printf in awk
-awk '{printf "%-20s %8.2f\n", $1, $2}' data.txt
+# Aggregation
+awk '{sum+=$1; count++} END {printf "avg=%.2f\n", sum/count}' numbers.txt
+awk '{counts[$1]++} END {for (k in counts) print counts[k], k}' words.txt | sort -rn
 
-# Multiple patterns
-awk '
-  /START/ { recording=1; next }
-  /END/   { recording=0; next }
-  recording { print }
-' file
-
-# Process CSV with header
-awk -F, 'NR==1 {for(i=1;i<=NF;i++) header[i]=$i; next}
-         {for(i=1;i<=NF;i++) data[header[i]]=$i; print data["name"], data["age"]}' data.csv
-
-# Sum a column
-awk -F: '{sum += $3} END {print sum}' /etc/passwd   # sum all UIDs
+# Multi-file processing
+awk 'FNR==1 {print "File:", FILENAME}' file1.txt file2.txt
 ```
 
 ## sed
 
 ```bash
-# sed: stream editor for text transformation
+# Basic substitution: s/pattern/replacement/flags
+sed 's/old/new/' file.txt          # replace first on each line
+sed 's/old/new/g' file.txt         # replace all (global)
+sed 's/old/new/i' file.txt         # case-insensitive
+sed 's/old/new/2' file.txt         # replace 2nd occurrence
 
-# ─── Substitution ────────────────────────────────────────
-sed 's/old/new/'        file   # replace first occurrence per line
-sed 's/old/new/g'       file   # replace all occurrences (global)
-sed 's/old/new/i'       file   # case-insensitive
-sed 's/old/new/2'       file   # replace only 2nd occurrence
-sed 's/old/new/gI'      file   # all + case-insensitive
-sed -i 's/old/new/g'    file   # edit file IN PLACE (be careful!)
-sed -i.bak 's/old/new/g' file  # in-place with backup
+# In-place editing
+sed -i 's/localhost/db.example.com/g' config.txt
+sed -i.bak 's/foo/bar/g' file.txt  # with backup
 
-# Capture groups
-sed 's/\(first\) \(last\)/\2, \1/'  # "John Smith" → "Smith, John"
-sed -E 's/(first) (last)/\2, \1/'   # extended regex (same result)
+# Delete lines
+sed '/pattern/d' file.txt          # delete matching lines
+sed '1d' file.txt                  # delete first line
+sed '1,5d' file.txt               # delete lines 1-5
+sed '$d' file.txt                  # delete last line
 
-# ─── Deletion ────────────────────────────────────────────
-sed '/pattern/d'      file   # delete lines matching pattern
-sed '3d'              file   # delete line 3
-sed '3,7d'            file   # delete lines 3 through 7
-sed '/^#/d'           file   # delete comment lines
-sed '/^$/d'           file   # delete empty lines
-sed 's/[[:space:]]*$//' file  # trim trailing whitespace
+# Print specific lines
+sed -n '5p' file.txt               # print line 5
+sed -n '5,10p' file.txt           # print lines 5-10
+sed -n '/pattern/p' file.txt       # print matching lines
 
-# ─── Print (with -n) ─────────────────────────────────────
-sed -n '5p'           file   # print only line 5
-sed -n '1,10p'        file   # print lines 1-10
-sed -n '/pattern/p'   file   # print matching lines (like grep)
-sed -n '/START/,/END/p' file # print between patterns (inclusive)
+# Insert/append
+sed '3i\New line before 3' file.txt  # insert before line 3
+sed '3a\New line after 3' file.txt   # append after line 3
+sed '/pattern/i\Before match' file.txt
 
-# ─── Insert and Append ───────────────────────────────────
-sed '3i\New line before line 3'  file  # insert before line 3
-sed '3a\New line after line 3'   file  # append after line 3
-sed '/pattern/i\Line before match' file  # insert before matching lines
+# Ranges
+sed '/start/,/end/ s/foo/bar/g' file.txt   # substitute between markers
+sed '/^#/d' config.txt             # delete comment lines
 
-# ─── Address Ranges ──────────────────────────────────────
-sed '2,5s/old/new/g' file        # substitute on lines 2-5
-sed '/start/,/end/s/foo/bar/g' file  # substitute between patterns
-
-# ─── Multiple commands (-e) ──────────────────────────────
-sed -e 's/foo/bar/g' -e 's/baz/qux/g' file
-
-# ─── Practical examples ──────────────────────────────────
-# Remove HTML tags
-sed 's/<[^>]*>//g' page.html
-
-# Extract between XML/HTML tags
-sed -n 's/.*<title>\(.*\)<\/title>.*/\1/p' page.html
-
-# Add line numbers
-sed = file | sed 'N; s/\n/\t/'
-
-# Convert Windows line endings to Unix
-sed 's/\r$//' file.txt
-
-# Extract config values
-sed -n "s/^DB_HOST=//p" .env   # extract DB_HOST value from .env
-
-# Double-space a file (add blank line after each line)
-sed 'G' file
-
-# Remove duplicate blank lines
-sed '/^$/N; /^\n$/d' file
+# Multi-command
+sed -e 's/foo/bar/g' -e 's/baz/qux/g' file.txt
 ```
 
-## Practical I/O Patterns
+## Process Substitution — Advanced Uses
 
 ```bash
-# ─── Read file line by line (correct way) ────────────────
-while IFS= read -r line || [[ -n "$line" ]]; do
-  # IFS= preserves leading/trailing whitespace
-  # -r prevents backslash interpretation
-  # || [[ -n "$line" ]] handles missing final newline
-  process "$line"
-done < /path/to/file
+# Log splitting
+./application 2> >(grep -v "DEBUG" >> errors.log) | \
+              tee >(grep "WARN" >> warnings.log) \
+                  >(grep "ERROR" >> errors.log) > /dev/null
 
-# ─── Process CSV correctly ───────────────────────────────
-while IFS=',' read -r col1 col2 col3; do
-  echo "Col1: $col1, Col2: $col2, Col3: $col3"
-done < data.csv
+# Multi-way diff
+diff3 <(cat v1.txt) <(cat v2.txt) <(cat v3.txt)
 
-# ─── Write to file atomically ────────────────────────────
-# Write to temp file then move (prevents partial writes)
-tmpfile=$(mktemp)
-generate_output > "$tmpfile"
-mv "$tmpfile" /etc/myapp/config.txt   # atomic on same filesystem
+# Sort and join
+join <(sort -k1 users.txt) <(sort -k1 orders.txt)
 
-# ─── Tee output to log and stdout ────────────────────────
-LOGFILE="/var/log/myscript.log"
-exec > >(tee -a "$LOGFILE") 2>&1
-
-# ─── Process substitution diff ───────────────────────────
-# Compare sorted outputs without creating temp files
-diff \
-  <(find /etc -type f | sort) \
-  <(find /etc.bak -type f | sort) \
-  | grep '^[<>]'
+# Parallel compression
+tar -cf - large_directory/ | \
+  tee >(gzip > backup.tar.gz) >(bzip2 > backup.tar.bz2) > /dev/null
 ```

@@ -1,117 +1,106 @@
 ---
 title: Bash Scripts
-description: Script best practices, argument parsing, color output, logging, strict mode pitfalls, shellcheck, and testing with bats.
+description: Script best practices, argument parsing, input validation, logging, dry-run mode, shellcheck, and testing with bats-core.
 sidebar:
   order: 7
 tags: [cli, shell, scripting]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
 # Bash Scripts
 
 ## Script Best Practices Checklist
 
-Every production Bash script should include:
+<Steps>
+1. **Start with the shebang and strict mode**
 
-```bash
-#!/usr/bin/env bash
-# ─────────────────────────────────────────────────────────────
-# Script: backup.sh
-# Description: Backup application data to S3
-# Usage: ./backup.sh [--env staging|production] [--dry-run]
-# Requirements: aws CLI, tar, gzip
-# ─────────────────────────────────────────────────────────────
+   ```bash
+   #!/usr/bin/env bash
+   set -euo pipefail
+   ```
 
-# 1. STRICT MODE — fail fast and loudly
-set -euo pipefail
+2. **Define constants and defaults at the top**
 
-# 2. SCRIPT DIRECTORY — reliable script-relative paths
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
+   ```bash
+   readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+   readonly SCRIPT_NAME="$(basename "$0")"
+   readonly VERSION="1.0.0"
+   ```
 
-# 3. CHECK REQUIRED COMMANDS
-require_commands() {
-  local cmd
-  for cmd in "$@"; do
-    if ! command -v "$cmd" &>/dev/null; then
-      echo "Error: Required command not found: $cmd" >&2
-      exit 1
-    fi
-  done
-}
-require_commands aws tar gzip
+3. **Wrap everything in a `main()` function**
 
-# 4. CONSTANTS (readonly to prevent accidental modification)
-readonly DEFAULT_ENV="staging"
-readonly TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-readonly LOG_FILE="/var/log/backup_${TIMESTAMP}.log"
-readonly MAX_BACKUPS=7
+   ```bash
+   main() {
+     parse_args "$@"
+     validate_inputs
+     run
+   }
+   main "$@"
+   ```
 
-# 5. VALIDATE REQUIRED ENV VARS
-: "${AWS_BUCKET:?'AWS_BUCKET environment variable is required'}"
-: "${DATABASE_URL:?'DATABASE_URL environment variable is required'}"
+4. **Register a cleanup trap before any side effects**
 
-# 6. CLEANUP TRAP — runs on any exit
-TMPDIR_PATH=""
-cleanup() {
-  local exit_code=$?
-  [[ -n "$TMPDIR_PATH" ]] && rm -rf "$TMPDIR_PATH"
-  exit "$exit_code"
-}
-trap cleanup EXIT INT TERM HUP
+   ```bash
+   TMP_DIR=""
+   cleanup() { rm -rf "${TMP_DIR:-}"; }
+   trap cleanup EXIT
+   TMP_DIR=$(mktemp -d)
+   ```
 
-# 7. LOGGING FUNCTIONS
-log_info()  { printf '[INFO]  %s %s\n' "$(date '+%H:%M:%S')" "$*"; }
-log_warn()  { printf '[WARN]  %s %s\n' "$(date '+%H:%M:%S')" "$*" >&2; }
-log_error() { printf '[ERROR] %s %s\n' "$(date '+%H:%M:%S')" "$*" >&2; }
+5. **Check for required commands**
 
-# 8. MAIN FUNCTION — entry point
-main() {
-  parse_args "$@"
-  validate_inputs
-  create_backup
-  upload_backup
-  cleanup_old_backups
-  log_info "Backup complete!"
-}
+   ```bash
+   require_cmd() {
+     command -v "$1" &>/dev/null || die "Required command not found: $1"
+   }
+   require_cmd curl
+   require_cmd jq
+   require_cmd docker
+   ```
 
-main "$@"
-```
+6. **Validate all inputs before doing work**
+
+   ```bash
+   [[ -f "$input_file" ]] || die "Input file not found: $input_file"
+   [[ -n "$api_key" ]] || die "API_KEY environment variable is required"
+   ```
+
+7. **Document with usage() function**
+
+   ```bash
+   usage() {
+     cat <<EOF
+   Usage: ${SCRIPT_NAME} [OPTIONS] <input-file>
+   ...
+   EOF
+   }
+   ```
+
+8. **Use readonly for constants, local for function variables**
+
+   ```bash
+   readonly MAX_RETRIES=5
+   process() { local file="$1"; ... }
+   ```
+
+</Steps>
 
 ## Argument Parsing
 
-### getopts (Short Options)
+### getopts (Short Options Only)
 
 ```bash
 parse_args() {
   local opt
-  while getopts ":e:n:dvh" opt; do
+  while getopts ":vhf:o:" opt; do
     case "$opt" in
-      e) ENV="$OPTARG"
-         if [[ "$ENV" != "staging" && "$ENV" != "production" ]]; then
-           log_error "Invalid environment: $ENV (use staging or production)"
-           exit 1
-         fi
-         ;;
-      n) COUNT="$OPTARG"
-         if ! [[ "$COUNT" =~ ^[1-9][0-9]*$ ]]; then
-           log_error "-n must be a positive integer"
-           exit 1
-         fi
-         ;;
-      d) DRY_RUN=true ;;
       v) VERBOSE=true ;;
+      f) INPUT_FILE="$OPTARG" ;;
+      o) OUTPUT_FILE="$OPTARG" ;;
       h) usage; exit 0 ;;
-      :) log_error "Option -$OPTARG requires an argument"; exit 1 ;;
-      \?) log_error "Unknown option: -$OPTARG"; exit 1 ;;
+      :) die "Option -${OPTARG} requires an argument" ;;
+      \?) die "Unknown option: -${OPTARG}" ;;
     esac
   done
   shift $(( OPTIND - 1 ))
@@ -119,35 +108,77 @@ parse_args() {
 }
 ```
 
-### Manual Long Options Parsing
+### Manual Parsing (Long Options)
 
 ```bash
-parse_args_long() {
+parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --env|-e)
-        [[ -z "${2:-}" ]] && { log_error "--env requires a value"; exit 1; }
-        ENV="$2"; shift 2 ;;
-      --env=*)
-        ENV="${1#*=}"; shift ;;
-      --dry-run)
-        DRY_RUN=true; shift ;;
-      --verbose|-v)
-        VERBOSE=true; shift ;;
-      --count=*)
-        COUNT="${1#*=}"; shift ;;
-      --help|-h)
-        usage; exit 0 ;;
-      --)
-        shift; POSITIONAL_ARGS+=("$@"); break ;;
-      -*)
-        log_error "Unknown option: $1"
+      -v|--verbose)
+        VERBOSE=true
+        shift
+        ;;
+      -f|--file)
+        [[ -n "${2:-}" ]] || die "--file requires an argument"
+        INPUT_FILE="$2"
+        shift 2
+        ;;
+      --file=*)
+        INPUT_FILE="${1#*=}"
+        shift
+        ;;
+      -n|--dry-run)
+        DRY_RUN=true
+        shift
+        ;;
+      -h|--help)
         usage
-        exit 1 ;;
+        exit 0
+        ;;
+      --version)
+        echo "${SCRIPT_NAME} version ${VERSION}"
+        exit 0
+        ;;
+      --)
+        shift
+        break   # everything after -- is positional
+        ;;
+      -*)
+        die "Unknown option: $1"
+        ;;
       *)
-        POSITIONAL_ARGS+=("$1"); shift ;;
+        POSITIONAL_ARGS+=("$1")
+        shift
+        ;;
     esac
   done
+}
+```
+
+### Using getopt (GNU, Supports Long Options)
+
+```bash
+parse_args() {
+  local parsed
+  parsed=$(getopt \
+    --options "vhf:o:n" \
+    --longoptions "verbose,help,file:,output:,dry-run" \
+    --name "$SCRIPT_NAME" \
+    -- "$@") || die "Failed to parse arguments"
+
+  eval set -- "$parsed"
+
+  while true; do
+    case "$1" in
+      -v|--verbose) VERBOSE=true; shift ;;
+      -f|--file)    INPUT_FILE="$2"; shift 2 ;;
+      -o|--output)  OUTPUT_FILE="$2"; shift 2 ;;
+      -n|--dry-run) DRY_RUN=true; shift ;;
+      -h|--help)    usage; exit 0 ;;
+      --)           shift; break ;;
+    esac
+  done
+  POSITIONAL_ARGS=("$@")
 }
 ```
 
@@ -155,63 +186,54 @@ parse_args_long() {
 
 ```bash
 validate_inputs() {
-  # Require non-empty
-  [[ -z "${DB_HOST:-}" ]] && { log_error "DB_HOST is required"; exit 1; }
+  # Required argument check
+  [[ -n "${INPUT_FILE:-}" ]] || die "Input file is required. Use -f <file>"
 
-  # Validate file exists
-  [[ -f "$CONFIG_FILE" ]] || { log_error "Config not found: $CONFIG_FILE"; exit 1; }
+  # File existence
+  [[ -f "$INPUT_FILE" ]] || die "Input file not found: $INPUT_FILE"
+  [[ -r "$INPUT_FILE" ]] || die "Input file is not readable: $INPUT_FILE"
 
-  # Validate directory and writable
-  if [[ ! -d "$OUTPUT_DIR" ]]; then
-    log_info "Creating output directory: $OUTPUT_DIR"
-    mkdir -p "$OUTPUT_DIR" || { log_error "Cannot create $OUTPUT_DIR"; exit 1; }
-  fi
-  [[ -w "$OUTPUT_DIR" ]] || { log_error "Output dir not writable: $OUTPUT_DIR"; exit 1; }
+  # Numeric validation
+  [[ "${COUNT:-}" =~ ^[0-9]+$ ]] || die "COUNT must be a positive integer"
+  (( COUNT > 0 )) || die "COUNT must be greater than 0"
 
-  # Validate numeric
-  if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
-    log_error "Invalid port: $PORT (must be 1-65535)"
-    exit 1
-  fi
-
-  # Validate enum value
-  local valid_envs=("staging" "production" "development")
-  local valid=false
-  for env in "${valid_envs[@]}"; do
-    [[ "$ENV" == "$env" ]] && { valid=true; break; }
+  # Enum validation
+  local valid_modes=("fast" "slow" "safe")
+  local mode_valid=false
+  for m in "${valid_modes[@]}"; do
+    [[ "$MODE" == "$m" ]] && mode_valid=true && break
   done
-  "$valid" || { log_error "Invalid env: $ENV. Must be one of: ${valid_envs[*]}"; exit 1; }
+  "$mode_valid" || die "Invalid mode '$MODE'. Valid: ${valid_modes[*]}"
+
+  # Directory validation
+  [[ -d "${OUTPUT_DIR:-}" ]] || mkdir -p "$OUTPUT_DIR"
+  [[ -w "$OUTPUT_DIR" ]] || die "Output directory is not writable: $OUTPUT_DIR"
+
+  # URL validation
+  [[ "${API_URL:-}" =~ ^https?:// ]] || die "API_URL must be an http(s) URL"
+
+  # Email validation
+  [[ "${EMAIL:-}" =~ ^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$ ]] \
+    || die "Invalid email: ${EMAIL:-}"
 }
 ```
 
 ## Color Output
 
 ```bash
-# ANSI escape codes
-setup_colors() {
-  # Only use colors when stdout is a terminal
-  if [[ -t 1 ]]; then
-    RED='\033[0;31m'
-    GREEN='\033[0;32m'
-    YELLOW='\033[1;33m'
-    BLUE='\033[0;34m'
-    MAGENTA='\033[0;35m'
-    CYAN='\033[0;36m'
-    WHITE='\033[1;37m'
-    BOLD='\033[1m'
-    DIM='\033[2m'
-    UNDERLINE='\033[4m'
-    RESET='\033[0m'
-  else
-    RED='' GREEN='' YELLOW='' BLUE='' MAGENTA='' CYAN=''
-    WHITE='' BOLD='' DIM='' UNDERLINE='' RESET=''
-  fi
-}
-setup_colors
+# ANSI color codes
+readonly RED='\033[0;31m'
+readonly YELLOW='\033[1;33m'
+readonly GREEN='\033[0;32m'
+readonly BLUE='\033[0;34m'
+readonly CYAN='\033[0;36m'
+readonly BOLD='\033[1m'
+readonly RESET='\033[0m'
 
-# Or use tput (more portable, respects TERM variable)
-setup_colors_tput() {
+# Check if terminal supports colors
+setup_colors() {
   if [[ -t 1 ]] && command -v tput &>/dev/null; then
+    # Terminal supports colors
     RED=$(tput setaf 1)
     GREEN=$(tput setaf 2)
     YELLOW=$(tput setaf 3)
@@ -219,179 +241,258 @@ setup_colors_tput() {
     BOLD=$(tput bold)
     RESET=$(tput sgr0)
   else
+    # Not a terminal or no tput — no colors
     RED='' GREEN='' YELLOW='' BLUE='' BOLD='' RESET=''
   fi
 }
+setup_colors
 
-# Colored log functions
-success() { echo -e "${GREEN}✓${RESET} $*"; }
-failure() { echo -e "${RED}✗${RESET} $*" >&2; }
-info()    { echo -e "${BLUE}ℹ${RESET} $*"; }
-warn()    { echo -e "${YELLOW}⚠${RESET} $*" >&2; }
-step()    { echo -e "${BOLD}${BLUE}=>${RESET}${BOLD} $*${RESET}"; }
+# Color functions
+print_success() { printf "${GREEN}✓ %s${RESET}\n" "$*"; }
+print_error()   { printf "${RED}✗ %s${RESET}\n" "$*" >&2; }
+print_warning() { printf "${YELLOW}⚠ %s${RESET}\n" "$*" >&2; }
+print_info()    { printf "${BLUE}ℹ %s${RESET}\n" "$*"; }
+print_header()  { printf "${BOLD}=== %s ===${RESET}\n" "$*"; }
 ```
 
-## Logging with Timestamps
+## Logging Functions
 
 ```bash
-# Logging to both file and stdout
-LOG_FILE="/var/log/myscript.log"
+# Logging with timestamps and levels
+LOG_LEVEL="${LOG_LEVEL:-INFO}"
+LOG_FILE="${LOG_FILE:-}"
 
 log() {
-  local level="$1"; shift
-  local message="$*"
+  local level="$1"
+  shift
   local timestamp
   timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-  local line="${timestamp} [${level}] ${message}"
+  local msg="[${timestamp}] [${level}] $*"
 
-  # Write to log file
-  echo "$line" >> "$LOG_FILE"
+  # Write to stderr
+  printf '%s\n' "$msg" >&2
 
-  # Write to terminal with color
-  case "$level" in
-    INFO)  echo -e "${BLUE}${line}${RESET}" ;;
-    WARN)  echo -e "${YELLOW}${line}${RESET}" >&2 ;;
-    ERROR) echo -e "${RED}${line}${RESET}" >&2 ;;
-    DEBUG) ${VERBOSE:-false} && echo -e "${DIM}${line}${RESET}" ;;
-  esac
+  # Also write to log file if configured
+  [[ -n "${LOG_FILE:-}" ]] && printf '%s\n' "$msg" >> "$LOG_FILE"
 }
 
-log_info()  { log INFO  "$@"; }
-log_warn()  { log WARN  "$@"; }
-log_error() { log ERROR "$@"; }
-log_debug() { log DEBUG "$@"; }
+log_debug() { [[ "${LOG_LEVEL}" == "DEBUG" ]] && log "DEBUG" "$@" || true; }
+log_info()  { log "INFO " "$@"; }
+log_warn()  { log "WARN " "$@"; }
+log_error() { log "ERROR" "$@"; }
 
-# Redirect all output to log (and screen via tee)
-exec > >(tee -a "$LOG_FILE") 2>&1
+die() {
+  log_error "$@"
+  exit 1
+}
 ```
 
 ## Dry-Run Mode
 
 ```bash
-# DRY_RUN mode: show what would happen without doing it
-DRY_RUN=false
+DRY_RUN="${DRY_RUN:-false}"
 
-# Wrapper: run command or show it
-run() {
-  if "$DRY_RUN"; then
-    echo "[DRY-RUN] $*"
-  else
-    "$@"
+# run_cmd: execute or simulate a command
+run_cmd() {
+  if [[ "$DRY_RUN" == "true" ]]; then
+    printf '[DRY-RUN] %s\n' "$*" >&2
+    return 0
   fi
+  "$@"
 }
 
-# Usage:
-run rm -f /tmp/stale_file.txt
-run mv /tmp/backup.tar.gz /var/backups/
-run systemctl restart nginx
+# Usage
+run_cmd rm -rf "$temp_dir"
+run_cmd cp "$source" "$destination"
+run_cmd systemctl restart nginx
+
+# For operations that produce output
+if [[ "$DRY_RUN" == "true" ]]; then
+  log_info "[DRY-RUN] Would create user: $username"
+else
+  useradd -m -s /bin/bash "$username"
+  log_info "Created user: $username"
+fi
+```
+
+## Progress Indicators
+
+```bash
+# Simple spinner
+spinner() {
+  local pid=$1
+  local message="${2:-Working...}"
+  local delay=0.1
+  local spinstr='|/-\'
+
+  while kill -0 "$pid" 2>/dev/null; do
+    local temp="${spinstr#?}"
+    printf ' [%c] %s\r' "$spinstr" "$message"
+    spinstr="${temp}${spinstr%"$temp"}"
+    sleep "$delay"
+  done
+  printf '    \r'
+}
+
+# Usage
+some_long_command &
+spinner $! "Processing data"
+wait
+
+# Progress bar
+progress_bar() {
+  local current=$1
+  local total=$2
+  local width=${3:-50}
+
+  local filled=$(( current * width / total ))
+  local empty=$(( width - filled ))
+  local pct=$(( current * 100 / total ))
+
+  printf '\r[%s%s] %3d%% (%d/%d)' \
+    "$(printf '#%.0s' $(seq 1 "$filled"))" \
+    "$(printf '.%.0s' $(seq 1 "$empty"))" \
+    "$pct" "$current" "$total"
+
+  (( current == total )) && echo
+}
+
+# Usage
+total=100
+for i in $(seq 1 "$total"); do
+  sleep 0.05
+  progress_bar "$i" "$total"
+done
 ```
 
 ## Idempotent Scripts
 
+Scripts should be safely re-runnable:
+
 ```bash
-# Idempotent: running multiple times produces the same result
-
-# Check before creating
-if [[ ! -d /var/app/data ]]; then
-  mkdir -p /var/app/data
-  log_info "Created /var/app/data"
-else
-  log_debug "/var/app/data already exists"
-fi
-
-# Write only if changed
-write_if_changed() {
-  local target="$1"
-  local content="$2"
-  if [[ ! -f "$target" ]] || [[ "$(cat "$target")" != "$content" ]]; then
-    echo "$content" > "$target"
-    log_info "Updated $target"
+# Idempotent file creation
+create_config() {
+  local file="$1"
+  if [[ -f "$file" ]]; then
+    log_info "Config already exists: $file (skipping)"
     return 0
   fi
-  log_debug "$target unchanged"
-  return 1
+  cat > "$file" <<EOF
+# Auto-generated by ${SCRIPT_NAME}
+key=value
+EOF
+  log_info "Created config: $file"
 }
 
-# Idempotent systemd service enable
-if ! systemctl is-enabled myapp.service &>/dev/null; then
-  systemctl enable myapp.service
-fi
+# Idempotent directory creation
+ensure_dir() {
+  local dir="$1"
+  [[ -d "$dir" ]] || { mkdir -p "$dir" && log_info "Created: $dir"; }
+}
+
+# Idempotent symlink creation
+ensure_link() {
+  local src="$1" dest="$2"
+  if [[ -L "$dest" && "$(readlink "$dest")" == "$src" ]]; then
+    return 0   # already correct
+  fi
+  rm -f "$dest"
+  ln -s "$src" "$dest"
+}
 ```
 
 ## Bash Strict Mode Pitfalls
 
-```bash
-# ─── set -e pitfalls ─────────────────────────────────────
+### set -u with Arrays
 
-# 1. Commands in if/while/until conditions are EXEMPT from -e
+```bash
+set -u
+arr=()
+
+# WRONG: fails because ${arr[@]} is "unbound" when array is empty
+for item in "${arr[@]}"; do echo "$item"; done
+# bash: arr[@]: unbound variable
+
+# CORRECT: use ${arr[@]+"${arr[@]}"} or check length first
+for item in "${arr[@]+"${arr[@]}"}"; do echo "$item"; done
+# Or:
+(( ${#arr[@]} > 0 )) && for item in "${arr[@]}"; do echo "$item"; done
+```
+
+### set -e with if Conditions
+
+```bash
 set -e
-if grep -q "missing" file.txt; then   # grep failure doesn't exit
+# Commands in if conditions are EXEMPT from set -e
+# (bash doesn't exit on failure in condition context)
+if grep -q "pattern" file.txt; then  # grep failure won't exit
   echo "found"
 fi
 
-# 2. Commands followed by || or && are exempt
-set -e
-cat missing_file || true   # doesn't exit — OK
-command_that_fails || handle_error  # doesn't exit
+# But this WILL cause exit:
+grep -q "pattern" file.txt   # if this fails
+echo "after"                  # this won't run with set -e
+```
 
-# 3. The last command in a pipeline might fail even with pipefail
-set -eo pipefail
-echo "test" | false | echo "after"   # exits because false failed
+### pipefail with grep
 
-# ─── set -u pitfalls ─────────────────────────────────────
+```bash
+set -euo pipefail
+# grep returns exit code 1 when no match found
+# With pipefail, this can kill your script!
 
-# Arrays with set -u
-set -u
-arr=()
-echo "${arr[@]}"    # ERROR: unbound variable (empty array)
-echo "${arr[@]+"${arr[@]}"}  # Safe: uses ${var+value} idiom
+# WRONG: script exits if grep finds nothing
+find . -name "*.log" | grep "error"
 
-# Safer empty array access
-[[ "${#arr[@]}" -gt 0 ]] && echo "${arr[@]}"
+# CORRECT: allow grep to fail
+find . -name "*.log" | grep "error" || true
 
-# ─── pipefail pitfalls ───────────────────────────────────
-
-# grep returns 1 when no match found — triggers pipefail!
-set -eo pipefail
-cat file | grep "maybe_missing"  # EXIT if no match!
-
-# Fix: handle grep's exit code
-set -eo pipefail
-result=$(grep "pattern" file || true)   # OR true if not found
-matches=$(grep -c "pattern" file || echo 0)  # count, 0 if none
+# Or check for matches properly
+if find . -name "*.log" | grep -q "error"; then
+  echo "Found errors"
+fi
 ```
 
 ## shellcheck
 
-shellcheck is a static analysis tool for shell scripts:
+Install and run shellcheck:
 
 ```bash
 # Install
-sudo apt install shellcheck    # Ubuntu/Debian
-brew install shellcheck        # macOS
+sudo apt install shellcheck       # Ubuntu/Debian
+brew install shellcheck           # macOS
 
-# Run
+# Check a script
 shellcheck script.sh
-shellcheck -S warning *.sh     # warning level and above
-shellcheck -f json script.sh   # JSON output for IDE integration
 
-# Inline disable (use sparingly, with comment explaining why)
-# shellcheck disable=SC2086   # intentional word splitting
-ls $pattern
+# In CI (strict mode, exit 1 on any issue)
+shellcheck --severity=warning *.sh
+
+# Source files
+shellcheck -x script.sh           # follow source/. directives
+
+# Disable specific checks (inline)
+# shellcheck disable=SC2086
+echo $unquoted                     # SC2086: quote this variable
+
+# Common warnings to know:
+# SC2086: Double quote to prevent word splitting:  "$var" not $var
+# SC2048: Use "$@" rather than "$*"
+# SC2068: Double quote array expansions
+# SC2206: Quote to prevent word splitting/glob: arr=($(...))
+# SC2207: Use mapfile or read -a for array assignment
+# SC2155: Declare and assign separately: local var=$(cmd)
 ```
 
-### Common shellcheck Warnings
-
-| Code   | Warning                                 | Fix                                |
-| ------ | --------------------------------------- | ---------------------------------- | ----- | -------- | --- | ------- |
-| SC2086 | Double quote to prevent globbing        | Use `"$var"`                       |
-| SC2048 | Double quote array expansion            | Use `"${arr[@]}"`                  |
-| SC2068 | Double quote array expansion in command | Use `"${arr[@]}"`                  |
-| SC2206 | Quote to prevent word splitting         | Use `mapfile` or `read -ra`        |
-| SC2207 | Prefer mapfile or read -ra              | Replace `arr=($())` with `mapfile` |
-| SC2155 | Declare and assign separately           | `local var; var=$(cmd)`            |
-| SC2164 | Use `cd ...                             |                                    | exit` | `cd /dir |     | exit 1` |
-| SC2044 | Find with -exec replaces variable       | Use `while read` loop              |
+:::tip[SC2155 — the common one]
+```bash
+# WRONG (SC2155):
+local result=$(dangerous_command)  # if cmd fails, local always succeeds
+# CORRECT:
+local result
+result=$(dangerous_command)        # exit code properly propagated
+```
+:::
 
 ## Testing with bats-core
 
@@ -400,87 +501,167 @@ ls $pattern
 git clone https://github.com/bats-core/bats-core.git
 cd bats-core && ./install.sh /usr/local
 
-# Or via npm: npm install -g bats
-# Or via brew: brew install bats-core
+# Or via npm
+npm install -g bats
+
+# Write tests in test/my_script.bats
 ```
 
 ```bash
 #!/usr/bin/env bats
-# tests/backup.bats
 
-# Setup: run before each test
+# Load helpers (optional)
 setup() {
-  # Create temp directory for test files
-  TEST_TMPDIR=$(mktemp -d)
-  export TEST_TMPDIR
-  # Source the script under test (without running main)
-  source "${BATS_TEST_DIRNAME}/../lib/functions.sh"
+  TEST_DIR="$(mktemp -d)"
+  export TEST_DIR
 }
 
-# Teardown: run after each test
 teardown() {
-  rm -rf "$TEST_TMPDIR"
+  rm -rf "$TEST_DIR"
 }
 
-# Test syntax
-@test "script has valid syntax" {
-  run bash -n backup.sh
+@test "script exists and is executable" {
+  [ -x "./my_script.sh" ]
+}
+
+@test "outputs correct greeting" {
+  run ./my_script.sh --name "World"
   [ "$status" -eq 0 ]
+  [ "$output" = "Hello, World!" ]
 }
 
-@test "backup creates output file" {
-  run backup_to_dir "$TEST_TMPDIR"
-  [ "$status" -eq 0 ]
-  [ -f "$TEST_TMPDIR/backup.tar.gz" ]
-}
-
-@test "backup fails with missing source" {
-  run backup_to_dir "/nonexistent/path"
+@test "fails on missing required argument" {
+  run ./my_script.sh
   [ "$status" -ne 0 ]
-  [[ "$output" == *"not found"* ]]
+  [[ "$output" =~ "required" ]]
 }
 
-@test "validate_email accepts valid email" {
-  run validate_email "alice@example.com"
+@test "creates output file" {
+  run ./my_script.sh --output "${TEST_DIR}/result.txt" input.txt
   [ "$status" -eq 0 ]
+  [ -f "${TEST_DIR}/result.txt" ]
 }
 
-@test "validate_email rejects invalid email" {
-  run validate_email "notanemail"
-  [ "$status" -ne 0 ]
-}
-
-@test "get_config returns value for known key" {
-  echo "DB_HOST=localhost" > "$TEST_TMPDIR/.env"
-  run get_config "$TEST_TMPDIR/.env" "DB_HOST"
+@test "handles spaces in filenames" {
+  local input="${TEST_DIR}/file with spaces.txt"
+  echo "test content" > "$input"
+  run ./my_script.sh "$input"
   [ "$status" -eq 0 ]
-  [ "$output" = "localhost" ]
-}
-
-@test "script requires AWS_BUCKET env var" {
-  unset AWS_BUCKET
-  run bash backup.sh
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"AWS_BUCKET"* ]]
 }
 ```
 
 ```bash
 # Run tests
-bats tests/backup.bats
-bats tests/                    # all test files in directory
-bats -t tests/backup.bats      # show timing
-bats --filter "backup" tests/  # run matching test names
+bats test/my_script.bats
 
-# Output:
-# ✓ script has valid syntax
-# ✓ backup creates output file
-# ✓ backup fails with missing source
-# ✓ validate_email accepts valid email
-# ✓ validate_email rejects invalid email
-# 5 tests, 0 failures
+# Run all test files
+bats test/
+
+# TAP output (for CI integration)
+bats --formatter tap test/
+
+# Parallel execution
+bats --jobs 4 test/
 ```
 
-:::tip[Test Shell Scripts Like Any Code]
-Shell scripts that run in production deserve the same testing discipline as application code. Use bats-core for unit tests, test helper libraries (bats-support, bats-assert, bats-file) for richer assertions, and run shellcheck in your CI pipeline.
-:::
+## Complete Script Template
+
+```bash
+#!/usr/bin/env bash
+# ============================================================
+# template.sh — Script template with all best practices
+# ============================================================
+set -euo pipefail
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_NAME="$(basename "$0")"
+readonly VERSION="1.0.0"
+
+# Default values
+VERBOSE=false
+DRY_RUN=false
+INPUT_FILE=""
+OUTPUT_DIR="./output"
+
+setup_colors() {
+  if [[ -t 2 ]]; then
+    RED='\033[0;31m'; GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'; BLUE='\033[0;34m'; RESET='\033[0m'
+  else
+    RED='' GREEN='' YELLOW='' BLUE='' RESET=''
+  fi
+}
+
+log_info()  { printf "${GREEN}[INFO]${RESET}  %s\n" "$*" >&2; }
+log_warn()  { printf "${YELLOW}[WARN]${RESET}  %s\n" "$*" >&2; }
+log_error() { printf "${RED}[ERROR]${RESET} %s\n" "$*" >&2; }
+die()       { log_error "$@"; exit 1; }
+
+usage() {
+  cat <<EOF
+${SCRIPT_NAME} v${VERSION} — Description here
+
+Usage: ${SCRIPT_NAME} [OPTIONS] <input-file>
+
+Options:
+  -f, --file <path>      Input file path
+  -o, --output <dir>     Output directory (default: ./output)
+  -v, --verbose          Enable verbose output
+  -n, --dry-run          Simulate without making changes
+  -h, --help             Show this help
+      --version          Show version
+
+Examples:
+  ${SCRIPT_NAME} data.csv
+  ${SCRIPT_NAME} -v --output /tmp data.csv
+EOF
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -f|--file)    INPUT_FILE="${2:-}"; shift 2 ;;
+      -o|--output)  OUTPUT_DIR="${2:-}"; shift 2 ;;
+      -v|--verbose) VERBOSE=true; shift ;;
+      -n|--dry-run) DRY_RUN=true; shift ;;
+      -h|--help)    usage; exit 0 ;;
+      --version)    echo "${SCRIPT_NAME} ${VERSION}"; exit 0 ;;
+      --)           shift; break ;;
+      -*)           die "Unknown option: $1" ;;
+      *)            INPUT_FILE="$1"; shift ;;
+    esac
+  done
+}
+
+validate() {
+  [[ -n "$INPUT_FILE" ]] || die "Input file is required"
+  [[ -f "$INPUT_FILE" ]] || die "File not found: $INPUT_FILE"
+}
+
+run_cmd() {
+  "$DRY_RUN" && { log_info "[DRY-RUN] $*"; return 0; }
+  "$@"
+}
+
+cleanup() {
+  local code=$?
+  rm -rf "${TMP_DIR:-}"
+  exit "$code"
+}
+
+main() {
+  setup_colors
+  parse_args "$@"
+  validate
+
+  TMP_DIR=$(mktemp -d)
+  trap cleanup EXIT
+
+  log_info "Processing: $INPUT_FILE"
+  run_cmd mkdir -p "$OUTPUT_DIR"
+  # ... do work ...
+  log_info "Done. Output in: $OUTPUT_DIR"
+}
+
+main "$@"
+```

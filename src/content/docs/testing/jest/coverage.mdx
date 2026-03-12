@@ -1,349 +1,369 @@
 ---
-title: Code Coverage with Jest
-description: Configure Jest coverage reporters, set coverage thresholds, understand coverage providers, read HTML reports, exclude files, and integrate coverage gates into CI pipelines.
+title: Jest Code Coverage
+description: Configure Jest coverage reports, set enforcement thresholds, choose coverage providers, read HTML reports, exclude files, and integrate coverage gates into CI pipelines.
 sidebar:
   order: 7
 tags: [testing, javascript]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-Code coverage measures how much of your source code is executed when your test suite runs. Jest integrates Istanbul (and optionally V8) to collect coverage without any additional tooling.
+Code coverage measures how much of your source code is exercised by your test suite. Jest has built-in coverage support powered by Istanbul (Babel transform) or V8 (native Node.js coverage) — no additional tools required.
 
-## The `--coverage` Flag
-
-Run tests with coverage by passing `--coverage`:
+## Running Coverage
 
 ```bash
+# Run all tests and collect coverage
 npx jest --coverage
+
+# Run coverage for specific files
+npx jest --coverage --testPathPattern=src/services
+
+# Run coverage and open the HTML report
+npx jest --coverage && open coverage/lcov-report/index.html
 ```
 
-Jest produces a summary in the terminal and writes detailed reports to the `coverage/` directory:
+Jest outputs a summary table to the terminal:
 
 ```
---------------------|---------|----------|---------|---------|---------------------------
+--------------------|---------|----------|---------|---------|-------------------
 File                | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s
---------------------|---------|----------|---------|---------|---------------------------
-All files           |   87.50 |    75.00 |   90.00 |   87.50 |
+--------------------|---------|----------|---------|---------|-------------------
+All files           |   87.50 |    75.00 |   90.00 |   88.46 |
  src/               |         |          |         |         |
   math.ts           |  100.00 |   100.00 |  100.00 |  100.00 |
-  string.ts         |   83.33 |    66.67 |   80.00 |   83.33 | 24-27, 45
-  api.ts            |   76.19 |    57.14 |   88.89 |   76.19 | 89, 103-108, 122
---------------------|---------|----------|---------|---------|---------------------------
+  utils.ts          |   80.00 |    50.00 |   83.33 |   81.82 | 24-26, 48
+  api/              |         |          |         |         |
+   client.ts        |   75.00 |    66.67 |   80.00 |   76.92 | 45, 67-71, 89
+--------------------|---------|----------|---------|---------|-------------------
 ```
 
-## What Counts as Covered?
+## The Four Coverage Dimensions
 
-Jest measures four coverage dimensions:
+| Metric | What is measured | Example |
+|---|---|---|
+| **Statements** | Every executable statement executed at least once | `const x = getValue();` |
+| **Branches** | Every conditional branch taken (both true and false paths) | `if (x > 0) { ... } else { ... }` |
+| **Functions** | Every declared function called at least once | `function validate(input) { ... }` |
+| **Lines** | Every source line touched at least once | Line 42 in source file |
 
-| Dimension      | What it measures                                 | Example of a gap                         |
-| -------------- | ------------------------------------------------ | ---------------------------------------- |
-| **Statements** | Individual executable statements                 | An `if` block that is never entered      |
-| **Branches**   | Decision points (if/else, ternary, `&&`, `\|\|`) | An `else` branch never executed          |
-| **Functions**  | Function declarations called at least once       | A utility function never called in tests |
-| **Lines**      | Physical lines containing at least one statement | Any line with untested code              |
-
-Branch coverage is the most valuable metric. A function can have 100% statement coverage but only 50% branch coverage if one side of every `if` condition is always taken.
+**Branch coverage is the most valuable metric.** A function can have 100% statement coverage but only 50% branch coverage — meaning half of your conditional logic is untested.
 
 ```typescript
-// This function has 100% statement coverage if tested with positive numbers
-// but only 50% branch coverage — the `throw` branch is never hit
-function sqrt(n: number): number {
-  if (n < 0) throw new RangeError('Cannot sqrt a negative number'); // untested branch
-  return Math.sqrt(n);
-}
+// This function has 100% statement coverage but only 50% branch coverage
+// if you only test with a positive number
+const describeNumber = (n: number): string => {
+  if (n > 0) {
+    return 'positive'; // ✅ covered
+  } else {
+    return 'non-positive'; // ❌ not covered (missed branch)
+  }
+};
 ```
 
 ## Coverage Reporters
 
-Configure which reporters to generate in `jest.config.ts`:
+Configure reporters in `jest.config.ts`:
 
 ```typescript
 const config: Config = {
   coverageReporters: [
-    'text', // terminal table output (default)
-    'text-summary', // brief terminal summary
-    'lcov', // for SonarQube, Codecov, Coveralls
-    'html', // browsable HTML report at coverage/index.html
-    'json', // raw JSON data at coverage/coverage-final.json
-    'json-summary', // compact summary JSON
-    'clover', // XML format (used by some CI tools)
+    'text',         // Terminal summary table (default)
+    'text-summary', // Single-line summary only
+    'lcov',         // Industry-standard LCOV format (for CI tools, Codecov, Coveralls)
+    'html',         // Human-readable HTML report at coverage/lcov-report/
+    'json',         // Raw JSON at coverage/coverage-final.json
+    'json-summary', // Summary JSON at coverage/coverage-summary.json
+    'clover',       // Clover XML format (for SonarQube, Jenkins)
+    'cobertura',    // Cobertura XML (for Azure DevOps, GitLab)
   ],
+  coverageDirectory: 'coverage', // Where to write reports (default)
 };
 ```
 
-:::tip[Recommended reporter set]
-For most projects, use `['text', 'lcov', 'html']`:
-
-- `text` gives immediate feedback in the terminal
-- `lcov` integrates with Codecov, Coveralls, and SonarQube
-- `html` provides the interactive report for detailed investigation
-  :::
-
-## Coverage Providers
-
-Jest supports two coverage instrumentation engines:
-
 <Tabs>
-  <TabItem label="babel (default)">
-    Istanbul's Babel-based instrumentation. It transforms your source code to inject counter statements before running tests.
+  <TabItem label="text (terminal)">
 
-    ```typescript
-    const config: Config = {
-      coverageProvider: 'babel', // default
-    };
-    ```
+The `text` reporter prints the coverage table directly to your terminal after the test run. Best for quick local feedback.
 
-    **Pros**: Mature, widely supported, works with Babel transforms
-    **Cons**: Slightly slower, can produce inaccurate branch coverage for complex TypeScript
+```
+--------------------|---------|----------|---------|---------|
+File                | % Stmts | % Branch | % Funcs | % Lines |
+--------------------|---------|----------|---------|---------|
+utils/format.ts     |   95.24 |    87.50 |  100.00 |   95.24 |
+utils/validate.ts   |  100.00 |   100.00 |  100.00 |  100.00 |
+--------------------|---------|----------|---------|---------|
+```
 
-</TabItem>
-  <TabItem label="v8">
-    Uses Node.js's built-in V8 coverage engine via `--experimental-vm-modules`. No instrumentation step needed.
+  </TabItem>
+  <TabItem label="lcov (CI)">
 
-    ```typescript
-    const config: Config = {
-      coverageProvider: 'v8',
-    };
-    ```
+The `lcov` reporter writes `coverage/lcov.info` — a standard format understood by:
+- **Codecov** and **Coveralls** for PR coverage comments
+- **SonarQube** for code quality analysis
+- **GitHub Code Coverage annotations**
 
-    **Pros**: More accurate branch detection, faster test execution, no code transformation
-    **Cons**: Requires Node.js 14+, counts switch cases differently, some edge cases in reporting
+```yaml
+# GitHub Actions step to upload coverage to Codecov
+- name: Upload coverage
+  uses: codecov/codecov-action@v4
+  with:
+    files: ./coverage/lcov.info
+```
 
-</TabItem>
+  </TabItem>
+  <TabItem label="html (local)">
+
+The `html` reporter generates an interactive HTML report in `coverage/lcov-report/`. Open `index.html` in a browser to navigate file-by-file and see exactly which lines are covered (green), uncovered (red), or partially covered (yellow).
+
+```bash
+# macOS
+open coverage/lcov-report/index.html
+
+# Linux
+xdg-open coverage/lcov-report/index.html
+
+# Windows
+start coverage/lcov-report/index.html
+```
+
+  </TabItem>
 </Tabs>
 
-## Setting Coverage Thresholds
+## Coverage Thresholds
 
-Fail the test run if coverage drops below a minimum:
+Enforce minimum coverage levels to prevent coverage from declining over time. Tests fail if coverage drops below the threshold.
 
 ```typescript
 const config: Config = {
   coverageThreshold: {
-    // Global thresholds — applied across all files combined
+    // Global thresholds — across all files
     global: {
-      branches: 80,
+      statements: 80,
+      branches: 75,
       functions: 80,
       lines: 80,
-      statements: 80,
     },
-
-    // Per-file thresholds — applied to individual files
-    './src/utils/': {
+    // Per-file thresholds
+    './src/core/auth.ts': {
+      statements: 95,
       branches: 90,
       functions: 100,
-      lines: 90,
-      statements: 90,
-    },
-
-    // Specific file threshold
-    './src/core/auth.ts': {
-      branches: 95,
-      functions: 100,
       lines: 95,
-      statements: 95,
+    },
+    // Glob pattern — all files in a directory
+    './src/services/**/*.ts': {
+      statements: 85,
+      branches: 80,
+      functions: 85,
+      lines: 85,
     },
   },
 };
 ```
 
-When coverage falls below a threshold, Jest exits with a non-zero code and prints:
+When coverage falls below the threshold, Jest exits with a non-zero exit code:
 
 ```
-Jest: "global" coverage threshold for branches (80%) not met: 75%
+Jest: "global" coverage threshold for statements (80%) not met: 74%
+Jest: "global" coverage threshold for branches (75%) not met: 62%
 ```
 
-This makes the CI pipeline fail automatically.
-
-:::caution[Threshold pitfalls]
-Setting thresholds at exactly the current level (e.g., 73%) provides no safety net. Set them at a meaningful floor (e.g., 80%) and treat any violation as a reason to add tests, not lower the threshold.
+:::caution[Thresholds Must Be Intentional]
+Avoid setting thresholds at or just below your current coverage percentage. The purpose of thresholds is to prevent regression. Start at a realistic floor and raise it gradually as coverage improves.
 :::
 
-## Specifying Which Files to Collect Coverage From
+## Coverage Providers
 
-By default, Jest only collects coverage from files that are imported in at least one test. To report coverage for all source files (including untested ones), use `collectCoverageFrom`:
+Jest supports two coverage collection engines:
 
 ```typescript
 const config: Config = {
-  collectCoverage: true, // always collect, not just with --coverage flag
+  // 'babel' (default) or 'v8'
+  coverageProvider: 'babel',
+};
+```
+
+| Feature | `babel` (Istanbul) | `v8` (Node.js native) |
+|---|---|---|
+| Requires transform | Yes | No (works on native code) |
+| Speed | Moderate | Faster (native instrumentation) |
+| Accuracy | High | Higher for branch coverage |
+| Source maps | Excellent | Good |
+| TypeScript support | Via ts-jest / babel | Good with source maps |
+| Recommended for | Most projects | Pure Node.js, ESM |
+
+:::tip[Which Provider to Choose?]
+Use `babel` (the default) for most TypeScript and React projects. Use `v8` if your project uses native ESM, you're on Node.js 18+, or you notice the babel coverage is slower than acceptable.
+:::
+
+## Specifying Which Files to Cover
+
+By default, Jest only reports coverage for files that are `require()`d by your tests. Files that are never imported will not appear in the report, making coverage look better than it is.
+
+```typescript
+const config: Config = {
+  // Collect coverage from ALL source files, even unimported ones
   collectCoverageFrom: [
-    'src/**/*.{ts,tsx}', // all TypeScript source files
-    '!src/**/*.d.ts', // exclude type declarations
-    '!src/**/*.stories.{ts,tsx}', // exclude Storybook stories
-    '!src/**/index.ts', // exclude barrel files
-    '!src/mocks/**', // exclude mock files
-    '!src/setupTests.ts', // exclude test setup
-    '!src/**/__tests__/**', // exclude test files themselves
+    'src/**/*.{ts,tsx}',
+    '!src/**/*.d.ts',                 // Exclude type declaration files
+    '!src/**/*.stories.{ts,tsx}',     // Exclude Storybook stories
+    '!src/**/__mocks__/**',            // Exclude mock files
+    '!src/**/index.{ts,tsx}',         // Exclude barrel files (re-exports only)
+    '!src/main.tsx',                  // Exclude application entry point
+    '!src/types/**',                  // Exclude type-only files
   ],
 };
 ```
 
-### Excluding files with `coveragePathIgnorePatterns`
+### Excluding Files with Comments
+
+You can exclude specific blocks of code from coverage using inline comments:
 
 ```typescript
-const config: Config = {
-  coveragePathIgnorePatterns: [
-    '/node_modules/',
-    '/dist/',
-    '/coverage/',
-    '\\.stories\\.tsx?$',
-    '/src/generated/',
-  ],
-};
-```
+/* istanbul ignore file */  // Exclude entire file from coverage
 
-### Excluding specific lines or blocks
-
-Use Istanbul comments to exclude specific code from coverage:
-
-```typescript
-// Exclude a single line
-const value =
-  process.env.NODE_ENV === 'production' /* istanbul ignore next */
-    ? 'prod'
-    : 'dev';
-
-// Exclude a block
-/* istanbul ignore next */
-if (process.env.DEBUG) {
-  console.log('Debug mode enabled');
+function handler() {
+  /* istanbul ignore next */
+  if (process.env.NODE_ENV === 'production') {
+    // This branch is hard to test in unit tests
+    sendMetrics();
+  }
 }
 
-// Exclude the else branch only
-if (condition) {
-  doSomething();
-} else /* istanbul ignore else */ {
-  // This branch is impossible in practice
-  throw new Error('Unreachable');
+// Ignore the next branch
+/* istanbul ignore else */
+if (isFeatureEnabled) {
+  newFeature();
+} else {
+  legacyFeature();
 }
 ```
-
-:::tip[Use sparingly]
-Reserve Istanbul ignore comments for code that is genuinely untestable (platform-specific code paths, debug-only branches, generated code). Don't use them to inflate coverage numbers.
-:::
 
 ## Reading the HTML Report
 
-After running `jest --coverage`, open `coverage/index.html` in a browser:
+The HTML report provides line-by-line coverage visualization:
 
-<Steps>
-  1. **Summary page** — shows all files with coloured bars for each coverage
-  dimension. Red = below threshold, yellow = partial coverage, green = well
-  covered. 2. **File view** — click a file to see line-by-line coverage. Red
-  lines are untested. Yellow lines have partial branch coverage (shown with
-  `I`/`E` for if/else). 3. **Branch indicators** — hover over a branch indicator
-  to see which side is covered and which is not. 4. **Function list** — scroll
-  to the function list at the bottom to see which functions have never been
-  called.
-</Steps>
+- 🟢 **Green lines** — executed by at least one test
+- 🔴 **Red lines** — never executed
+- 🟡 **Yellow lines** — partially covered (e.g., `if/else` where only one branch ran)
+- **Branch indicators** — `E` (else branch not taken) and `I` (if branch not taken) appear inline
 
-## Testing Untested Branches
+Navigate to a specific file to see exactly which lines need additional tests:
 
-After identifying uncovered branches in the HTML report, write targeted tests:
-
-```typescript
-// src/utils/formatDate.ts
-export function formatDate(
-  date: Date | string | null,
-  format: 'short' | 'long' = 'short',
-): string {
-  if (!date) return '—'; // branch: null/undefined
-  const d = typeof date === 'string' ? new Date(date) : date; // branch: string vs Date
-  if (isNaN(d.getTime())) return 'Invalid date'; // branch: invalid date string
-
-  if (format === 'long') {
-    return d.toLocaleDateString('en-GB', {
-      day: 'numeric',
-      month: 'long',
-      year: 'numeric',
-    });
-  }
-  return d.toLocaleDateString('en-GB');
-}
+```
+  42 |  const processPayment = async (amount: number, method: string) => {
+  43 |    if (amount <= 0) {                     // ← Branch: else not taken (E)
+  44 |      throw new ValidationError('...');    // ← Red: never executed
+  45 |    }
+  46 |    if (method === 'crypto') {             // ← Branch: if not taken (I)
+  47 |      return cryptoGateway.charge(amount); // ← Red: never executed
+  48 |    }
+  49 |    return stripeGateway.charge(amount);   // ← Green: executed
+  50 |  };
 ```
 
+## Testing Uncovered Branches
+
+When the HTML report reveals uncovered branches, add targeted tests:
+
 ```typescript
-// Branch-targeted test cases
-describe('formatDate', () => {
-  it('returns em-dash for null', () => expect(formatDate(null)).toBe('—')); // covers null branch
-  it('returns em-dash for undefined', () =>
-    expect(formatDate(undefined as any)).toBe('—'));
-  it('accepts a string input', () =>
-    expect(formatDate('2024-01-15')).toBeTruthy()); // covers string branch
-  it('accepts a Date input', () =>
-    expect(formatDate(new Date('2024-01-15'))).toBeTruthy());
-  it('returns Invalid date for bad string', () =>
-    expect(formatDate('not-a-date')).toBe('Invalid date'));
-  it('uses long format when specified', () =>
-    expect(formatDate(new Date('2024-01-15'), 'long')).toContain('January'));
+// Before: only the happy path was tested
+it('processes a valid payment', async () => {
+  const result = await processPayment(100, 'card');
+  expect(result.success).toBe(true);
+});
+
+// After: added tests for all uncovered branches
+it('throws ValidationError for zero amount', async () => {
+  await expect(processPayment(0, 'card')).rejects.toThrow(ValidationError);
+});
+
+it('throws ValidationError for negative amount', async () => {
+  await expect(processPayment(-50, 'card')).rejects.toThrow(ValidationError);
+});
+
+it('routes to crypto gateway when method is crypto', async () => {
+  const mockCharge = jest.spyOn(cryptoGateway, 'charge').mockResolvedValue({ success: true });
+  await processPayment(100, 'crypto');
+  expect(mockCharge).toHaveBeenCalledWith(100);
 });
 ```
 
-## 100% Coverage Pitfalls
+## 100% Coverage — Pitfalls and Realistic Goals
 
-Achieving 100% code coverage does not mean your code is bug-free. A test can execute every line without making any useful assertions.
+:::caution[100% Coverage Can Be Misleading]
+100% statement coverage does not mean your code is bug-free. You can have 100% coverage and still miss:
+- Edge cases (empty strings, null inputs, boundary values)
+- Concurrent execution bugs
+- Integration mismatches between modules
+- Incorrect business logic that passes wrong inputs to functions
 
-```typescript
-// This test gives 100% coverage but tests nothing meaningful
-test('bad test', () => {
-  formatDate(new Date()); // line is hit
-  formatDate('2024-01-15'); // line is hit
-  formatDate(null); // line is hit
-  expect(true).toBe(true); // useless assertion
-});
-```
-
-**Meaningful coverage means:**
-
-- Each test has clear `expect()` assertions tied to the specific branch being tested
-- Edge cases are tested, not just the happy path
-- Negative test cases (invalid inputs, error conditions) are covered
-
-:::caution[100% coverage can be counterproductive]
-Chasing 100% coverage on every file leads to brittle tests and wasted effort. Focus on critical business logic, utility functions with complex branching, and error handling paths. Allow lower coverage on configuration files, simple data models, and generated code.
+Cover behaviour, not lines.
 :::
 
-## CI Integration
+A healthy coverage strategy:
 
-A complete CI workflow with coverage:
+| Code type | Suggested threshold |
+|---|---|
+| Core business logic | 90–100% branches |
+| API handlers / controllers | 85%+ |
+| Utility functions | 95–100% |
+| React components | 80–90% |
+| Configuration files | Exclude |
+| Migrations | Exclude |
+| Generated code | Exclude |
+
+## CI Integration
 
 ```yaml
 # .github/workflows/test.yml
 - name: Run tests with coverage
-  run: npx jest --ci --coverage --maxWorkers=2
+  run: npm run test:ci
+  env:
+    CI: true
 
 - name: Upload coverage to Codecov
   uses: codecov/codecov-action@v4
   with:
     files: ./coverage/lcov.info
     fail_ci_if_error: true
-    token: ${{ secrets.CODECOV_TOKEN }}
-
-- name: Upload HTML coverage report
-  uses: actions/upload-artifact@v4
-  if: always()
-  with:
-    name: coverage-report
-    path: coverage/
-    retention-days: 30
 ```
 
-### `--ci` flag differences
+```json
+// package.json
+{
+  "scripts": {
+    "test:ci": "jest --ci --coverage --coverageReporters=lcov --coverageReporters=text-summary"
+  }
+}
+```
 
-The `--ci` flag makes Jest behave differently for CI environments:
+In your `jest.config.ts`, the `--ci` flag:
+- Disables watch mode
+- Fails when snapshots are out of date (instead of updating them)
+- Uses a reporter optimised for CI output
+- Does not write to the interactive terminal
 
-| Default mode                        | CI mode (`--ci`)                  |
-| ----------------------------------- | --------------------------------- |
-| Re-runs changed tests first         | Runs all tests (no priority)      |
-| Interactive watch mode available    | Non-interactive                   |
-| Creates new snapshots automatically | Fails if new snapshots are needed |
-| Slower with `--maxWorkers=auto`     | Same                              |
+```typescript
+const config: Config = {
+  // Fail CI if coverage drops below these levels
+  coverageThreshold: {
+    global: {
+      statements: 80,
+      branches: 75,
+      functions: 80,
+      lines: 80,
+    },
+  },
+};
+```
 
-Always use `--ci` in your CI pipeline to catch snapshot drift and ensure deterministic runs.
+When coverage thresholds are not met in CI, the job exits with code 1, blocking the merge:
+
+```
+FAIL coverage threshold not met:
+  statements: 74% (required: 80%)
+
+npm ERR! Test failed. See above for more details.
+```

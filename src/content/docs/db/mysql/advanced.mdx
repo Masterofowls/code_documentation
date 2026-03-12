@@ -1,428 +1,391 @@
 ---
 title: MySQL Advanced
-description: Stored procedures, triggers, events, JSON functions, partitioning, replication, InnoDB internals, Performance Schema, and the sys schema.
+description: Views, stored procedures, functions, triggers, events, JSON functions, partitioning, replication, and InnoDB internals.
 sidebar:
   order: 5
 tags: [database, sql]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
 # MySQL Advanced
 
+This section covers MySQL's programmability features, JSON capabilities, partitioning strategies, replication architecture, and deep InnoDB internals.
+
 ## Views
 
-A view is a named SQL query stored in the database. It behaves like a virtual table.
+A view is a stored `SELECT` statement that can be queried like a table.
 
 ```sql
--- Create a view
-CREATE VIEW v_active_orders AS
-  SELECT o.id, o.created_at, u.name AS customer, o.total
-  FROM orders o
-  JOIN users u ON o.user_id = u.id
-  WHERE o.status != 'cancelled';
+-- Create a basic view
+CREATE VIEW active_users AS
+SELECT id, name, email, created_at
+FROM users
+WHERE deleted_at IS NULL;
 
--- Use it like a table
-SELECT * FROM v_active_orders WHERE total > 100;
+-- Query the view
+SELECT * FROM active_users WHERE created_at > '2024-01-01';
 
--- Replace existing view
-CREATE OR REPLACE VIEW v_active_orders AS
-  SELECT o.id, o.created_at, o.status, u.name AS customer, o.total
-  FROM orders o
-  JOIN users u ON o.user_id = u.id
-  WHERE o.status NOT IN ('cancelled', 'refunded');
+-- Create or replace
+CREATE OR REPLACE VIEW active_users AS
+SELECT id, name, email, last_login, created_at
+FROM users
+WHERE deleted_at IS NULL AND is_active = 1;
 
--- Drop a view
-DROP VIEW IF EXISTS v_active_orders;
-
--- List views
-SELECT TABLE_NAME FROM information_schema.VIEWS
-WHERE TABLE_SCHEMA = 'myapp';
-```
-
-### WITH CHECK OPTION
-
-Prevents INSERT/UPDATE through a view that would make the row "invisible" through the view's WHERE clause.
-
-```sql
-CREATE VIEW v_premium_users AS
-  SELECT * FROM users WHERE account_type = 'premium'
+-- WITH CHECK OPTION: prevent writes through the view that would make the row invisible
+CREATE VIEW high_value_orders AS
+SELECT * FROM orders WHERE total > 1000
 WITH CHECK OPTION;
 
--- This succeeds (account_type = 'premium')
-UPDATE v_premium_users SET name = 'Bob' WHERE id = 42;
+-- This will ERROR because the inserted row would not be visible through the view:
+INSERT INTO high_value_orders (user_id, total) VALUES (1, 50);  -- ERROR
 
--- This fails (would change account_type away from 'premium')
-UPDATE v_premium_users SET account_type = 'free' WHERE id = 42;
--- ERROR: CHECK OPTION failed 'myapp.v_premium_users'
+-- Updatable views (must meet all conditions):
+-- 1. Based on a single table
+-- 2. No DISTINCT, GROUP BY, HAVING, UNION
+-- 3. No subqueries in WHERE that reference the same table
+-- 4. No aggregate functions
+-- 5. No subqueries in SELECT list
+
+-- Show view definition
+SHOW CREATE VIEW active_users\G
+
+-- List all views in current database
+SELECT TABLE_NAME, VIEW_DEFINITION
+FROM information_schema.VIEWS
+WHERE TABLE_SCHEMA = DATABASE();
+
+-- Drop a view
+DROP VIEW IF EXISTS active_users;
 ```
-
-### Updatable Views
-
-A view is updatable if it:
-
-- References exactly one base table
-- Contains no DISTINCT, GROUP BY, HAVING, UNION, or aggregate functions
-- Uses no subqueries in SELECT
-- Has no LIMIT clause (with UPDATE/DELETE)
-- Has no non-updatable view in FROM
 
 ## Stored Procedures
 
-```sql
--- Change delimiter so semicolons in the body don't end the statement
-DELIMITER //
+Stored procedures encapsulate SQL logic on the server, reducing network round-trips and centralizing business logic.
 
-CREATE PROCEDURE transfer_funds(
-  IN  from_account INT,
-  IN  to_account   INT,
-  IN  amount       DECIMAL(15,2),
-  OUT result_msg   VARCHAR(255)
+```sql
+-- Change the delimiter so semicolons inside the procedure don't end the statement
+DELIMITER $$
+
+CREATE PROCEDURE get_user_orders(
+  IN  p_user_id  INT,
+  IN  p_status   VARCHAR(50),
+  OUT p_total    DECIMAL(10,2)
 )
 BEGIN
-  DECLARE from_balance DECIMAL(15,2);
-  DECLARE EXIT HANDLER FOR SQLEXCEPTION
-  BEGIN
-    ROLLBACK;
-    SET result_msg = 'Transfer failed: database error';
-  END;
-
-  START TRANSACTION;
-
-  SELECT balance INTO from_balance FROM accounts WHERE id = from_account FOR UPDATE;
-
-  IF from_balance < amount THEN
-    SET result_msg = 'Insufficient funds';
-    ROLLBACK;
-  ELSE
-    UPDATE accounts SET balance = balance - amount WHERE id = from_account;
-    UPDATE accounts SET balance = balance + amount WHERE id = to_account;
-    COMMIT;
-    SET result_msg = CONCAT('Transfer of ', amount, ' completed successfully');
-  END IF;
-END //
+  -- DECLARE variables at the top of the BEGIN block
+  DECLARE v_count INT DEFAULT 0;
+  DECLARE v_done  BOOLEAN DEFAULT FALSE;
+  DECLARE v_order_id INT;
+  DECLARE v_amount   DECIMAL(10,2);
+  
+  -- Cursor for iterating rows
+  DECLARE order_cursor CURSOR FOR
+    SELECT id, total FROM orders
+    WHERE user_id = p_user_id
+      AND (p_status IS NULL OR status = p_status);
+  
+  -- Handler: set v_done=TRUE when cursor runs out of rows
+  DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
+  
+  -- Initialize output parameter
+  SET p_total = 0;
+  
+  OPEN order_cursor;
+  
+  read_loop: LOOP
+    FETCH order_cursor INTO v_order_id, v_amount;
+    IF v_done THEN
+      LEAVE read_loop;
+    END IF;
+    
+    SET p_total = p_total + v_amount;
+    SET v_count = v_count + 1;
+  END LOOP read_loop;
+  
+  CLOSE order_cursor;
+  
+  -- Return result set
+  SELECT id, total, status, created_at
+  FROM orders
+  WHERE user_id = p_user_id
+    AND (p_status IS NULL OR status = p_status)
+  ORDER BY created_at DESC;
+  
+END$$
 
 DELIMITER ;
 
 -- Call the procedure
-CALL transfer_funds(101, 202, 500.00, @msg);
-SELECT @msg;
-```
+CALL get_user_orders(42, 'delivered', @user_total);
+SELECT @user_total AS total_spent;
 
-### Procedure Control Flow
-
-```sql
-DELIMITER //
-
-CREATE PROCEDURE process_pending_orders()
+-- Procedure with WHILE loop
+DELIMITER $$
+CREATE PROCEDURE populate_calendar(IN p_start DATE, IN p_end DATE)
 BEGIN
-  DECLARE done INT DEFAULT FALSE;
-  DECLARE order_id INT;
-  DECLARE order_total DECIMAL(10,2);
-
-  -- Cursor declaration
-  DECLARE order_cursor CURSOR FOR
-    SELECT id, total FROM orders WHERE status = 'pending' ORDER BY created_at;
-
-  -- Handler for when cursor runs out of rows
-  DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
-
-  OPEN order_cursor;
-
-  read_loop: LOOP
-    FETCH order_cursor INTO order_id, order_total;
-
-    IF done THEN
-      LEAVE read_loop;
-    END IF;
-
-    -- Process each order
-    IF order_total > 1000 THEN
-      UPDATE orders SET status = 'flagged', flagged_at = NOW() WHERE id = order_id;
-    ELSE
-      UPDATE orders SET status = 'processing' WHERE id = order_id;
-    END IF;
-
-  END LOOP read_loop;
-
-  CLOSE order_cursor;
-END //
-
--- WHILE loop example
-CREATE PROCEDURE generate_sequence(IN n INT)
-BEGIN
-  DECLARE i INT DEFAULT 1;
-  WHILE i <= n DO
-    INSERT INTO sequence_table (num) VALUES (i);
-    SET i = i + 1;
+  DECLARE v_date DATE DEFAULT p_start;
+  WHILE v_date <= p_end DO
+    INSERT IGNORE INTO calendar (date_value, year, month, day_of_week)
+    VALUES (v_date, YEAR(v_date), MONTH(v_date), DAYOFWEEK(v_date));
+    SET v_date = DATE_ADD(v_date, INTERVAL 1 DAY);
   END WHILE;
-END //
-
+END$$
 DELIMITER ;
-```
 
-### Managing Procedures
-
-```sql
--- List procedures
-SHOW PROCEDURE STATUS WHERE Db = 'myapp'\G
-SELECT ROUTINE_NAME, ROUTINE_TYPE, CREATED, LAST_ALTERED
-FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = 'myapp';
-
--- View procedure definition
-SHOW CREATE PROCEDURE transfer_funds\G
-
--- Drop a procedure
-DROP PROCEDURE IF EXISTS transfer_funds;
+-- Error handling in procedures
+DELIMITER $$
+CREATE PROCEDURE safe_transfer(IN from_id INT, IN to_id INT, IN amount DECIMAL(10,2))
+BEGIN
+  DECLARE EXIT HANDLER FOR SQLEXCEPTION
+  BEGIN
+    ROLLBACK;
+    RESIGNAL;  -- Re-raise the error to caller
+  END;
+  
+  START TRANSACTION;
+    UPDATE accounts SET balance = balance - amount WHERE id = from_id;
+    UPDATE accounts SET balance = balance + amount WHERE id = to_id;
+  COMMIT;
+END$$
+DELIMITER ;
 ```
 
 ## Stored Functions
 
-Unlike procedures, functions return a single value and can be used in SQL expressions.
+Stored functions return a single value and can be used in SQL expressions.
 
 ```sql
-DELIMITER //
+DELIMITER $$
 
-CREATE FUNCTION get_age(birth_date DATE)
-  RETURNS INT
-  DETERMINISTIC
-  NO SQL
+CREATE FUNCTION calculate_age(p_birth_date DATE)
+RETURNS INT
+DETERMINISTIC        -- Same input always gives same output (important for replication)
+READS SQL DATA       -- Function reads from tables (NO SQL | CONTAINS SQL | MODIFIES SQL DATA)
 BEGIN
-  RETURN TIMESTAMPDIFF(YEAR, birth_date, CURDATE());
-END //
+  RETURN TIMESTAMPDIFF(YEAR, p_birth_date, CURDATE());
+END$$
 
--- Function characteristics:
--- DETERMINISTIC: same inputs always produce same output (enables caching/optimization)
--- NOT DETERMINISTIC: default; outputs may vary (e.g., uses NOW())
--- NO SQL: doesn't read or write any tables
--- READS SQL DATA: reads but doesn't modify tables (SELECT only)
--- MODIFIES SQL DATA: may modify tables (allows INSERT/UPDATE/DELETE)
--- CONTAINS SQL: default; may contain SQL (but not read/write data)
+-- Use in queries like a built-in function
+SELECT name, calculate_age(birth_date) AS age
+FROM users
+WHERE calculate_age(birth_date) >= 18;
 
-CREATE FUNCTION calculate_discount(
-  base_price   DECIMAL(10,2),
-  account_type ENUM('standard', 'premium', 'vip')
-)
-  RETURNS DECIMAL(10,2)
-  DETERMINISTIC
-  NO SQL
+-- Function with table access
+CREATE FUNCTION get_user_email(p_user_id INT)
+RETURNS VARCHAR(255)
+READS SQL DATA
 BEGIN
-  RETURN CASE account_type
-    WHEN 'vip'     THEN base_price * 0.80
-    WHEN 'premium' THEN base_price * 0.90
-    ELSE                base_price
-  END;
-END //
+  DECLARE v_email VARCHAR(255);
+  SELECT email INTO v_email FROM users WHERE id = p_user_id LIMIT 1;
+  RETURN v_email;
+END$$
 
 DELIMITER ;
 
--- Use in a query
-SELECT
-  name,
-  get_age(birth_date) AS age,
-  calculate_discount(price, account_type) AS discounted_price
-FROM users
-JOIN products;
+-- Drop
+DROP FUNCTION IF EXISTS calculate_age;
+
+-- List stored procedures and functions
+SELECT ROUTINE_TYPE, ROUTINE_NAME, CREATED, LAST_ALTERED
+FROM information_schema.ROUTINES
+WHERE ROUTINE_SCHEMA = DATABASE()
+ORDER BY ROUTINE_TYPE, ROUTINE_NAME;
 ```
+
+:::tip[DETERMINISTIC Matters for Replication]
+Always declare a function `DETERMINISTIC` if the same inputs always produce the same output (no calls to `NOW()`, `RAND()`, etc.). Non-deterministic functions on a replication master using statement-based binary logging require `log_bin_trust_function_creators=1`, which is a security concern.
+:::
 
 ## Triggers
 
-Triggers execute automatically when a DML event occurs on a table.
+Triggers fire automatically in response to `INSERT`, `UPDATE`, or `DELETE` events.
 
 ```sql
-DELIMITER //
+DELIMITER $$
 
--- Audit log trigger: log every update to the users table
-CREATE TRIGGER trg_users_after_update
-  AFTER UPDATE ON users
-  FOR EACH ROW
+-- AFTER INSERT: audit log when a new user registers
+CREATE TRIGGER after_user_insert
+AFTER INSERT ON users
+FOR EACH ROW
 BEGIN
-  INSERT INTO audit_log (
-    table_name, record_id, action,
-    old_values, new_values, changed_at, changed_by
-  ) VALUES (
-    'users',
-    OLD.id,
-    'UPDATE',
-    JSON_OBJECT('name', OLD.name, 'email', OLD.email, 'status', OLD.status),
-    JSON_OBJECT('name', NEW.name, 'email', NEW.email, 'status', NEW.status),
-    NOW(),
-    CURRENT_USER()
-  );
-END //
+  INSERT INTO audit_log (table_name, action, record_id, new_values, created_at)
+  VALUES ('users', 'INSERT', NEW.id,
+    JSON_OBJECT('email', NEW.email, 'name', NEW.name),
+    NOW());
+END$$
 
--- BEFORE INSERT: auto-populate derived fields
-CREATE TRIGGER trg_products_before_insert
-  BEFORE INSERT ON products
-  FOR EACH ROW
+-- BEFORE UPDATE: automatically set updated_at
+CREATE TRIGGER before_order_update
+BEFORE UPDATE ON orders
+FOR EACH ROW
 BEGIN
-  IF NEW.slug IS NULL OR NEW.slug = '' THEN
-    SET NEW.slug = LOWER(REPLACE(NEW.name, ' ', '-'));
-  END IF;
-  SET NEW.created_at = NOW();
-END //
-
--- BEFORE DELETE: prevent deletion of referenced records
-CREATE TRIGGER trg_orders_before_delete
-  BEFORE DELETE ON orders
-  FOR EACH ROW
-BEGIN
-  IF OLD.status NOT IN ('cancelled', 'refunded') THEN
+  SET NEW.updated_at = NOW();
+  
+  -- Prevent status from going backwards
+  IF OLD.status = 'delivered' AND NEW.status != 'delivered' THEN
     SIGNAL SQLSTATE '45000'
-      SET MESSAGE_TEXT = 'Cannot delete non-cancelled orders';
+      SET MESSAGE_TEXT = 'Cannot change status of a delivered order';
   END IF;
-END //
+END$$
+
+-- BEFORE DELETE: soft-delete enforcement
+CREATE TRIGGER before_user_delete
+BEFORE DELETE ON users
+FOR EACH ROW
+BEGIN
+  -- Archive to deleted_users table before deletion
+  INSERT INTO deleted_users (user_id, email, name, deleted_at)
+  VALUES (OLD.id, OLD.email, OLD.name, NOW());
+END$$
 
 DELIMITER ;
-```
 
-### Trigger Limitations
+-- NEW = the new row value (available in INSERT and UPDATE)
+-- OLD = the old row value (available in UPDATE and DELETE)
 
-- Cannot use `CALL` to invoke a stored procedure that modifies the same table being triggered
-- Cannot modify tables that are already being used by the statement that invoked the trigger
-- A table can have at most one trigger per event/timing combination (BEFORE INSERT, AFTER INSERT, BEFORE UPDATE, etc.)
-- Triggers don't fire for `TRUNCATE TABLE`
-- Cannot use transactions within a trigger (transactions are inherited from the calling statement)
+-- MySQL trigger limitations:
+-- Cannot call a stored procedure that returns a result set
+-- Cannot use CALL with transactions in some cases
+-- One trigger per event/timing combination per table (no stacking in older versions)
+-- MySQL 5.7+ allows multiple triggers per event
 
-```sql
--- List triggers
-SHOW TRIGGERS FROM myapp\G
+-- Show triggers
+SHOW TRIGGERS FROM mydb\G
 SELECT TRIGGER_NAME, EVENT_MANIPULATION, EVENT_OBJECT_TABLE, ACTION_TIMING
-FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = 'myapp';
+FROM information_schema.TRIGGERS
+WHERE TRIGGER_SCHEMA = DATABASE();
 
--- Drop trigger
-DROP TRIGGER IF EXISTS trg_users_after_update;
+-- Drop a trigger
+DROP TRIGGER IF EXISTS after_user_insert;
 ```
 
-## Events (Scheduled Tasks)
+## Events (Scheduled Jobs)
 
-MySQL Events are like cron jobs inside the database.
+MySQL Events let you schedule SQL tasks to run automatically.
 
 ```sql
--- Enable the event scheduler
-SET GLOBAL event_scheduler = ON;
+-- Enable the event scheduler (must be ON)
 SHOW VARIABLES LIKE 'event_scheduler';
+SET GLOBAL event_scheduler = ON;
 
 -- One-time event
-CREATE EVENT evt_send_welcome_emails
-  ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 HOUR
-  DO
-    UPDATE users SET welcome_sent = 1 WHERE created_at > DATE_SUB(NOW(), INTERVAL 1 DAY);
+CREATE EVENT cleanup_old_sessions
+ON SCHEDULE AT NOW() + INTERVAL 1 HOUR
+DO DELETE FROM sessions WHERE expires_at < NOW();
 
--- Recurring event
-CREATE EVENT evt_cleanup_old_sessions
-  ON SCHEDULE EVERY 1 HOUR
-  STARTS CURRENT_TIMESTAMP
-  ON COMPLETION PRESERVE      -- keep event after it runs (default is DROP)
-  ENABLE
-  COMMENT 'Remove expired sessions every hour'
-  DO
-    DELETE FROM sessions WHERE expires_at < NOW() LIMIT 10000;
+-- Recurring event: run every day at 2 AM
+CREATE EVENT daily_cleanup
+ON SCHEDULE EVERY 1 DAY
+STARTS '2024-01-16 02:00:00'
+ON COMPLETION PRESERVE    -- Keep the event after it finishes (otherwise it's dropped)
+ENABLE
+COMMENT 'Purge expired sessions and temp data'
+DO
+BEGIN
+  DELETE FROM sessions WHERE expires_at < NOW() - INTERVAL 7 DAY;
+  DELETE FROM temp_exports WHERE created_at < NOW() - INTERVAL 24 HOUR;
+  INSERT INTO maintenance_log (task, ran_at) VALUES ('daily_cleanup', NOW());
+END;
 
--- Complex recurring event with BEGIN/END
-DELIMITER //
-CREATE EVENT evt_daily_summary
-  ON SCHEDULE EVERY 1 DAY
-  STARTS '2024-01-01 02:00:00'
-  ON COMPLETION PRESERVE
-  DO
-  BEGIN
-    -- Build daily summary
-    INSERT INTO daily_stats (date, order_count, revenue)
-    SELECT CURDATE() - INTERVAL 1 DAY,
-           COUNT(*),
-           SUM(total)
-    FROM orders
-    WHERE DATE(created_at) = CURDATE() - INTERVAL 1 DAY;
+-- Disable/enable an event
+ALTER EVENT daily_cleanup DISABLE;
+ALTER EVENT daily_cleanup ENABLE;
 
-    -- Purge old data
-    DELETE FROM temp_calculations WHERE created_at < DATE_SUB(NOW(), INTERVAL 7 DAY);
-  END //
-DELIMITER ;
+-- Show events
+SHOW EVENTS FROM mydb\G
 
--- Manage events
-SHOW EVENTS FROM myapp\G
-ALTER EVENT evt_cleanup_old_sessions DISABLE;
-ALTER EVENT evt_cleanup_old_sessions ENABLE;
-DROP EVENT IF EXISTS evt_cleanup_old_sessions;
+-- Drop event
+DROP EVENT IF EXISTS daily_cleanup;
 ```
 
-## JSON Functions
-
-MySQL 5.7 introduced a native JSON type and rich set of functions. MySQL 8.0 further expanded them.
+## MySQL JSON Functions
 
 ```sql
--- Creating JSON
-SELECT JSON_OBJECT('name', 'Alice', 'age', 30, 'active', true);
--- '{"name": "Alice", "age": 30, "active": true}'
+-- Sample data
+CREATE TABLE config (
+  id   INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(100),
+  data JSON
+);
 
-SELECT JSON_ARRAY(1, 2, 'three', null, true);
--- '[1, 2, "three", null, true]'
+INSERT INTO config (name, data) VALUES ('app_settings', '{
+  "theme": "dark",
+  "notifications": {"email": true, "sms": false},
+  "limits": {"api_calls": 1000, "storage_mb": 5120},
+  "tags": ["beta", "premium"]
+}');
 
--- Extracting values
-SELECT JSON_EXTRACT('{"name":"Alice","age":30}', '$.name');   -- "Alice"
-SELECT '{"name":"Alice","age":30}'->'$.name';                  -- "Alice" (quoted)
-SELECT '{"name":"Alice","age":30}'->>'$.name';                 -- Alice (unquoted)
+-- Extract values
+SELECT
+  data->'$.theme'                          AS theme,            -- Returns JSON (quoted)
+  data->>'$.theme'                         AS theme_text,       -- Returns string (unquoted)
+  JSON_EXTRACT(data, '$.notifications.email') AS email_notifs,
+  data->'$.limits.api_calls'               AS api_calls,
+  data->'$.tags[0]'                        AS first_tag
+FROM config;
 
--- Nested paths
-SELECT data->>'$.address.city' FROM users;
-SELECT data->>'$.tags[0]' FROM articles;       -- first array element
+-- Modify JSON
+UPDATE config SET data = JSON_SET(data,
+  '$.theme', 'light',
+  '$.limits.api_calls', 2000
+) WHERE name = 'app_settings';
 
--- Modifying JSON
-SELECT JSON_SET('{"a":1,"b":2}', '$.c', 3);                -- add/update key
-SELECT JSON_INSERT('{"a":1}', '$.b', 2);                   -- add only (skip if exists)
-SELECT JSON_REPLACE('{"a":1,"b":2}', '$.a', 99);           -- update only (skip if not exists)
-SELECT JSON_REMOVE('{"a":1,"b":2,"c":3}', '$.b');          -- remove key
+-- JSON_INSERT (only inserts, doesn't overwrite)
+-- JSON_REPLACE (only replaces, doesn't insert)
+-- JSON_REMOVE (removes a key)
+UPDATE config SET data = JSON_REMOVE(data, '$.notifications.sms');
 
--- Searching
-SELECT JSON_CONTAINS('{"tags":["mysql","index"]}', '"mysql"', '$.tags');  -- 1
-SELECT JSON_CONTAINS_PATH('{"a":{"b":1}}', 'one', '$.a.b');  -- 1
-SELECT JSON_SEARCH('{"tags":["mysql","index"]}', 'one', 'mysql');  -- "$.tags[0]"
+-- Build JSON values
+SELECT
+  JSON_ARRAY(1, 2, 3, 'four'),              -- [1, 2, 3, "four"]
+  JSON_OBJECT('name', 'Alice', 'age', 30),  -- {"name": "Alice", "age": 30}
+  JSON_MERGE_PATCH('{"a":1}', '{"b":2}'),  -- {"a":1,"b":2}
+  JSON_PRETTY(data)                         -- Formatted output
+FROM config;
 
--- Array operations
-SELECT JSON_LENGTH('[1,2,3,4,5]');                          -- 5
-SELECT JSON_LENGTH('{"a":1,"b":2}');                        -- 2 (key count)
-SELECT JSON_DEPTH('{"a":{"b":{"c":1}}}');                   -- 3
-SELECT JSON_TYPE('"hello"');                                 -- STRING
-SELECT JSON_TYPE('42');                                      -- INTEGER
-SELECT JSON_KEYS('{"name":"Alice","age":30}');               -- ["name", "age"]
+-- Search within JSON
+SELECT * FROM config WHERE JSON_CONTAINS(data->'$.tags', '"beta"');
+SELECT * FROM config WHERE JSON_CONTAINS_PATH(data, 'one', '$.notifications.sms');
 
--- Aggregation (MySQL 5.7.22+)
-SELECT JSON_ARRAYAGG(name) FROM users WHERE active = 1;
--- ["Alice", "Bob", "Charlie"]
+-- Aggregate to JSON
+SELECT
+  JSON_ARRAYAGG(name)                     AS names_array,
+  JSON_OBJECTAGG(name, id)               AS name_id_map
+FROM config;
 
-SELECT JSON_OBJECTAGG(id, name) FROM users WHERE active = 1;
--- {1: "Alice", 2: "Bob", 3: "Charlie"}
-
--- JSON_TABLE: shred JSON into relational rows (MySQL 8.0)
-SELECT product_name, tag
-FROM products,
-JSON_TABLE(tags, '$[*]' COLUMNS (tag VARCHAR(50) PATH '$')) AS jt;
+-- JSON_TABLE: parse JSON into a relational result
+SELECT jt.*
+FROM config,
+JSON_TABLE(data->'$.tags', '$[*]'
+  COLUMNS (tag VARCHAR(50) PATH '$')
+) AS jt
+WHERE config.name = 'app_settings';
 
 -- Validate JSON
 SELECT JSON_VALID('{"key": "value"}');   -- 1
 SELECT JSON_VALID('not json');            -- 0
+
+-- JSON type of a value
+SELECT JSON_TYPE(data->'$.theme');             -- STRING
+SELECT JSON_TYPE(data->'$.limits.api_calls'); -- INTEGER
+SELECT JSON_TYPE(data->'$.tags');             -- ARRAY
 ```
 
 ## Partitioning
 
-Partitioning divides a large table into smaller physical pieces while appearing as a single table to SQL. MySQL supports four partition types.
+Partitioning splits a large table into smaller physical pieces while maintaining a single logical interface.
 
 ```sql
--- RANGE partitioning (numeric ranges)
+-- RANGE partitioning: partition by ranges of column values
 CREATE TABLE orders_partitioned (
-  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  created_year SMALLINT NOT NULL,
-  total DECIMAL(10,2),
-  PRIMARY KEY (id, created_year)
-) PARTITION BY RANGE (created_year) (
+  id         INT NOT NULL,
+  user_id    INT NOT NULL,
+  total      DECIMAL(10,2),
+  created_at DATETIME NOT NULL,
+  PRIMARY KEY (id, created_at)  -- Partition key must be in PRIMARY KEY
+)
+PARTITION BY RANGE (YEAR(created_at)) (
   PARTITION p2021 VALUES LESS THAN (2022),
   PARTITION p2022 VALUES LESS THAN (2023),
   PARTITION p2023 VALUES LESS THAN (2024),
@@ -430,250 +393,214 @@ CREATE TABLE orders_partitioned (
   PARTITION p_future VALUES LESS THAN MAXVALUE
 );
 
--- RANGE COLUMNS (for DATE ranges)
-CREATE TABLE logs (
-  id BIGINT AUTO_INCREMENT,
-  log_date DATE NOT NULL,
-  message TEXT,
-  PRIMARY KEY (id, log_date)
-) PARTITION BY RANGE COLUMNS (log_date) (
-  PARTITION p_2023_q1 VALUES LESS THAN ('2023-04-01'),
-  PARTITION p_2023_q2 VALUES LESS THAN ('2023-07-01'),
-  PARTITION p_2023_q3 VALUES LESS THAN ('2023-10-01'),
-  PARTITION p_2023_q4 VALUES LESS THAN ('2024-01-01'),
-  PARTITION p_future   VALUES LESS THAN (MAXVALUE)
+-- LIST partitioning: partition by discrete values
+CREATE TABLE orders_by_region (
+  id        INT NOT NULL,
+  region_id INT NOT NULL,
+  total     DECIMAL(10,2),
+  PRIMARY KEY (id, region_id)
+)
+PARTITION BY LIST (region_id) (
+  PARTITION p_na   VALUES IN (1, 2, 3),    -- North America
+  PARTITION p_eu   VALUES IN (4, 5, 6, 7), -- Europe
+  PARTITION p_apac VALUES IN (8, 9, 10)    -- Asia-Pacific
 );
 
--- LIST partitioning (explicit value lists)
-CREATE TABLE employees_by_region (
-  id INT,
-  region VARCHAR(20),
-  name VARCHAR(100)
-) PARTITION BY LIST COLUMNS (region) (
-  PARTITION p_north VALUES IN ('NY', 'MA', 'CT'),
-  PARTITION p_south VALUES IN ('FL', 'GA', 'SC'),
-  PARTITION p_west  VALUES IN ('CA', 'OR', 'WA')
-);
-
--- HASH partitioning (distributes by hash of column)
-CREATE TABLE user_data (
-  user_id INT NOT NULL,
-  data TEXT
-) PARTITION BY HASH (user_id) PARTITIONS 8;
-
--- KEY partitioning (MySQL's own hash function, handles more types)
+-- HASH partitioning: distribute by hash of column
 CREATE TABLE sessions (
-  session_id CHAR(32) NOT NULL,
-  data TEXT
-) PARTITION BY KEY (session_id) PARTITIONS 16;
-```
+  id      BIGINT NOT NULL,
+  user_id INT NOT NULL,
+  data    TEXT,
+  PRIMARY KEY (id, user_id)
+)
+PARTITION BY HASH (user_id)
+PARTITIONS 8;
 
-### Partition Management
+-- KEY partitioning: like HASH but uses MySQL's internal hash function
+-- Useful when you can't control the key
 
-```sql
--- Add a partition
+-- Partition pruning: MySQL only scans relevant partitions
+EXPLAIN SELECT * FROM orders_partitioned WHERE YEAR(created_at) = 2023;
+-- Should show "partitions: p2023"
+
+-- Manage partitions
 ALTER TABLE orders_partitioned ADD PARTITION (
   PARTITION p2025 VALUES LESS THAN (2026)
 );
+ALTER TABLE orders_partitioned DROP PARTITION p2021;
 
--- Drop a partition (deletes data in that partition!)
-ALTER TABLE logs DROP PARTITION p_2023_q1;
+-- Truncate a partition efficiently (much faster than DELETE)
+ALTER TABLE orders_partitioned TRUNCATE PARTITION p2021;
 
--- Truncate a partition (fast delete of all data in partition)
-ALTER TABLE logs TRUNCATE PARTITION p_2023_q1;
-
--- Reorganize partitions (split or merge without data loss)
-ALTER TABLE orders_partitioned REORGANIZE PARTITION p_future INTO (
-  PARTITION p2025 VALUES LESS THAN (2026),
-  PARTITION p_future VALUES LESS THAN MAXVALUE
-);
-
--- Check partition pruning in EXPLAIN
-EXPLAIN SELECT * FROM logs WHERE log_date BETWEEN '2023-01-01' AND '2023-03-31'\G
--- Look for "partitions: p_2023_q1" — only one partition scanned
-
--- List partitions and their row counts
-SELECT PARTITION_NAME, TABLE_ROWS, AVG_ROW_LENGTH, DATA_LENGTH
+-- View partition info
+SELECT PARTITION_NAME, TABLE_ROWS, DATA_LENGTH
 FROM information_schema.PARTITIONS
-WHERE TABLE_SCHEMA = 'myapp' AND TABLE_NAME = 'logs';
+WHERE TABLE_SCHEMA = 'mydb' AND TABLE_NAME = 'orders_partitioned';
 ```
+
+:::caution[Partitioning Limitations]
+- Foreign keys are not supported on partitioned tables.
+- All unique indexes (including PRIMARY KEY) must include the partition key.
+- Partitioning doesn't always improve performance — measure first.
+- Partition pruning only works when the `WHERE` clause uses the partition expression directly.
+:::
 
 ## Replication
 
-MySQL replication copies data from a source (primary/master) to one or more replicas (secondaries/slaves).
+MySQL replication copies data from a source (master) server to one or more replicas (slaves).
 
 ```sql
--- Source server: enable binary logging (my.cnf)
--- log_bin = /var/log/mysql/mysql-bin
--- server_id = 1
--- binlog_format = ROW       (recommended)
--- gtid_mode = ON            (recommended for GTID-based replication)
--- enforce_gtid_consistency = ON
+-- === SOURCE SERVER CONFIGURATION ===
+-- In my.cnf:
+-- server-id = 1
+-- log_bin = /var/log/mysql/mysql-bin.log
+-- binlog_format = ROW
 
 -- Create replication user on source
-CREATE USER 'repl'@'10.0.0.%' IDENTIFIED WITH mysql_native_password BY 'ReplPass!1';
-GRANT REPLICATION SLAVE ON *.* TO 'repl'@'10.0.0.%';
+CREATE USER 'replicator'@'%' IDENTIFIED WITH mysql_native_password BY 'replpass';
+GRANT REPLICATION SLAVE ON *.* TO 'replicator'@'%';
+FLUSH PRIVILEGES;
 
--- Get current binary log position (for traditional replication)
-SHOW MASTER STATUS\G
+-- Get binary log position (for traditional replication)
+SHOW MASTER STATUS;
+-- +------------------+----------+
+-- | File             | Position |
+-- +------------------+----------+
+-- | mysql-bin.000003 | 1234     |
 
--- On replica server (my.cnf)
--- server_id = 2
--- relay-log = /var/log/mysql/relay-bin
+-- === REPLICA SERVER CONFIGURATION ===
+-- server-id = 2
 
--- Configure replication on replica
+-- Traditional (file+position based) replication
 CHANGE REPLICATION SOURCE TO
-  SOURCE_HOST = '10.0.0.1',
-  SOURCE_USER = 'repl',
-  SOURCE_PASSWORD = 'ReplPass!1',
-  SOURCE_AUTO_POSITION = 1;   -- GTID-based (preferred)
+  SOURCE_HOST     = '192.168.1.10',
+  SOURCE_USER     = 'replicator',
+  SOURCE_PASSWORD = 'replpass',
+  SOURCE_LOG_FILE = 'mysql-bin.000003',
+  SOURCE_LOG_POS  = 1234;
 
--- Or for traditional position-based:
-CHANGE REPLICATION SOURCE TO
-  SOURCE_HOST = '10.0.0.1',
-  SOURCE_USER = 'repl',
-  SOURCE_PASSWORD = 'ReplPass!1',
-  SOURCE_LOG_FILE = 'mysql-bin.000042',
-  SOURCE_LOG_POS = 154;
-
--- Start/stop/check replication
 START REPLICA;
-STOP REPLICA;
 SHOW REPLICA STATUS\G
 
--- Key fields in SHOW REPLICA STATUS:
--- Replica_IO_Running: Yes
--- Replica_SQL_Running: Yes
--- Seconds_Behind_Source: 0  (replication lag)
--- Last_Error: (empty = good)
+-- === GTID-Based Replication (recommended) ===
+-- On source my.cnf:
+-- gtid_mode = ON
+-- enforce_gtid_consistency = ON
+
+-- On replica:
+CHANGE REPLICATION SOURCE TO
+  SOURCE_HOST            = '192.168.1.10',
+  SOURCE_USER            = 'replicator',
+  SOURCE_PASSWORD        = 'replpass',
+  SOURCE_AUTO_POSITION   = 1;  -- Use GTIDs automatically
+
+START REPLICA;
+
+-- Check replication lag
+SHOW REPLICA STATUS\G
+-- Look for: Seconds_Behind_Source (0 = fully caught up)
+
+-- Binlog formats comparison:
+-- STATEMENT: logs the SQL statement (smaller logs, non-deterministic functions are risky)
+-- ROW: logs the actual row changes (larger logs, fully deterministic, safest)
+-- MIXED: uses STATEMENT normally, falls back to ROW for non-deterministic operations
 ```
-
-### Binary Log Formats
-
-| Format      | Description                           | Pros                | Cons                                                       |
-| ----------- | ------------------------------------- | ------------------- | ---------------------------------------------------------- |
-| `STATEMENT` | Replicates SQL statements             | Small log size      | Non-deterministic functions cause issues                   |
-| `ROW`       | Replicates actual row changes         | Fully deterministic | Larger log files (e.g., UPDATE of 1M rows = 1M row images) |
-| `MIXED`     | STATEMENT by default, ROW when needed | Balance             | Less predictable                                           |
 
 ## InnoDB Internals
 
 ### MVCC (Multi-Version Concurrency Control)
 
-InnoDB uses MVCC to provide consistent reads without blocking writers:
+InnoDB uses MVCC to allow readers and writers to work concurrently without blocking each other.
 
-- Each row has hidden columns: `DB_TRX_ID` (last modifying transaction), `DB_ROLL_PTR` (undo log pointer), `DB_ROW_ID`
-- When a transaction reads a row, it sees the version consistent with its transaction start time
-- Older versions are stored in the **undo log** (tablespace in `ibdata1` or separate undo tablespaces)
-- Readers never block writers; writers never block readers (except for SELECT ... FOR UPDATE)
+- Each row has hidden columns: `DB_TRX_ID` (transaction that last modified it) and `DB_ROLL_PTR` (pointer to undo log entry).
+- When a transaction reads a row, it sees the version that was committed before the transaction started (snapshot read).
+- Write locks only block other writers, not readers.
+- The **undo log** stores previous row versions needed for active transactions.
 
-### Key InnoDB Components
+### Redo Log vs Undo Log
 
-| Component               | Purpose                                                                                                           |
-| ----------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| **Buffer Pool**         | In-memory cache of data pages and index pages. Size = `innodb_buffer_pool_size`. Most important tuning parameter. |
-| **Redo Log**            | Write-ahead log for crash recovery. Transactions write to redo log before committing.                             |
-| **Undo Log**            | Stores old row versions for MVCC and transaction rollback.                                                        |
-| **Change Buffer**       | Caches changes to secondary index pages not in the buffer pool (deferred writes).                                 |
-| **Adaptive Hash Index** | Automatically built in-memory for frequently accessed index pages.                                                |
-| **Doublewrite Buffer**  | Protects against partial page writes during crash.                                                                |
+| Log | Purpose | Location |
+|---|---|---|
+| **Redo log** | Crash recovery — replay committed changes after crash | `ib_logfile0`, `ib_logfile1` |
+| **Undo log** | MVCC (old row versions), ROLLBACK support | Undo tablespace files |
+
+### Buffer Pool
+
+The InnoDB Buffer Pool is the primary memory cache for data and index pages.
 
 ```sql
--- Key InnoDB status
+-- View buffer pool status
 SHOW ENGINE INNODB STATUS\G
 
 -- Buffer pool hit rate (should be > 99%)
-SHOW STATUS LIKE 'Innodb_buffer_pool_read%';
--- hit rate = 1 - (Innodb_buffer_pool_reads / Innodb_buffer_pool_read_requests)
+SELECT
+  (1 - (variable_value / (
+    SELECT variable_value FROM performance_schema.global_status
+    WHERE variable_name = 'Innodb_buffer_pool_read_requests'
+  ))) * 100 AS buffer_pool_miss_rate_pct
+FROM performance_schema.global_status
+WHERE variable_name = 'Innodb_buffer_pool_reads';
 
--- InnoDB metrics
-SELECT NAME, COUNT, STATUS
-FROM information_schema.INNODB_METRICS
-WHERE STATUS = 'enabled'
-ORDER BY COUNT DESC
-LIMIT 20;
+-- Innodb_buffer_pool_read_requests: total read requests
+-- Innodb_buffer_pool_reads: requests that had to go to disk
 ```
+
+### Change Buffer
+
+The change buffer is a special data structure that caches changes to secondary index pages when those pages are not in the buffer pool. This avoids expensive random I/O for non-unique index maintenance.
+
+### Adaptive Hash Index (AHI)
+
+InnoDB automatically creates hash indexes on heavily-accessed B-Tree index pages in memory. This provides O(1) lookups for those pages. AHI is fully automatic and maintained in memory only.
 
 ## Performance Schema
 
-The Performance Schema (`performance_schema`) database collects server performance data with minimal overhead.
-
 ```sql
--- Check if enabled
-SHOW VARIABLES LIKE 'performance_schema';
-
--- Top slow queries
+-- Top queries by total latency
 SELECT
   DIGEST_TEXT,
-  COUNT_STAR AS exec_count,
-  SUM_TIMER_WAIT / 1e12 AS total_seconds,
-  AVG_TIMER_WAIT / 1e12 AS avg_seconds,
-  SUM_ROWS_EXAMINED,
-  SUM_ROWS_SENT
+  COUNT_STAR,
+  ROUND(SUM_TIMER_WAIT / 1e12, 3) AS total_latency_s,
+  ROUND(AVG_TIMER_WAIT / 1e9, 3)  AS avg_latency_ms,
+  SUM_ROWS_EXAMINED
 FROM performance_schema.events_statements_summary_by_digest
-WHERE SCHEMA_NAME = 'myapp'
 ORDER BY SUM_TIMER_WAIT DESC
-LIMIT 10;
+LIMIT 20;
 
--- Table I/O hotspots
-SELECT OBJECT_SCHEMA, OBJECT_NAME,
-  COUNT_READ, COUNT_WRITE,
-  SUM_TIMER_READ / 1e12 AS read_seconds,
-  SUM_TIMER_WRITE / 1e12 AS write_seconds
+-- Table I/O waits
+SELECT OBJECT_NAME, COUNT_READ, COUNT_WRITE,
+  ROUND(SUM_TIMER_READ / 1e12, 3) AS read_latency_s
 FROM performance_schema.table_io_waits_summary_by_table
-WHERE OBJECT_SCHEMA = 'myapp'
-ORDER BY SUM_TIMER_READ + SUM_TIMER_WRITE DESC;
+WHERE OBJECT_SCHEMA NOT IN ('performance_schema','information_schema','mysql','sys')
+ORDER BY SUM_TIMER_READ DESC LIMIT 10;
 
 -- Lock waits
-SELECT * FROM performance_schema.events_waits_history_long
-WHERE EVENT_NAME LIKE '%lock%'
-ORDER BY TIMER_WAIT DESC
-LIMIT 10;
-
--- Enable/disable instrumentation
-UPDATE performance_schema.setup_instruments
-SET ENABLED = 'YES', TIMED = 'YES'
-WHERE NAME LIKE '%statement%';
+SELECT * FROM performance_schema.data_lock_waits\G
 ```
 
 ## sys Schema
 
-The `sys` schema (MySQL 5.7.7+) provides human-readable views on top of Performance Schema.
+The `sys` schema (available since MySQL 5.7.7) provides human-readable views built on Performance Schema:
 
 ```sql
--- Statements causing the most I/O
-SELECT * FROM sys.statements_with_errors_or_warnings LIMIT 10;
+-- Statements by total latency with formatted output
+SELECT * FROM sys.statements_with_runtimes_in_95th_percentile LIMIT 10;
+
+-- Queries not using indexes
 SELECT * FROM sys.statements_with_full_table_scans LIMIT 10;
-SELECT * FROM sys.statements_with_sorting LIMIT 10;
-SELECT * FROM sys.statements_with_temp_tables LIMIT 10;
 
--- Table I/O statistics
-SELECT * FROM sys.schema_table_statistics
-WHERE table_schema = 'myapp'
-ORDER BY total_latency DESC;
+-- Tables with the most I/O
+SELECT * FROM sys.io_global_by_file_by_latency LIMIT 10;
 
--- Unused indexes
-SELECT * FROM sys.schema_unused_indexes
-WHERE object_schema = 'myapp';
+-- InnoDB buffer pool pages by table
+SELECT * FROM sys.innodb_buffer_stats_by_table ORDER BY pages DESC LIMIT 10;
+
+-- Memory usage by thread
+SELECT * FROM sys.memory_by_thread_by_current_bytes LIMIT 10;
 
 -- Redundant indexes
-SELECT * FROM sys.schema_redundant_indexes;
+SELECT * FROM sys.schema_redundant_indexes WHERE table_schema = 'mydb';
 
--- Largest tables by size
-SELECT
-  table_schema,
-  table_name,
-  sys.format_bytes(data_length + index_length) AS total_size,
-  sys.format_bytes(data_length) AS data_size,
-  sys.format_bytes(index_length) AS index_size,
-  table_rows
-FROM information_schema.tables
-WHERE table_schema = 'myapp'
-ORDER BY data_length + index_length DESC;
-
--- Current waits
-SELECT * FROM sys.session WHERE command = 'Query' ORDER BY time DESC;
-
--- Memory usage per user
-SELECT * FROM sys.memory_by_user_by_current_bytes LIMIT 10;
+-- Unused indexes
+SELECT * FROM sys.schema_unused_indexes WHERE object_schema = 'mydb';
 ```

@@ -1,232 +1,216 @@
 ---
-title: Reusable Workflows and Actions
-description: Build reusable workflows with workflow_call, composite actions, JavaScript actions, and Docker container actions for maximum DRY automation.
+title: Reusable Workflows & Actions
+description: Create reusable workflows with workflow_call, build composite actions, write JavaScript actions, and publish to the GitHub Marketplace.
 sidebar:
   order: 6
 tags: [devops, ci-cd]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-## Reusable Workflows vs Composite Actions
+## Why Reuse?
 
-Before building either, understand when to use which:
+As your workflow library grows, you'll find yourself copying the same deploy steps, test setups, or notification logic across dozens of workflows. GitHub Actions offers two primary mechanisms for DRY workflow automation:
 
-| Feature              | Reusable Workflow                      | Composite Action                     |
-| -------------------- | -------------------------------------- | ------------------------------------ |
-| **Unit**             | Entire workflow (multiple jobs)        | Single step (`uses:`)                |
-| **Uses jobs?**       | Yes — can have multiple jobs           | No — sequence of steps               |
-| **Runner selection** | Caller or callee can define            | Inherited from caller job            |
-| **Inputs**           | `inputs:` with type, required, default | `inputs:` in action.yml              |
-| **Secrets**          | `secrets: inherit` or explicit         | Not supported directly               |
-| **Nesting**          | Up to 4 levels deep                    | No depth limit                       |
-| **Storage**          | `.github/workflows/*.yml` in any repo  | `action.yml` in root or subdirectory |
-| **Best for**         | Full CI/CD pipeline templates          | Reusable step sequences              |
+| Mechanism | Defined in | Called with | Cross-repo | Secrets |
+|---|---|---|---|---|
+| **Reusable workflow** | `.github/workflows/*.yml` | `uses: org/repo/.github/workflows/name.yml@ref` | Yes | Explicit or inherit |
+| **Composite action** | `action.yml` in any directory | `uses: org/repo/path@ref` | Yes | Via `inputs` |
+| **JavaScript action** | `action.yml` + `.js` file | `uses: org/repo@ref` | Yes | Via `inputs` |
+| **Docker action** | `action.yml` + `Dockerfile` | `uses: org/repo@ref` | Yes | Via `inputs` |
 
 ## Reusable Workflows
 
 ### Creating a Reusable Workflow
 
-Store the workflow in any GitHub repository (public, private, or internal). The `on: workflow_call:` trigger makes it callable.
+A reusable workflow is a normal workflow file that uses `workflow_call` as its trigger:
 
 ```yaml
-# .github/workflows/deploy-service.yml
-name: Deploy Service (Reusable)
+# .github/workflows/deploy.yml
+name: Deploy (reusable)
 
 on:
   workflow_call:
     inputs:
       environment:
         description: 'Target environment'
-        required: true
         type: string
+        required: true
       image-tag:
         description: 'Docker image tag to deploy'
-        required: true
         type: string
-      dry-run:
-        description: 'Run without applying changes'
-        required: false
-        type: boolean
-        default: false
-      replicas:
-        description: 'Number of replicas'
-        required: false
-        type: number
-        default: 2
-    secrets:
-      DEPLOY_TOKEN:
         required: true
-      REGISTRY_PASSWORD:
+      dry-run:
+        description: 'Perform a dry run'
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      DEPLOY_KEY:
+        required: true
+      AWS_ROLE_ARN:
         required: false
     outputs:
-      deploy-url:
-        description: 'URL of the deployed application'
+      deployed-url:
+        description: 'URL of the deployed service'
         value: ${{ jobs.deploy.outputs.url }}
-      deploy-status:
-        description: 'success or failure'
-        value: ${{ jobs.deploy.outputs.status }}
-
-permissions:
-  id-token: write
-  contents: read
 
 jobs:
-  validate:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Validate inputs
-        run: |
-          if [[ "${{ inputs.environment }}" != "staging" && "${{ inputs.environment }}" != "production" ]]; then
-            echo "Invalid environment: ${{ inputs.environment }}"
-            exit 1
-          fi
-
   deploy:
+    name: Deploy to ${{ inputs.environment }}
     runs-on: ubuntu-latest
-    needs: validate
     environment: ${{ inputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
     outputs:
-      url: ${{ steps.deploy.outputs.url }}
-      status: ${{ steps.deploy.outputs.status }}
+      url: ${{ steps.get-url.outputs.url }}
     steps:
       - uses: actions/checkout@v4
 
+      - name: Authenticate to AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
       - name: Deploy
-        id: deploy
+        if: ${{ !inputs.dry-run }}
+        id: deploy-step
         run: |
-          if [[ "${{ inputs.dry-run }}" == "true" ]]; then
-            echo "DRY RUN: would deploy ${{ inputs.image-tag }} to ${{ inputs.environment }}"
-            echo "url=https://dry-run.example.com" >> $GITHUB_OUTPUT
-          else
-            ./deploy.sh \
-              --env "${{ inputs.environment }}" \
-              --image "${{ inputs.image-tag }}" \
-              --replicas "${{ inputs.replicas }}"
-            echo "url=https://${{ inputs.environment }}.example.com" >> $GITHUB_OUTPUT
-          fi
-          echo "status=success" >> $GITHUB_OUTPUT
-        env:
-          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          ./scripts/deploy.sh \
+            --env ${{ inputs.environment }} \
+            --tag ${{ inputs.image-tag }} \
+            --key ${{ secrets.DEPLOY_KEY }}
+
+      - name: Get URL
+        id: get-url
+        run: |
+          URL=$(./scripts/get-deploy-url.sh ${{ inputs.environment }})
+          echo "url=$URL" >> $GITHUB_OUTPUT
 ```
 
 ### Calling a Reusable Workflow
 
 ```yaml
-# .github/workflows/release.yml
-name: Release Pipeline
+# .github/workflows/ci-cd.yml
+name: CI/CD
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
 
 jobs:
   build:
     runs-on: ubuntu-latest
     outputs:
-      image-tag: ${{ steps.meta.outputs.version }}
+      image-tag: ${{ steps.tag.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
-      - name: Build and tag
-        id: meta
-        run: |
-          echo "version=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-          docker build -t myapp:${GITHUB_REF_NAME} .
+      - id: tag
+        run: echo "tag=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+      - run: docker build -t myapp:$(git rev-parse --short HEAD) .
 
   deploy-staging:
     needs: build
-    uses: my-org/shared-workflows/.github/workflows/deploy-service.yml@main
+    uses: myorg/devops/.github/workflows/deploy.yml@main
     with:
       environment: staging
       image-tag: ${{ needs.build.outputs.image-tag }}
-      replicas: 1
     secrets:
-      DEPLOY_TOKEN: ${{ secrets.STAGING_DEPLOY_TOKEN }}
-      # Or inherit all secrets from the calling workflow:
-      # secrets: inherit
+      DEPLOY_KEY: ${{ secrets.STAGING_DEPLOY_KEY }}
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_STAGING }}
 
   deploy-production:
     needs: deploy-staging
-    uses: my-org/shared-workflows/.github/workflows/deploy-service.yml@main
+    uses: myorg/devops/.github/workflows/deploy.yml@v2
     with:
       environment: production
       image-tag: ${{ needs.build.outputs.image-tag }}
-      replicas: 3
-    secrets: inherit
-
-  notify:
-    needs: [deploy-staging, deploy-production]
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - run: |
-          echo "Staging URL: ${{ needs.deploy-staging.outputs.deploy-url }}"
-          echo "Production URL: ${{ needs.deploy-production.outputs.deploy-url }}"
+    secrets: inherit    # pass ALL caller secrets to the called workflow
 ```
 
-:::tip[Pin Reusable Workflow Versions]
-Always pin reusable workflow references to a specific SHA or tag for production workflows: `uses: my-org/shared/.github/workflows/ci.yml@abc1234`. Using `@main` means changes to the shared workflow immediately affect all callers.
+:::tip[Version pinning]
+Always reference reusable workflows at a specific version (`@v2`, `@main`, `@<sha>`). Using `@main` means unexpected changes in the shared workflow can break your callers. For production-critical workflows, pin to a SHA.
 :::
+
+### Reusable Workflow Limitations
+
+- A reusable workflow can call other reusable workflows (nesting up to 4 levels deep)
+- The `env` context is not passed to called workflows
+- Called workflows run with the permissions of the caller
+- Matrix jobs can call reusable workflows
 
 ## Composite Actions
 
-Composite actions bundle multiple steps into a single reusable action callable with `uses:`.
+Composite actions package a sequence of steps (including `uses:` and `run:`) into a reusable unit callable with `uses:`.
+
+### Directory Structure
+
+```bash
+.github/actions/setup-environment/
+└── action.yml
+
+# Or in a dedicated repo:
+my-org/my-actions/
+├── setup/
+│   └── action.yml
+├── notify/
+│   └── action.yml
+└── README.md
+```
 
 ### Creating a Composite Action
 
 ```yaml
-# actions/setup-and-cache/action.yml
-name: 'Setup Node.js with Cache'
-description: 'Sets up Node.js, installs deps with full caching strategy'
+# .github/actions/setup-environment/action.yml
+name: 'Setup Environment'
+description: 'Checkout, setup Node.js, and install dependencies'
+author: 'MyOrg'
+
+branding:
+  icon: 'package'
+  color: 'blue'
 
 inputs:
   node-version:
     description: 'Node.js version to use'
     required: false
     default: '20'
-  working-directory:
-    description: 'Directory containing package.json'
-    required: false
-    default: '.'
   install-command:
-    description: 'Install command to run'
+    description: 'Command to install dependencies'
     required: false
     default: 'npm ci'
+  working-directory:
+    description: 'Working directory'
+    required: false
+    default: '.'
 
 outputs:
   cache-hit:
-    description: 'Whether the cache was hit'
+    description: 'Whether dependencies were restored from cache'
     value: ${{ steps.cache.outputs.cache-hit }}
-  node-version:
-    description: 'The Node.js version that was installed'
-    value: ${{ steps.setup.outputs.node-version }}
 
 runs:
-  using: composite
+  using: 'composite'
   steps:
-    - name: Set up Node.js
-      id: setup
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
         node-version: ${{ inputs.node-version }}
-        cache: npm
-        cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+        cache: 'npm'
 
-    - name: Cache node_modules
+    - name: Cache dependencies
       id: cache
       uses: actions/cache@v4
       with:
         path: ${{ inputs.working-directory }}/node_modules
-        key: ${{ runner.os }}-node${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
-        restore-keys: |
-          ${{ runner.os }}-node${{ inputs.node-version }}-
+        key: node-modules-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
 
     - name: Install dependencies
       if: steps.cache.outputs.cache-hit != 'true'
@@ -235,258 +219,237 @@ runs:
       run: ${{ inputs.install-command }}
 ```
 
-:::caution[shell: is Required in Composite Actions]
-Every `run:` step inside a composite action **must** specify `shell:`. Unlike regular workflow steps, there is no default shell in composite actions.
-:::
-
 ### Using a Composite Action
 
 ```yaml
-# Reference from the same repo
-- uses: ./.github/actions/setup-and-cache
-  with:
-    node-version: '20'
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup environment
+        uses: ./.github/actions/setup-environment    # local action
+        with:
+          node-version: '20'
+          working-directory: ./frontend
 
-# Reference from another repo at a tag
-- uses: my-org/shared-actions/setup-and-cache@v2
-  with:
-    node-version: '18'
-    working-directory: packages/api
+      # Or from another repository:
+      - uses: myorg/my-actions/setup@v1
+        with:
+          node-version: '20'
 
-# Use outputs
-- id: setup
-  uses: ./.github/actions/setup-and-cache
-- run: echo "Cache hit: ${{ steps.setup.outputs.cache-hit }}"
-```
-
-### Composite Action with `$GITHUB_ACTION_PATH`
-
-```yaml
-runs:
-  using: composite
-  steps:
-    - name: Run bundled script
-      shell: bash
-      run: |
-        # $GITHUB_ACTION_PATH points to the action's directory
-        bash $GITHUB_ACTION_PATH/scripts/setup.sh
-        python $GITHUB_ACTION_PATH/scripts/validate.py
+      - run: npm test
 ```
 
 ## JavaScript Actions
 
-JavaScript actions run directly on the runner without a container, making them faster to start.
+For more complex logic, write actions in JavaScript/TypeScript using Node.js:
 
-### `action.yml` for JS Action
-
-```yaml
-# action.yml
-name: 'My JavaScript Action'
-description: 'Does something useful with Node.js'
-
-inputs:
-  api-url:
-    description: 'API endpoint URL'
-    required: true
-  timeout:
-    description: 'Request timeout in seconds'
-    required: false
-    default: '30'
-  debug:
-    description: 'Enable debug logging'
-    required: false
-    default: 'false'
-
-outputs:
-  response-body:
-    description: 'The API response body'
-  status-code:
-    description: 'HTTP status code'
-
-runs:
-  using: node20
-  main: dist/index.js # compiled/bundled entry point
-  pre: dist/pre.js # optional: runs before main
-  post: dist/post.js # optional: runs after main (for cleanup)
-```
-
-### `src/index.ts` (TypeScript source)
+### Directory Structure
 
 ```bash
-# Install required packages
-npm install @actions/core @actions/github @actions/http-client
+my-action/
+├── action.yml
+├── dist/
+│   └── index.js       # bundled with @vercel/ncc or esbuild
+├── src/
+│   └── index.ts
+├── package.json
+└── README.md
 ```
 
+### `action.yml` for JavaScript Actions
+
 ```yaml
-# Compiled JavaScript action implementation pattern
-# src/index.ts would contain:
-# import * as core from '@actions/core';
-# import * as github from '@actions/github';
-#
-# const apiUrl = core.getInput('api-url', { required: true });
-# const timeout = parseInt(core.getInput('timeout'));
-# const debug = core.getBooleanInput('debug');
-#
-# core.setOutput('response-body', responseBody);
-# core.setOutput('status-code', String(statusCode));
-# core.info('Action completed successfully');
-# core.setFailed('Something went wrong');
-# core.debug('Debug info (only shown with debug: true)');
-# core.warning('This is a warning annotation');
-# core.error('This is an error annotation', { file: 'src/app.ts', startLine: 10 });
-# core.exportVariable('MY_VAR', 'value');
-# core.addPath('/usr/local/bin/my-tool');
-# core.saveState('key', 'value');         // for post step
-# core.getState('key');                   // in post step
+name: 'Post Deploy Comment'
+description: 'Posts a deployment URL comment on the PR'
+author: 'MyOrg'
+
+inputs:
+  token:
+    description: 'GitHub token'
+    required: true
+  deploy-url:
+    description: 'Deployment URL'
+    required: true
+  pr-number:
+    description: 'PR number'
+    required: false
+
+outputs:
+  comment-id:
+    description: 'ID of the created/updated comment'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
+  post: 'dist/cleanup.js'    # optional cleanup step
 ```
 
-### Building and Publishing
+### JavaScript Action Implementation
 
-```yaml
-# .github/workflows/release-action.yml
-name: Release Action
+```javascript
+// src/index.ts
+import * as core from '@actions/core';
+import * as github from '@actions/github';
 
-on:
-  push:
-    tags: ['v*']
+async function run(): Promise<void> {
+  try {
+    const token = core.getInput('token', { required: true });
+    const deployUrl = core.getInput('deploy-url', { required: true });
 
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    const octokit = github.getOctokit(token);
+    const context = github.context;
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
+    // Get PR number from input or context
+    const prNumber = parseInt(core.getInput('pr-number')) ||
+      context.payload.pull_request?.number;
 
-      - run: npm ci && npm run build && npm run package
+    if (!prNumber) {
+      core.info('No PR number found, skipping comment');
+      return;
+    }
 
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/
-          generate_release_notes: true
+    const body = `## 🚀 Deployment Preview\n\n**URL:** ${deployUrl}\n**Commit:** \`${context.sha.slice(0, 7)}\``;
+
+    // Check for existing comment
+    const { data: comments } = await octokit.rest.issues.listComments({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      issue_number: prNumber,
+    });
+
+    const existing = comments.find(c =>
+      c.user?.login === 'github-actions[bot]' &&
+      c.body?.includes('## 🚀 Deployment Preview')
+    );
+
+    let commentId: number;
+
+    if (existing) {
+      const { data } = await octokit.rest.issues.updateComment({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        comment_id: existing.id,
+        body,
+      });
+      commentId = data.id;
+    } else {
+      const { data } = await octokit.rest.issues.createComment({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        issue_number: prNumber,
+        body,
+      });
+      commentId = data.id;
+    }
+
+    core.setOutput('comment-id', String(commentId));
+    core.info(`Comment ${existing ? 'updated' : 'created'}: ${commentId}`);
+
+  } catch (error) {
+    if (error instanceof Error) {
+      core.setFailed(error.message);
+    }
+  }
+}
+
+run();
+```
+
+### Building the Action
+
+```bash
+# Install dependencies
+npm install @actions/core @actions/github
+
+# Bundle with ncc (no node_modules needed at runtime)
+npx @vercel/ncc build src/index.ts -o dist --source-map
+
+# Commit dist/
+git add dist/ && git commit -m "chore: build action"
 ```
 
 ## Docker Container Actions
 
-Docker actions run in a container, giving full control over the environment:
+Run actions in a custom Docker environment:
 
 ```yaml
-# action.yml for Docker action
-name: 'Docker Action'
-description: 'Runs in a custom Docker container'
+# action.yml
+name: 'Terraform Plan'
+description: 'Run terraform plan with output'
 
 inputs:
-  input-file:
-    description: 'Path to input file'
-    required: true
+  working-directory:
+    required: false
+    default: '.'
 
 outputs:
-  result:
-    description: 'Processing result'
+  plan-output:
+    description: 'Terraform plan output'
 
 runs:
-  using: docker
-  image: Dockerfile # build from local Dockerfile
-  # OR:
-  # image: docker://alpine:3.18  # use a pre-built image
+  using: 'docker'
+  image: 'Dockerfile'
   args:
-    - ${{ inputs.input-file }}
-  env:
-    DEBUG: ${{ inputs.debug }}
+    - ${{ inputs.working-directory }}
+```
+
+```dockerfile
+# Dockerfile
+FROM hashicorp/terraform:1.6
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
 ```
 
 ## Action Versioning
 
-### Semantic Versioning Tags
-
-```yaml
-# Specific patch version (most locked-down)
-uses: actions/checkout@v4.1.2
-
-# Major version tag (recommended — gets patches automatically)
-uses: actions/checkout@v4
-
-# Full commit SHA (most secure — immutable)
-uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-
-# Branch (avoid in production — mutable)
-uses: actions/checkout@main
-```
-
-### Maintaining Version Tags
+When publishing actions, use semantic version tags:
 
 ```bash
-# When releasing a new version, move the major tag forward
-git tag -fa v4 -m "Update v4 tag to v4.2.0"
-git push origin v4 --force
-git tag v4.2.0
-git push origin v4.2.0
+# After release
+git tag -a v1.0.0 -m "Release v1.0.0"
+git tag -f v1                           # move major version tag
+git push origin v1.0.0
+git push origin v1 --force
 ```
 
-## When to Use Which Pattern
+Users then reference `uses: myorg/my-action@v1` and automatically get patch/minor updates.
 
-```
-Need to reuse an entire CI/CD pipeline across repos?
-→ Reusable Workflow (workflow_call)
+:::tip[Action versioning best practice]
+Always provide a major version tag (`v1`, `v2`) that you move forward with each non-breaking release. Pin to a SHA in security-sensitive workflows: `uses: myorg/my-action@abc1234`.
+:::
 
-Need to bundle 3-4 setup steps used in every job?
-→ Composite Action
+## When to Use Reusable Workflow vs Composite Action
 
-Need to call a GitHub API or do complex logic?
-→ JavaScript Action (@actions/core + @actions/github)
+| Consideration | Reusable Workflow | Composite Action |
+|---|---|---|
+| Multiple jobs | ✅ Yes | ❌ No (single job) |
+| Environments & approvals | ✅ Yes | ❌ No |
+| Matrix strategy | ✅ Yes | ❌ No |
+| Secrets forwarding | Explicit or inherit | Via inputs |
+| Steps only | ❌ No | ✅ Yes |
+| Can call other actions | ✅ Yes | ✅ Yes |
+| Marketplace publishable | ❌ No | ✅ Yes |
+| Best for | Multi-job pipelines | Step bundles |
 
-Need a specific runtime environment (Go, Python, Rust binary)?
-→ Docker Container Action
+## Publishing to the Marketplace
 
-Need to run a one-off script shared across steps?
-→ $GITHUB_ACTION_PATH script in a composite action
-```
-
-## Shared Action Repository Pattern
-
-```
-my-org/
-└── github-actions/                  # shared actions repo
-    ├── .github/
-    │   └── workflows/
-    │       ├── ci.yml               # reusable: test any Node.js service
-    │       ├── docker-build.yml     # reusable: build & push Docker images
-    │       └── deploy-k8s.yml       # reusable: deploy to Kubernetes
-    ├── setup-node-cache/
-    │   └── action.yml               # composite: setup + cache
-    ├── notify-slack/
-    │   ├── action.yml               # JS: send Slack notification
-    │   ├── src/index.ts
-    │   └── dist/index.js            # pre-compiled bundle
-    └── README.md
-```
-
-Caller repository:
+<Steps>
+1. Create a **public** repository for your action
+2. Add `action.yml` at the repository root with `name`, `description`, `branding`, `inputs`, `outputs`, `runs`
+3. Include a `README.md` with usage examples
+4. Navigate to the repository on GitHub — click **Draft a release**
+5. Check **Publish this Action to the GitHub Marketplace**
+6. Fill in the category and release notes
+7. Publish the release
+</Steps>
 
 ```yaml
-# Use reusable workflow from shared repo
-jobs:
-  test:
-    uses: my-org/github-actions/.github/workflows/ci.yml@v2
-    with:
-      node-version: '20'
-    secrets: inherit
-
-  # Use composite action from shared repo
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: my-org/github-actions/setup-node-cache@v2
-        with:
-          node-version: '20'
-
-      - uses: my-org/github-actions/notify-slack@v2
-        if: failure()
-        with:
-          message: 'Build failed on ${{ github.ref }}'
-        env:
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+# Required action.yml branding for Marketplace
+branding:
+  icon: 'zap'           # feather icon name
+  color: 'yellow'       # gray | blue | green | orange | red | purple | yellow | white
 ```

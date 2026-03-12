@@ -1,19 +1,20 @@
 // @ts-check
-import { defineConfig } from 'astro/config';
-import starlight from '@astrojs/starlight';
+
 import markdoc from '@astrojs/markdoc';
+import starlight from '@astrojs/starlight';
 import AstroPWA from '@vite-pwa/astro';
-import starlightImageZoom from 'starlight-image-zoom';
-import starlightHeadingBadges from 'starlight-heading-badges';
-import starlightGithubAlerts from 'starlight-github-alerts';
+import { defineConfig } from 'astro/config';
 import starlightCodeblockFullscreen from 'starlight-codeblock-fullscreen';
-import starlightLlmsTxt from 'starlight-llms-txt';
-import { starlightIconsPlugin } from 'starlight-plugin-icons';
-import starlightKbd from 'starlight-kbd';
-import starlightGiscus from 'starlight-giscus';
-import starlightSidebarTopics from 'starlight-sidebar-topics';
-import starlightPageActions from 'starlight-page-actions';
 import starlightCoolerCredit from 'starlight-cooler-credit';
+import starlightGiscus from 'starlight-giscus';
+import starlightGithubAlerts from 'starlight-github-alerts';
+import starlightHeadingBadges from 'starlight-heading-badges';
+import starlightImageZoom from 'starlight-image-zoom';
+import starlightKbd from 'starlight-kbd';
+import starlightLlmsTxt from 'starlight-llms-txt';
+import starlightPageActions from 'starlight-page-actions';
+import { starlightIconsPlugin } from 'starlight-plugin-icons';
+import starlightSidebarTopics from 'starlight-sidebar-topics';
 import starlightTags from 'starlight-tags';
 
 // https://astro.build/config
@@ -65,298 +66,304 @@ export default defineConfig({
           category: 'Docs Comments',
           categoryId: 'REPLACE_WITH_CATEGORY_ID',
         }),
-        starlightSidebarTopics([
+        starlightSidebarTopics(
+          [
+            {
+              label: '🐍 Python Ecosystem',
+              link: '/python/python/',
+              icon: 'seti:python',
+              items: [
+                {
+                  label: 'Python',
+                  collapsed: true,
+                  autogenerate: { directory: 'python/python' },
+                },
+                {
+                  label: 'Pytest',
+                  collapsed: true,
+                  autogenerate: { directory: 'python/pytest' },
+                },
+                {
+                  label: 'Django',
+                  collapsed: true,
+                  autogenerate: { directory: 'python/django' },
+                },
+                {
+                  label: 'FastAPI',
+                  collapsed: true,
+                  autogenerate: { directory: 'python/fastapi' },
+                },
+                {
+                  label: 'Flask',
+                  collapsed: true,
+                  autogenerate: { directory: 'python/flask' },
+                },
+                {
+                  label: 'PyQT',
+                  collapsed: true,
+                  autogenerate: { directory: 'python/pyqt' },
+                },
+                {
+                  label: 'Pandas',
+                  collapsed: true,
+                  autogenerate: { directory: 'python/pandas' },
+                },
+                {
+                  label: 'NumPy',
+                  collapsed: true,
+                  autogenerate: { directory: 'python/numpy' },
+                },
+                {
+                  label: 'Pygame',
+                  collapsed: true,
+                  autogenerate: { directory: 'python/pygame' },
+                },
+                {
+                  label: 'PyTorch',
+                  collapsed: true,
+                  autogenerate: { directory: 'python/pytorch' },
+                },
+                {
+                  label: 'Pillow',
+                  collapsed: true,
+                  autogenerate: { directory: 'python/pillow' },
+                },
+                {
+                  label: 'Python for Blender',
+                  collapsed: true,
+                  autogenerate: { directory: 'python/blender-python' },
+                },
+              ],
+            },
+            {
+              label: '🌐 Web Foundations',
+              link: '/web/javascript/',
+              icon: 'seti:html',
+              items: [
+                {
+                  label: 'JavaScript',
+                  collapsed: true,
+                  autogenerate: { directory: 'web/javascript' },
+                },
+                {
+                  label: 'TypeScript',
+                  collapsed: true,
+                  autogenerate: { directory: 'web/typescript' },
+                },
+                {
+                  label: 'HTML',
+                  collapsed: true,
+                  autogenerate: { directory: 'web/html' },
+                },
+                {
+                  label: 'XML',
+                  collapsed: true,
+                  autogenerate: { directory: 'web/xml' },
+                },
+                {
+                  label: 'CSS',
+                  collapsed: true,
+                  autogenerate: { directory: 'web/css' },
+                },
+              ],
+            },
+            {
+              label: '🎨 Styling',
+              link: '/web/tailwind/',
+              icon: 'seti:css',
+              items: [
+                {
+                  label: 'Tailwind CSS',
+                  collapsed: true,
+                  autogenerate: { directory: 'web/tailwind' },
+                },
+                {
+                  label: 'Emotion',
+                  collapsed: true,
+                  autogenerate: { directory: 'web/emotion' },
+                },
+              ],
+            },
+            {
+              label: '⚛️ React Ecosystem',
+              link: '/react/react/',
+              icon: 'seti:react',
+              items: [
+                {
+                  label: 'React',
+                  collapsed: true,
+                  autogenerate: { directory: 'react/react' },
+                },
+                {
+                  label: 'React Native',
+                  collapsed: true,
+                  autogenerate: { directory: 'react/react-native' },
+                },
+                {
+                  label: 'Three.js',
+                  collapsed: true,
+                  autogenerate: { directory: 'react/threejs' },
+                },
+              ],
+            },
+            {
+              label: '🧪 Testing',
+              link: '/testing/jest/',
+              icon: 'seti:test-js',
+              items: [
+                {
+                  label: 'Jest',
+                  collapsed: true,
+                  autogenerate: { directory: 'testing/jest' },
+                },
+                {
+                  label: 'Playwright',
+                  collapsed: true,
+                  autogenerate: { directory: 'testing/playwright' },
+                },
+              ],
+            },
+            {
+              label: '🚀 Frameworks',
+              link: '/frameworks/nextjs/',
+              icon: 'rocket',
+              items: [
+                {
+                  label: 'Next.js',
+                  collapsed: true,
+                  autogenerate: { directory: 'frameworks/nextjs' },
+                },
+                {
+                  label: 'Nest.js',
+                  collapsed: true,
+                  autogenerate: { directory: 'frameworks/nestjs' },
+                },
+                {
+                  label: 'Astro.js',
+                  collapsed: true,
+                  autogenerate: { directory: 'frameworks/astrojs' },
+                },
+                {
+                  label: 'Electron',
+                  collapsed: true,
+                  autogenerate: { directory: 'frameworks/electron' },
+                },
+                {
+                  label: 'Tauri',
+                  collapsed: true,
+                  autogenerate: { directory: 'frameworks/tauri' },
+                },
+              ],
+            },
+            {
+              label: '🏗️ Infrastructure & DevOps',
+              link: '/infra/docker/',
+              icon: 'seti:docker',
+              items: [
+                {
+                  label: 'Docker',
+                  collapsed: true,
+                  autogenerate: { directory: 'infra/docker' },
+                },
+                {
+                  label: 'Kubernetes',
+                  collapsed: true,
+                  autogenerate: { directory: 'infra/kubernetes' },
+                },
+                {
+                  label: 'GitHub Actions',
+                  collapsed: true,
+                  autogenerate: { directory: 'infra/github-actions' },
+                },
+              ],
+            },
+            {
+              label: '🗄️ Databases',
+              link: '/db/sql/',
+              icon: 'seti:db',
+              items: [
+                {
+                  label: 'SQL',
+                  collapsed: true,
+                  autogenerate: { directory: 'db/sql' },
+                },
+                {
+                  label: 'PostgreSQL',
+                  collapsed: true,
+                  autogenerate: { directory: 'db/postgresql' },
+                },
+                {
+                  label: 'SQLite',
+                  collapsed: true,
+                  autogenerate: { directory: 'db/sqlite' },
+                },
+                {
+                  label: 'MySQL',
+                  collapsed: true,
+                  autogenerate: { directory: 'db/mysql' },
+                },
+                {
+                  label: 'GraphQL',
+                  collapsed: true,
+                  autogenerate: { directory: 'db/graphql' },
+                },
+              ],
+            },
+            {
+              label: '💻 Shell & Scripting',
+              link: '/shell/bash/',
+              icon: 'seti:shell',
+              items: [
+                {
+                  label: 'Bash',
+                  collapsed: true,
+                  autogenerate: { directory: 'shell/bash' },
+                },
+                {
+                  label: 'PowerShell',
+                  collapsed: true,
+                  autogenerate: { directory: 'shell/powershell' },
+                },
+              ],
+            },
+            {
+              label: '⚙️ Systems & Game Dev',
+              link: '/systems/c/',
+              icon: 'seti:c',
+              items: [
+                {
+                  label: 'C',
+                  collapsed: true,
+                  autogenerate: { directory: 'systems/c' },
+                },
+                {
+                  label: 'C++',
+                  collapsed: true,
+                  autogenerate: { directory: 'systems/cpp' },
+                },
+                {
+                  label: 'C++ for Game Dev',
+                  collapsed: true,
+                  autogenerate: { directory: 'systems/cpp-gamedev' },
+                },
+                {
+                  label: 'LLM C++',
+                  collapsed: true,
+                  autogenerate: { directory: 'systems/llm-cpp' },
+                },
+                {
+                  label: 'Blueprint (Unreal Engine)',
+                  collapsed: true,
+                  autogenerate: { directory: 'systems/blueprint' },
+                },
+              ],
+            },
+          ],
           {
-            label: '🐍 Python Ecosystem',
-            link: '/python/python/',
-            icon: 'seti:python',
-            items: [
-              {
-                label: 'Python',
-                collapsed: true,
-                autogenerate: { directory: 'python/python' },
-              },
-              {
-                label: 'Pytest',
-                collapsed: true,
-                autogenerate: { directory: 'python/pytest' },
-              },
-              {
-                label: 'Django',
-                collapsed: true,
-                autogenerate: { directory: 'python/django' },
-              },
-              {
-                label: 'FastAPI',
-                collapsed: true,
-                autogenerate: { directory: 'python/fastapi' },
-              },
-              {
-                label: 'Flask',
-                collapsed: true,
-                autogenerate: { directory: 'python/flask' },
-              },
-              {
-                label: 'PyQT',
-                collapsed: true,
-                autogenerate: { directory: 'python/pyqt' },
-              },
-              {
-                label: 'Pandas',
-                collapsed: true,
-                autogenerate: { directory: 'python/pandas' },
-              },
-              {
-                label: 'NumPy',
-                collapsed: true,
-                autogenerate: { directory: 'python/numpy' },
-              },
-              {
-                label: 'Pygame',
-                collapsed: true,
-                autogenerate: { directory: 'python/pygame' },
-              },
-              {
-                label: 'PyTorch',
-                collapsed: true,
-                autogenerate: { directory: 'python/pytorch' },
-              },
-              {
-                label: 'Pillow',
-                collapsed: true,
-                autogenerate: { directory: 'python/pillow' },
-              },
-              {
-                label: 'Python for Blender',
-                collapsed: true,
-                autogenerate: { directory: 'python/blender-python' },
-              },
-            ],
+            topics: {},
+            exclude: ['/tags', '/tags/**'],
           },
-          {
-            label: '🌐 Web Foundations',
-            link: '/web/javascript/',
-            icon: 'seti:html',
-            items: [
-              {
-                label: 'JavaScript',
-                collapsed: true,
-                autogenerate: { directory: 'web/javascript' },
-              },
-              {
-                label: 'TypeScript',
-                collapsed: true,
-                autogenerate: { directory: 'web/typescript' },
-              },
-              {
-                label: 'HTML',
-                collapsed: true,
-                autogenerate: { directory: 'web/html' },
-              },
-              {
-                label: 'XML',
-                collapsed: true,
-                autogenerate: { directory: 'web/xml' },
-              },
-              {
-                label: 'CSS',
-                collapsed: true,
-                autogenerate: { directory: 'web/css' },
-              },
-            ],
-          },
-          {
-            label: '🎨 Styling',
-            link: '/styling/tailwind/',
-            icon: 'seti:css',
-            items: [
-              {
-                label: 'Tailwind CSS',
-                collapsed: true,
-                autogenerate: { directory: 'styling/tailwind' },
-              },
-              {
-                label: 'Emotion',
-                collapsed: true,
-                autogenerate: { directory: 'styling/emotion' },
-              },
-            ],
-          },
-          {
-            label: '⚛️ React Ecosystem',
-            link: '/react/react/',
-            icon: 'seti:react',
-            items: [
-              {
-                label: 'React',
-                collapsed: true,
-                autogenerate: { directory: 'react/react' },
-              },
-              {
-                label: 'React Native',
-                collapsed: true,
-                autogenerate: { directory: 'react/react-native' },
-              },
-              {
-                label: 'Three.js',
-                collapsed: true,
-                autogenerate: { directory: 'react/threejs' },
-              },
-            ],
-          },
-          {
-            label: '🧪 Testing',
-            link: '/testing/jest/',
-            icon: 'seti:test-js',
-            items: [
-              {
-                label: 'Jest',
-                collapsed: true,
-                autogenerate: { directory: 'testing/jest' },
-              },
-              {
-                label: 'Playwright',
-                collapsed: true,
-                autogenerate: { directory: 'testing/playwright' },
-              },
-            ],
-          },
-          {
-            label: '🚀 Frameworks',
-            link: '/frameworks/nextjs/',
-            icon: 'rocket',
-            items: [
-              {
-                label: 'Next.js',
-                collapsed: true,
-                autogenerate: { directory: 'frameworks/nextjs' },
-              },
-              {
-                label: 'Nest.js',
-                collapsed: true,
-                autogenerate: { directory: 'frameworks/nestjs' },
-              },
-              {
-                label: 'Astro.js',
-                collapsed: true,
-                autogenerate: { directory: 'frameworks/astrojs' },
-              },
-              {
-                label: 'Electron',
-                collapsed: true,
-                autogenerate: { directory: 'frameworks/electron' },
-              },
-              {
-                label: 'Tauri',
-                collapsed: true,
-                autogenerate: { directory: 'frameworks/tauri' },
-              },
-            ],
-          },
-          {
-            label: '🏗️ Infrastructure & DevOps',
-            link: '/infrastructure/docker/',
-            icon: 'seti:docker',
-            items: [
-              {
-                label: 'Docker',
-                collapsed: true,
-                autogenerate: { directory: 'infrastructure/docker' },
-              },
-              {
-                label: 'Kubernetes',
-                collapsed: true,
-                autogenerate: { directory: 'infrastructure/kubernetes' },
-              },
-              {
-                label: 'GitHub Actions',
-                collapsed: true,
-                autogenerate: { directory: 'infrastructure/github-actions' },
-              },
-            ],
-          },
-          {
-            label: '🗄️ Databases',
-            link: '/databases/sql/',
-            icon: 'seti:db',
-            items: [
-              {
-                label: 'SQL',
-                collapsed: true,
-                autogenerate: { directory: 'databases/sql' },
-              },
-              {
-                label: 'PostgreSQL',
-                collapsed: true,
-                autogenerate: { directory: 'databases/postgresql' },
-              },
-              {
-                label: 'SQLite',
-                collapsed: true,
-                autogenerate: { directory: 'databases/sqlite' },
-              },
-              {
-                label: 'MySQL',
-                collapsed: true,
-                autogenerate: { directory: 'databases/mysql' },
-              },
-              {
-                label: 'GraphQL',
-                collapsed: true,
-                autogenerate: { directory: 'databases/graphql' },
-              },
-            ],
-          },
-          {
-            label: '💻 Shell & Scripting',
-            link: '/scripting/bash/',
-            icon: 'seti:shell',
-            items: [
-              {
-                label: 'Bash',
-                collapsed: true,
-                autogenerate: { directory: 'scripting/bash' },
-              },
-              {
-                label: 'PowerShell',
-                collapsed: true,
-                autogenerate: { directory: 'scripting/powershell' },
-              },
-            ],
-          },
-          {
-            label: '⚙️ Systems & Game Dev',
-            link: '/systems/c/',
-            icon: 'seti:c',
-            items: [
-              {
-                label: 'C',
-                collapsed: true,
-                autogenerate: { directory: 'systems/c' },
-              },
-              {
-                label: 'C++',
-                collapsed: true,
-                autogenerate: { directory: 'systems/cpp' },
-              },
-              {
-                label: 'C++ for Game Dev',
-                collapsed: true,
-                autogenerate: { directory: 'systems/cpp-gamedev' },
-              },
-              {
-                label: 'LLM C++',
-                collapsed: true,
-                autogenerate: { directory: 'systems/llm-cpp' },
-              },
-              {
-                label: 'Blueprint (Unreal Engine)',
-                collapsed: true,
-                autogenerate: { directory: 'systems/blueprint' },
-              },
-            ],
-          },
-        ]),
+        ),
         starlightPageActions(),
         starlightCoolerCredit({
           credit: {

@@ -1,19 +1,14 @@
 ---
-title: SQL Getting Started
-description: Create tables, define data types, apply constraints, alter schemas, and organize database objects with SQL DDL.
+title: Getting Started with SQL
+description: Create databases and tables, define data types and constraints, modify schemas with ALTER TABLE, and organize data with schemas in SQL.
 sidebar:
   order: 2
 tags: [database, sql]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+This guide covers everything you need to define and manage database schemas in SQL — from creating your first table to modifying and dropping structures safely.
 
 ## Creating a Database
 
@@ -23,380 +18,398 @@ CREATE DATABASE myapp
   OWNER = myuser
   ENCODING = 'UTF8'
   LC_COLLATE = 'en_US.UTF-8'
-  LC_CTYPE = 'en_US.UTF-8'
-  TEMPLATE = template0;
+  LC_CTYPE = 'en_US.UTF-8';
+
+-- Connect to the database (psql)
+\c myapp
 
 -- MySQL
 CREATE DATABASE myapp
   CHARACTER SET utf8mb4
   COLLATE utf8mb4_unicode_ci;
 
--- Connect to the database
-\c myapp          -- psql command
-USE myapp;        -- MySQL
-```
+USE myapp;
 
-## Data Types
-
-Choosing the right data type is the most important decision in schema design. Wrong types lead to implicit conversions, failed indexes, and subtle bugs.
-
-### Numeric Types
-
-```sql
--- Exact integers
-id        SMALLINT          -- 2 bytes, -32768 to 32767
-count     INTEGER           -- 4 bytes, ~±2.1 billion
-big_id    BIGINT            -- 8 bytes, ~±9.2 × 10^18
-
--- Auto-incrementing (PostgreSQL)
-id        SERIAL            -- auto-increment INTEGER (1 to 2^31)
-id        BIGSERIAL         -- auto-increment BIGINT
-id        INTEGER GENERATED ALWAYS AS IDENTITY    -- SQL standard
-
--- Exact decimal (for money, measurements — NEVER use FLOAT for money)
-price     NUMERIC(10, 2)    -- 10 total digits, 2 after decimal
-quantity  DECIMAL(8, 3)     -- NUMERIC and DECIMAL are synonyms
-
--- Approximate floating point (for scientific calculations only)
-lat       REAL              -- 4 bytes, ~6 decimal digits precision
-lon       DOUBLE PRECISION  -- 8 bytes, ~15 decimal digits precision
-```
-
-:::caution[Never Store Money as FLOAT]
-Floating-point numbers cannot represent most decimal fractions exactly. `0.1 + 0.2 = 0.30000000000000004` in IEEE 754. Always use `NUMERIC` or `DECIMAL` for financial values, or store as integer cents.
-:::
-
-### Text Types
-
-```sql
--- Variable length with optional limit
-username    VARCHAR(50)     -- up to 50 characters
-email       VARCHAR(255)    -- up to 255 characters
-
--- Unlimited length (preferred in PostgreSQL — no performance difference)
-content     TEXT            -- unlimited text
-
--- Fixed length (pads with spaces — rarely useful)
-code        CHAR(3)         -- always exactly 3 chars (e.g., currency codes)
-```
-
-### Boolean
-
-```sql
-is_active   BOOLEAN         -- true / false / NULL
--- SQLite stores as INTEGER (0/1)
--- MySQL uses TINYINT(1)
-```
-
-### Date and Time Types
-
-```sql
-birth_date     DATE                     -- '2000-01-15' (no time zone)
-start_time     TIME                     -- '14:30:00' (no time zone)
-event_at       TIMESTAMP                -- '2024-01-15 14:30:00' (no tz)
-created_at     TIMESTAMPTZ              -- '2024-01-15 14:30:00+00' (WITH tz — recommended)
-duration       INTERVAL                 -- '2 hours 30 minutes', '3 days'
-```
-
-:::tip[Always Use TIMESTAMPTZ]
-`TIMESTAMPTZ` (timestamp with time zone) stores data in UTC and converts on display. `TIMESTAMP` stores the literal value with no timezone context. In a world-spanning application, always use `TIMESTAMPTZ`.
-:::
-
-### Other Types
-
-```sql
-user_id    UUID            -- '550e8400-e29b-41d4-a716-446655440000'
-photo      BYTEA           -- binary data (PostgreSQL)
-metadata   JSON            -- text JSON (validated)
-settings   JSONB           -- binary JSON (indexable, preferred in PostgreSQL)
-tags       TEXT[]          -- array of text (PostgreSQL)
+-- SQLite (database created automatically when you open the file)
+-- sqlite3 myapp.db
 ```
 
 ## Creating Tables
 
+### Column Data Types
+
 ```sql
 CREATE TABLE users (
-  -- Primary key — every table should have one
-  id          BIGSERIAL PRIMARY KEY,
+  -- Integer types
+  id              BIGINT,           -- 8-byte integer (-9.2e18 to 9.2e18)
+  age             INTEGER,          -- 4-byte integer (-2.1B to 2.1B)
+  score           SMALLINT,         -- 2-byte integer (-32768 to 32767)
 
-  -- Required fields
-  email       VARCHAR(255) NOT NULL,
-  username    VARCHAR(50)  NOT NULL,
-  password_hash TEXT       NOT NULL,
+  -- Exact numeric
+  price           NUMERIC(10, 2),   -- Up to 10 digits, 2 decimal places
+  balance         DECIMAL(15, 4),   -- Same as NUMERIC
+  percentage      NUMERIC(5, 2),    -- e.g. 99.99
 
-  -- Optional fields with defaults
-  display_name VARCHAR(100),
-  bio          TEXT,
-  avatar_url   TEXT,
-  is_active    BOOLEAN      NOT NULL DEFAULT true,
-  role         TEXT         NOT NULL DEFAULT 'user',
-  login_count  INTEGER      NOT NULL DEFAULT 0,
+  -- Floating point (approximate — don't use for money)
+  latitude        DOUBLE PRECISION, -- 8-byte float
+  longitude       REAL,             -- 4-byte float
 
-  -- Timestamps
-  created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  last_login  TIMESTAMPTZ,
+  -- Character types
+  code            CHAR(3),          -- Fixed-length, padded with spaces
+  username        VARCHAR(50),      -- Variable-length, max 50 chars
+  bio             TEXT,             -- Unlimited variable-length text
 
-  -- Constraints (inline)
-  CONSTRAINT users_email_unique UNIQUE (email),
-  CONSTRAINT users_username_unique UNIQUE (username),
-  CONSTRAINT users_role_check CHECK (role IN ('user', 'admin', 'moderator')),
-  CONSTRAINT users_email_format CHECK (email ~* '^[^@]+@[^@]+\.[^@]+$')
+  -- Boolean
+  is_active       BOOLEAN,          -- true / false / NULL
+
+  -- Date and time
+  birth_date      DATE,             -- '2024-01-15'
+  start_time      TIME,             -- '09:30:00'
+  created_at      TIMESTAMP,        -- '2024-01-15 09:30:00' (no timezone)
+  updated_at      TIMESTAMPTZ,      -- '2024-01-15 09:30:00+00' (with timezone)
+
+  -- UUID
+  uuid            UUID,             -- PostgreSQL: gen_random_uuid()
+
+  -- JSON (PostgreSQL)
+  metadata        JSONB,            -- Binary JSON with indexing support
+  raw_data        JSON,             -- Text JSON (no indexing)
+
+  -- Binary
+  avatar          BYTEA             -- Binary data
 );
 ```
 
-## Constraints in Detail
-
-### NOT NULL
+### Constraints
 
 ```sql
--- Column-level
-name TEXT NOT NULL
+CREATE TABLE products (
+  id          BIGSERIAL PRIMARY KEY,              -- Auto-incrementing PK
 
--- You can name it (allows dropping by name later)
-name TEXT CONSTRAINT users_name_not_null NOT NULL
+  sku         VARCHAR(50) NOT NULL,               -- Cannot be NULL
+  name        TEXT        NOT NULL,
+
+  price       NUMERIC(10,2) NOT NULL
+              CHECK (price >= 0),                  -- Value constraint
+
+  stock       INTEGER NOT NULL DEFAULT 0,          -- Default value
+              CHECK (stock >= 0),
+
+  slug        VARCHAR(100) UNIQUE NOT NULL,        -- Must be unique
+
+  category_id BIGINT REFERENCES categories(id)     -- Foreign key (default: NO ACTION)
+              ON DELETE SET NULL
+              ON UPDATE CASCADE,
+
+  status      TEXT NOT NULL DEFAULT 'active'
+              CHECK (status IN ('active', 'inactive', 'discontinued')),
+
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 ```
 
-### UNIQUE
+### Foreign Key Actions
+
+When a referenced row is deleted or updated, the foreign key constraint controls what happens:
+
+| Action | ON DELETE behavior | ON UPDATE behavior |
+|---|---|---|
+| `CASCADE` | Delete the referencing row | Update the FK column to match |
+| `SET NULL` | Set FK column to NULL | Set FK column to NULL |
+| `SET DEFAULT` | Set FK column to its default | Set FK column to its default |
+| `RESTRICT` | Error: cannot delete parent | Error: cannot update parent |
+| `NO ACTION` | Same as RESTRICT (deferred check) | Same as RESTRICT |
 
 ```sql
--- Single column
-email TEXT UNIQUE
-
--- Named unique constraint
-email TEXT,
-CONSTRAINT users_email_unique UNIQUE (email)
-
--- Multi-column unique (composite)
-CONSTRAINT users_org_email_unique UNIQUE (organization_id, email)
+CREATE TABLE order_items (
+  id         BIGSERIAL PRIMARY KEY,
+  order_id   BIGINT NOT NULL REFERENCES orders(id)
+             ON DELETE CASCADE,    -- Delete items when order is deleted
+  product_id BIGINT NOT NULL REFERENCES products(id)
+             ON DELETE RESTRICT,   -- Cannot delete product with open orders
+  quantity   INTEGER NOT NULL CHECK (quantity > 0),
+  unit_price NUMERIC(10,2) NOT NULL
+);
 ```
 
-### DEFAULT
+### Named Constraints
 
 ```sql
-status      TEXT    DEFAULT 'active'
-created_at  TIMESTAMPTZ DEFAULT NOW()
-uuid_col    UUID    DEFAULT gen_random_uuid()   -- PostgreSQL
-is_deleted  BOOLEAN DEFAULT false
-score       INTEGER DEFAULT 0
+CREATE TABLE accounts (
+  id      BIGSERIAL,
+  email   TEXT      NOT NULL,
+  balance NUMERIC(15,4) NOT NULL DEFAULT 0,
+
+  -- Named constraints can be referenced in error messages and ALTER TABLE
+  CONSTRAINT accounts_pkey PRIMARY KEY (id),
+  CONSTRAINT accounts_email_unique UNIQUE (email),
+  CONSTRAINT accounts_balance_positive CHECK (balance >= 0),
+  CONSTRAINT accounts_email_format CHECK (email ~* '^[^@]+@[^@]+\.[^@]+$')
+);
 ```
-
-### CHECK
-
-```sql
--- Inline
-price NUMERIC(10,2) CHECK (price >= 0)
-
--- Named and more complex
-CONSTRAINT products_price_range
-  CHECK (price >= 0 AND price <= 1000000)
-
-CONSTRAINT orders_status_valid
-  CHECK (status IN ('pending', 'processing', 'shipped', 'delivered', 'cancelled'))
-
-CONSTRAINT events_date_order
-  CHECK (end_date > start_date)
-```
-
-### PRIMARY KEY
-
-```sql
--- Single column PK
-id BIGSERIAL PRIMARY KEY
-
--- Composite PK (many-to-many join tables)
-PRIMARY KEY (user_id, role_id)
-
--- Named PK
-CONSTRAINT orders_pk PRIMARY KEY (id)
-```
-
-### FOREIGN KEY
-
-```sql
--- Inline
-user_id BIGINT NOT NULL REFERENCES users(id)
-
--- With ON DELETE/UPDATE action
-user_id BIGINT NOT NULL REFERENCES users(id)
-  ON DELETE CASCADE      -- delete orders when user is deleted
-  ON UPDATE CASCADE      -- update FK if PK changes
-
--- Named constraint
-CONSTRAINT orders_user_fk
-  FOREIGN KEY (user_id) REFERENCES users(id)
-  ON DELETE RESTRICT     -- prevent deleting users who have orders
-  ON UPDATE NO ACTION    -- same as RESTRICT in most DBs
-```
-
-#### Foreign Key Actions
-
-| Action        | `ON DELETE` behavior              | `ON UPDATE` behavior            |
-| ------------- | --------------------------------- | ------------------------------- |
-| `CASCADE`     | Delete child rows                 | Update FK values                |
-| `RESTRICT`    | Reject delete if children exist   | Reject update if children exist |
-| `NO ACTION`   | Same as RESTRICT (deferred check) | Same as RESTRICT                |
-| `SET NULL`    | Set FK to NULL                    | Set FK to NULL                  |
-| `SET DEFAULT` | Set FK to column default          | Set FK to column default        |
 
 ## ALTER TABLE
 
+Modify an existing table's structure without recreating it.
+
+### Add and Remove Columns
+
 ```sql
--- Add a column
-ALTER TABLE users ADD COLUMN phone_number VARCHAR(20);
-ALTER TABLE users ADD COLUMN metadata JSONB DEFAULT '{}';
+-- Add a column (defaults to NULL for existing rows unless DEFAULT is specified)
+ALTER TABLE users
+  ADD COLUMN phone_number VARCHAR(20);
+
+-- Add column with a default value
+ALTER TABLE users
+  ADD COLUMN subscription_tier TEXT NOT NULL DEFAULT 'free';
+
+-- Add column and set its value for existing rows
+ALTER TABLE users
+  ADD COLUMN full_name TEXT;
+
+UPDATE users SET full_name = first_name || ' ' || last_name;
+
+ALTER TABLE users
+  ALTER COLUMN full_name SET NOT NULL;
 
 -- Drop a column
-ALTER TABLE users DROP COLUMN phone_number;
-ALTER TABLE users DROP COLUMN IF EXISTS legacy_field;
+ALTER TABLE users
+  DROP COLUMN phone_number;
 
--- Rename a column
-ALTER TABLE users RENAME COLUMN username TO handle;
-
--- Change column type
-ALTER TABLE users ALTER COLUMN score TYPE BIGINT;
-ALTER TABLE users ALTER COLUMN price TYPE NUMERIC(12, 4);
-
--- Change default value
-ALTER TABLE users ALTER COLUMN is_active SET DEFAULT false;
-ALTER TABLE users ALTER COLUMN is_active DROP DEFAULT;
-
--- Add/drop NOT NULL
-ALTER TABLE users ALTER COLUMN email SET NOT NULL;
-ALTER TABLE users ALTER COLUMN bio DROP NOT NULL;
-
--- Add constraint
-ALTER TABLE users ADD CONSTRAINT users_email_unique UNIQUE (email);
-ALTER TABLE orders ADD CONSTRAINT orders_total_positive CHECK (total > 0);
-
--- Drop constraint
-ALTER TABLE users DROP CONSTRAINT users_email_unique;
-ALTER TABLE users DROP CONSTRAINT IF EXISTS users_old_constraint;
-
--- Rename table
-ALTER TABLE users RENAME TO accounts;
+-- Drop with CASCADE (also drops dependent views, constraints)
+ALTER TABLE users
+  DROP COLUMN phone_number CASCADE;
 ```
 
-:::caution[ALTER TABLE in Production]
-`ALTER TABLE` operations can lock the table and block reads/writes. For large tables:
+### Rename Operations
 
-- Use `CREATE INDEX CONCURRENTLY` for new indexes
-- Add nullable columns first, then populate, then add `NOT NULL`
-- Use tools like `pg_repack` or `pt-online-schema-change` for zero-downtime migrations
-  :::
+```sql
+-- Rename a column
+ALTER TABLE users
+  RENAME COLUMN username TO handle;
+
+-- Rename the table itself
+ALTER TABLE users
+  RENAME TO accounts;
+
+-- Rename a constraint
+ALTER TABLE accounts
+  RENAME CONSTRAINT accounts_email_unique TO accounts_email_key;
+```
+
+### Modify Column Types
+
+```sql
+-- Change data type (only if values are compatible or a cast is specified)
+ALTER TABLE products
+  ALTER COLUMN price TYPE NUMERIC(12, 4);
+
+-- Change type with explicit cast
+ALTER TABLE logs
+  ALTER COLUMN event_id TYPE BIGINT
+  USING event_id::BIGINT;
+
+-- Set or remove default
+ALTER TABLE users
+  ALTER COLUMN subscription_tier SET DEFAULT 'free';
+
+ALTER TABLE users
+  ALTER COLUMN subscription_tier DROP DEFAULT;
+
+-- Set NOT NULL
+ALTER TABLE users
+  ALTER COLUMN email SET NOT NULL;
+
+ALTER TABLE users
+  ALTER COLUMN phone_number DROP NOT NULL;
+```
+
+### Constraints
+
+```sql
+-- Add a constraint
+ALTER TABLE orders
+  ADD CONSTRAINT orders_total_positive CHECK (total >= 0);
+
+ALTER TABLE users
+  ADD CONSTRAINT users_email_unique UNIQUE (email);
+
+ALTER TABLE order_items
+  ADD CONSTRAINT order_items_fk_order
+  FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE;
+
+-- Drop a constraint
+ALTER TABLE orders
+  DROP CONSTRAINT orders_total_positive;
+
+-- Drop primary key
+ALTER TABLE old_table
+  DROP CONSTRAINT old_table_pkey;
+```
 
 ## DROP TABLE
 
 ```sql
--- Basic drop (fails if table doesn't exist)
-DROP TABLE orders;
+-- Drop if it exists (no error if missing)
+DROP TABLE IF EXISTS temp_imports;
 
--- Safe drop (no error if missing)
-DROP TABLE IF EXISTS orders;
+-- Drop and remove all dependent objects (views, foreign keys referencing this table)
+DROP TABLE customers CASCADE;
 
--- Drop table and all objects that depend on it (views, FKs, etc.)
-DROP TABLE IF EXISTS users CASCADE;
+-- Drop multiple tables
+DROP TABLE IF EXISTS order_items, orders, products CASCADE;
 
--- Drop multiple tables at once
-DROP TABLE IF EXISTS users, orders, products CASCADE;
+-- Truncate (remove all rows but keep the table structure)
+TRUNCATE TABLE audit_logs;
+
+-- Truncate and reset sequences
+TRUNCATE TABLE users RESTART IDENTITY;
+
+-- Truncate with cascade (truncate referenced tables too)
+TRUNCATE TABLE orders CASCADE;
 ```
 
-## TRUNCATE
-
-Removes all rows from a table much faster than DELETE (no transaction log per row):
-
-```sql
--- Remove all rows (cannot be rolled back in PostgreSQL by default)
-TRUNCATE users;
-
--- Truncate and reset identity/serial counter
-TRUNCATE users RESTART IDENTITY;
-
--- Truncate multiple tables
-TRUNCATE users, orders, products;
-
--- Truncate with CASCADE (also truncates FK-referencing tables)
-TRUNCATE users CASCADE;
-```
+:::caution[DROP TABLE is Irreversible]
+`DROP TABLE` permanently deletes the table and all its data. Always check your current database before dropping: `SELECT current_database();` in PostgreSQL, `SELECT database();` in MySQL.
+:::
 
 ## Schema Organization
 
-Use schemas to organize tables into logical namespaces:
+Schemas are namespaces within a database that group related objects.
 
 ```sql
--- Create schemas
-CREATE SCHEMA auth;
-CREATE SCHEMA public;         -- default schema
-CREATE SCHEMA audit;
-CREATE SCHEMA reporting;
+-- Create a schema
+CREATE SCHEMA billing;
+CREATE SCHEMA analytics;
 
--- Create tables in specific schemas
-CREATE TABLE auth.users (...);
-CREATE TABLE auth.sessions (...);
-CREATE TABLE audit.events (...);
+-- Create a table in a specific schema
+CREATE TABLE billing.invoices (
+  id         BIGSERIAL PRIMARY KEY,
+  customer_id BIGINT NOT NULL,
+  amount     NUMERIC(12,2) NOT NULL,
+  issued_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
--- Set search_path (PostgreSQL) — which schemas to search
-SET search_path TO myapp, public;
+CREATE TABLE analytics.page_views (
+  id         BIGSERIAL PRIMARY KEY,
+  page_url   TEXT NOT NULL,
+  viewed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
--- Fully qualified reference
-SELECT * FROM auth.users WHERE id = 1;
+-- Set search path (PostgreSQL) — schema resolution order
+SET search_path TO billing, analytics, public;
+
+-- Now you can omit the schema prefix for tables in billing or analytics
+SELECT * FROM invoices;  -- Finds billing.invoices first
 ```
 
-## information_schema
+## `information_schema`
 
-Query metadata about your database structure:
+The `information_schema` is a standard SQL interface to query the database's own metadata:
 
 ```sql
--- List all tables in the current database
+-- List all tables in current database
 SELECT table_schema, table_name, table_type
 FROM information_schema.tables
 WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
 ORDER BY table_schema, table_name;
 
 -- List all columns for a specific table
-SELECT column_name, data_type, is_nullable,
-       column_default, character_maximum_length
+SELECT
+  column_name,
+  data_type,
+  character_maximum_length,
+  is_nullable,
+  column_default
 FROM information_schema.columns
 WHERE table_name = 'users'
+  AND table_schema = 'public'
 ORDER BY ordinal_position;
 
 -- List all constraints
-SELECT constraint_name, constraint_type, table_name
-FROM information_schema.table_constraints
-WHERE table_schema = 'public'
-ORDER BY table_name, constraint_type;
-
--- Find all foreign key relationships
 SELECT
-  kcu.table_name AS source_table,
-  kcu.column_name AS source_column,
-  ccu.table_name AS target_table,
-  ccu.column_name AS target_column
-FROM information_schema.key_column_usage kcu
-JOIN information_schema.referential_constraints rc
-  ON kcu.constraint_name = rc.constraint_name
-JOIN information_schema.constraint_column_usage ccu
-  ON rc.unique_constraint_name = ccu.constraint_name;
+  tc.constraint_name,
+  tc.constraint_type,
+  tc.table_name,
+  kcu.column_name,
+  ccu.table_name  AS foreign_table_name,
+  ccu.column_name AS foreign_column_name
+FROM information_schema.table_constraints AS tc
+JOIN information_schema.key_column_usage  AS kcu
+  ON tc.constraint_name = kcu.constraint_name
+LEFT JOIN information_schema.constraint_column_usage AS ccu
+  ON tc.constraint_name = ccu.constraint_name
+WHERE tc.table_schema = 'public';
+
+-- List all indexes (PostgreSQL)
+SELECT
+  indexname,
+  tablename,
+  indexdef
+FROM pg_indexes
+WHERE schemaname = 'public'
+ORDER BY tablename, indexname;
 ```
 
 ## COMMENT ON
 
-Document your schema objects directly in the database:
+Add documentation to database objects:
 
 ```sql
-COMMENT ON TABLE users IS 'Registered user accounts';
-COMMENT ON COLUMN users.email IS 'Primary email address — used for login and notifications';
-COMMENT ON COLUMN users.password_hash IS 'bcrypt hash with 12 rounds — never store plaintext';
-COMMENT ON CONSTRAINT users_role_check ON users IS 'Allowed roles: user, admin, moderator';
+COMMENT ON TABLE users IS 'Application users — includes both customers and admin accounts.';
+COMMENT ON COLUMN users.status IS 'One of: active, suspended, deleted. Never hard-delete users.';
+COMMENT ON CONSTRAINT users_email_unique ON users IS 'Email addresses must be globally unique across all user types.';
+COMMENT ON INDEX idx_users_email IS 'Used for login and uniqueness checks.';
+```
 
--- Read comments
-SELECT
-  col.column_name,
-  pgd.description
-FROM pg_catalog.pg_stattributes sta
-JOIN information_schema.columns col
-  ON col.column_name = sta.attname
-LEFT JOIN pg_catalog.pg_description pgd
-  ON pgd.objoid = sta.attrelid AND pgd.objsubid = sta.attnum
-WHERE col.table_name = 'users';
+View comments in PostgreSQL:
+
+```sql
+SELECT obj_description('users'::regclass);   -- Table comment
+\d+ users                                     -- psql: shows comments inline
+```
+
+## Complete Schema Example
+
+```sql
+-- Create schema
+CREATE SCHEMA IF NOT EXISTS store;
+
+-- Enum type for product status
+CREATE TYPE store.product_status AS ENUM ('draft', 'active', 'discontinued');
+
+-- Categories with self-referencing hierarchy
+CREATE TABLE store.categories (
+  id          BIGSERIAL PRIMARY KEY,
+  name        TEXT    NOT NULL,
+  slug        TEXT    NOT NULL UNIQUE,
+  parent_id   BIGINT  REFERENCES store.categories(id) ON DELETE SET NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Products
+CREATE TABLE store.products (
+  id           BIGSERIAL PRIMARY KEY,
+  sku          VARCHAR(100) UNIQUE NOT NULL,
+  name         TEXT         NOT NULL,
+  description  TEXT,
+  price        NUMERIC(12,2) NOT NULL CHECK (price >= 0),
+  compare_at   NUMERIC(12,2) CHECK (compare_at IS NULL OR compare_at >= price),
+  weight_kg    NUMERIC(8,3),
+  category_id  BIGINT REFERENCES store.categories(id) ON DELETE SET NULL,
+  status       store.product_status NOT NULL DEFAULT 'draft',
+  metadata     JSONB NOT NULL DEFAULT '{}',
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE store.products IS 'Product catalog. Never hard-delete — use status = discontinued.';
+COMMENT ON COLUMN store.products.compare_at IS 'Original price for strike-through display. Must be >= price.';
+
+-- Index for common queries
+CREATE INDEX idx_products_category ON store.products(category_id)
+  WHERE status = 'active';
+
+CREATE INDEX idx_products_status_created ON store.products(status, created_at DESC);
 ```

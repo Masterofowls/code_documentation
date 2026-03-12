@@ -1,226 +1,250 @@
 ---
 title: SQL Overview
-description: Introduction to SQL, the relational model, SQL standards, dialect differences, DDL/DML/DCL/TCL categories, and ACID properties.
+description: A comprehensive introduction to SQL — the language of relational databases. Covers the relational model, SQL standards, dialects, categories, and ACID properties.
 sidebar:
   order: 1
 tags: [database, sql]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-SQL (Structured Query Language) is the standard language for interacting with relational databases. Declared in 1974 and standardized in 1986, SQL remains one of the most widely used programming languages in the world — present in virtually every data-driven application.
+SQL (Structured Query Language) is the standard language for managing and querying relational databases. It has been the dominant data query language since the 1970s and remains essential for application development, data analysis, and systems engineering.
+
+## What is SQL?
+
+SQL is a **declarative language** — you describe *what* data you want, not *how* to retrieve it. The database engine's query planner figures out the most efficient execution path. This abstraction is what makes SQL powerful: the same query runs correctly whether your table has 100 rows or 100 million rows (performance varies, but correctness doesn't).
+
+```sql
+-- Describe what you want, not how to get it
+SELECT
+  c.name,
+  COUNT(o.id)    AS order_count,
+  SUM(o.total)   AS lifetime_value
+FROM customers c
+LEFT JOIN orders o ON c.id = o.customer_id
+WHERE c.created_at >= '2024-01-01'
+GROUP BY c.id, c.name
+HAVING SUM(o.total) > 1000
+ORDER BY lifetime_value DESC
+LIMIT 25;
+```
 
 ## The Relational Model
 
-SQL is built on the **relational model**, formalized by E.F. Codd in 1970. The core idea: all data is organized into **relations** (tables), and queries produce new relations.
+The relational model, introduced by Edgar F. Codd in 1970, organizes data into **relations** (tables). Each concept has a precise definition:
 
-### Key Concepts
+| Concept | Relational term | SQL term | Description |
+|---|---|---|---|
+| Relation | Relation | Table | A named set of rows with a fixed schema |
+| Tuple | Tuple | Row / Record | A single entry in a table |
+| Attribute | Attribute | Column / Field | A named, typed property of a relation |
+| Domain | Domain | Data type | The set of valid values for an attribute |
+| Key | Key | Primary key | A set of columns uniquely identifying a row |
+| Foreign key | Foreign key | Foreign key | A reference to a row in another table |
 
-| Concept                      | Description                                                 |
-| ---------------------------- | ----------------------------------------------------------- |
-| **Table (Relation)**         | A two-dimensional structure of named columns and rows       |
-| **Row (Tuple/Record)**       | A single data entry in a table                              |
-| **Column (Attribute/Field)** | A named, typed property shared by all rows                  |
-| **Primary Key**              | A column (or combination) that uniquely identifies each row |
-| **Foreign Key**              | A column referencing the primary key of another table       |
-| **Schema**                   | A namespace grouping related tables and objects             |
-| **Index**                    | A data structure for fast row lookup by column values       |
-| **View**                     | A named query that behaves like a virtual table             |
-| **Constraint**               | A rule enforced on data (NOT NULL, UNIQUE, CHECK, FK)       |
-| **Transaction**              | A sequence of operations treated as a single atomic unit    |
+### Tables, Rows, and Columns
 
 ```sql
--- A simple relational model: users and orders
+-- A table defines the schema (structure)
+CREATE TABLE products (
+  id          BIGINT       PRIMARY KEY,
+  sku         VARCHAR(50)  UNIQUE NOT NULL,
+  name        TEXT         NOT NULL,
+  price       NUMERIC(10,2) NOT NULL CHECK (price >= 0),
+  category_id BIGINT       REFERENCES categories(id),
+  created_at  TIMESTAMP    DEFAULT NOW()
+);
+
+-- Rows are the data instances
+INSERT INTO products (sku, name, price, category_id)
+VALUES ('WIDGET-001', 'Blue Widget', 29.99, 1);
+```
+
+### Keys
+
+**Primary key**: Uniquely identifies each row. Cannot be NULL. Every table should have one.
+
+**Foreign key**: References the primary key of another table, enforcing referential integrity.
+
+**Candidate key**: Any column or set of columns that could be a primary key.
+
+**Composite key**: A primary key made of multiple columns.
+
+```sql
+-- Single-column primary key
 CREATE TABLE users (
-  id         SERIAL PRIMARY KEY,
-  email      VARCHAR(255) UNIQUE NOT NULL,
-  name       TEXT NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW()
+  id    BIGINT PRIMARY KEY,
+  email TEXT   UNIQUE NOT NULL
 );
 
-CREATE TABLE orders (
-  id         SERIAL PRIMARY KEY,
-  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  total      NUMERIC(10, 2) NOT NULL,
-  status     TEXT NOT NULL DEFAULT 'pending',
-  created_at TIMESTAMPTZ DEFAULT NOW()
+-- Composite primary key
+CREATE TABLE order_items (
+  order_id   BIGINT REFERENCES orders(id),
+  product_id BIGINT REFERENCES products(id),
+  quantity   INTEGER NOT NULL CHECK (quantity > 0),
+  PRIMARY KEY (order_id, product_id)
 );
-
--- Relational query: join users with their orders
-SELECT u.name, u.email, COUNT(o.id) AS order_count, SUM(o.total) AS total_spent
-FROM users u
-LEFT JOIN orders o ON o.user_id = u.id
-GROUP BY u.id, u.name, u.email
-ORDER BY total_spent DESC NULLS LAST;
 ```
 
 ## SQL Standards
 
-SQL has been standardized by ANSI and ISO through multiple revisions:
+SQL is standardized by ISO/IEC. Each standard revision adds new features:
 
-| Standard     | Year | Key Additions                                  |
-| ------------ | ---- | ---------------------------------------------- |
-| **SQL-86**   | 1986 | First ANSI standard                            |
-| **SQL-89**   | 1989 | Integrity constraints                          |
-| **SQL-92**   | 1992 | Major expansion — JOINs, subqueries, CASE      |
-| **SQL:1999** | 1999 | Recursive queries (CTEs), triggers, procedural |
-| **SQL:2003** | 2003 | Window functions, XML, sequences, MERGE        |
-| **SQL:2006** | 2006 | XQuery integration                             |
-| **SQL:2008** | 2008 | TRUNCATE, FETCH FIRST                          |
-| **SQL:2011** | 2011 | Temporal tables, PERIOD                        |
-| **SQL:2016** | 2016 | JSON support, row pattern matching             |
-| **SQL:2019** | 2019 | Multi-dimensional arrays, property graphs      |
+| Standard | Year | Key additions |
+|---|---|---|
+| SQL-86 (SQL-87) | 1987 | First standard — basic SELECT, INSERT, UPDATE, DELETE |
+| SQL-89 | 1989 | Integrity constraints (CHECK, NOT NULL) |
+| SQL-92 | 1992 | Major revision — JOINs, subqueries, CASE, CAST, string functions |
+| SQL:1999 | 1999 | Recursive CTEs, triggers, OO extensions, OLAP functions |
+| SQL:2003 | 2003 | Window functions, XML, MERGE, sequences, identity columns |
+| SQL:2006 | 2006 | XML query |
+| SQL:2008 | 2008 | TRUNCATE, FETCH FIRST, additional window functions |
+| SQL:2011 | 2011 | Temporal tables (AS OF syntax) |
+| SQL:2016 | 2016 | JSON support, row pattern recognition |
+| SQL:2019 | 2019 | Multidimensional arrays |
+| SQL:2023 | 2023 | Property graph queries, improved JSON, UUIDs |
 
-:::tip[Portability Reminder]
-Core SQL (SELECT, INSERT, UPDATE, DELETE, JOINs, aggregates, CTEs) is highly portable. Advanced features (window functions, JSONB, specific data types) vary significantly between vendors.
+:::tip[Standards vs Reality]
+No database fully implements every SQL standard feature. PostgreSQL has the best standards compliance overall. MySQL/MariaDB historically lag on standard SQL. Always check your target database's documentation for specific feature availability.
 :::
 
-## SQL Dialect Comparison
+## SQL Dialects
 
-| Feature              | PostgreSQL                | MySQL 8+           | SQLite             | SQL Server              | Oracle                   |
-| -------------------- | ------------------------- | ------------------ | ------------------ | ----------------------- | ------------------------ | --- | --- | --------------- | --- | --- | --- |
-| **Window functions** | ✅ Full                   | ✅ 8.0+            | ✅ 3.25+           | ✅                      | ✅                       |
-| **CTEs (WITH)**      | ✅ + Recursive            | ✅ 8.0+            | ✅ 3.35+           | ✅                      | ✅                       |
-| **FULL OUTER JOIN**  | ✅                        | ❌ (emulate)       | ✅ 3.39+           | ✅                      | ✅                       |
-| **RETURNING**        | ✅                        | ❌                 | ✅                 | `OUTPUT`                | `RETURNING`              |
-| **UPSERT**           | `ON CONFLICT`             | `ON DUPLICATE KEY` | `ON CONFLICT`      | `MERGE`                 | `MERGE`                  |
-| **JSONB/JSON**       | ✅ JSONB (binary)         | ✅ JSON            | ✅ JSON fns        | ✅ JSON                 | ✅ JSON                  |
-| **Array types**      | ✅ Native                 | ❌                 | ❌                 | ❌                      | ❌                       |
-| **Auto-increment**   | `SERIAL` / `IDENTITY`     | `AUTO_INCREMENT`   | `AUTOINCREMENT`    | `IDENTITY`              | `SEQUENCE`               |
-| **String concat**    | `                         |                    | `or`concat()`      | `CONCAT()`              | `                        |     | `   | `+` or `CONCAT` | `   |     | `   |
-| **String type**      | `TEXT` / `VARCHAR`        | `VARCHAR`          | `TEXT`             | `NVARCHAR`              | `VARCHAR2`               |
-| **Boolean**          | `BOOLEAN`                 | `TINYINT(1)`       | `INTEGER`          | `BIT`                   | `NUMBER(1)`              |
-| **Case sensitivity** | Identifiers fold to lower | Case-insensitive   | Case-insensitive   | Case-insensitive        | Case-sensitive           |
-| **Limit syntax**     | `LIMIT n OFFSET n`        | `LIMIT n OFFSET n` | `LIMIT n OFFSET n` | `TOP n` / `FETCH FIRST` | `ROWNUM` / `FETCH FIRST` |
+While SQL is standardized, each database has its own dialect with extensions, syntax variations, and non-standard features.
+
+| Feature | PostgreSQL | MySQL/MariaDB | SQLite | SQL Server | Oracle |
+|---|---|---|---|---|---|
+| **String concat** | `\|\|` or `concat()` | `concat()` | `\|\|` | `+` or `concat()` | `\|\|` or `concat()` |
+| **Auto-increment** | `SERIAL` / `IDENTITY` | `AUTO_INCREMENT` | `AUTOINCREMENT` | `IDENTITY(1,1)` | `GENERATED AS IDENTITY` |
+| **Boolean** | `BOOLEAN` (true/false) | `TINYINT(1)` | No BOOLEAN | `BIT` | No BOOLEAN |
+| **Limit rows** | `LIMIT n` | `LIMIT n` | `LIMIT n` | `TOP n` / `FETCH FIRST` | `FETCH FIRST n ROWS` |
+| **String case** | `ILIKE` | Case-insensitive by default | `LIKE` (case-insensitive for ASCII) | `LIKE` (configurable collation) | `UPPER()/LOWER()` |
+| **JSON** | JSONB (full) | JSON (limited) | JSON functions (3.38+) | JSON (limited) | JSON (20c+) |
+| **CTE recursion** | `WITH RECURSIVE` | `WITH RECURSIVE` (8.0+) | `WITH RECURSIVE` | `WITH … (recursive)` | `WITH … CYCLE` |
+| **Window functions** | Full support | Full support (8.0+) | Limited (3.25+) | Full support | Full support |
+| **Upsert** | `ON CONFLICT` | `ON DUPLICATE KEY UPDATE` | `ON CONFLICT` | `MERGE` | `MERGE` |
+| **Arrays** | Native array type | No | No | No | No |
 
 ## SQL Statement Categories
 
-SQL statements are grouped into four categories:
+SQL statements are organized into four categories:
 
 ### DDL — Data Definition Language
 
-Defines and modifies database structure. Changes are auto-committed.
+Defines and modifies the database schema (structure):
 
 ```sql
-CREATE TABLE products (id SERIAL PRIMARY KEY, name TEXT);
-ALTER TABLE products ADD COLUMN price NUMERIC(10,2);
-DROP TABLE IF EXISTS products CASCADE;
-CREATE INDEX idx_products_name ON products(name);
-CREATE VIEW active_products AS SELECT * FROM products WHERE active = true;
-TRUNCATE TABLE products;
+CREATE TABLE employees (...);
+ALTER TABLE employees ADD COLUMN salary NUMERIC(10,2);
+DROP TABLE employees;
+TRUNCATE TABLE employees;
+CREATE INDEX idx_email ON employees(email);
+CREATE VIEW active_employees AS SELECT * FROM employees WHERE active = true;
 ```
 
 ### DML — Data Manipulation Language
 
-Reads and modifies data. These statements participate in transactions.
+Reads and modifies data:
 
 ```sql
-SELECT id, name, price FROM products WHERE price > 10;
-INSERT INTO products (name, price) VALUES ('Widget', 9.99);
-UPDATE products SET price = 12.99 WHERE id = 1;
-DELETE FROM products WHERE id = 1;
-MERGE INTO products USING ...;
+SELECT * FROM employees WHERE department_id = 5;
+INSERT INTO employees (name, email) VALUES ('Alice', 'alice@example.com');
+UPDATE employees SET salary = salary * 1.10 WHERE performance_rating = 5;
+DELETE FROM employees WHERE termination_date < NOW();
 ```
 
 ### DCL — Data Control Language
 
-Manages access permissions.
+Controls access permissions:
 
 ```sql
-GRANT SELECT, INSERT ON products TO app_user;
-REVOKE DELETE ON products FROM app_user;
+GRANT SELECT, INSERT ON employees TO hr_user;
+REVOKE DELETE ON employees FROM hr_user;
 GRANT ALL PRIVILEGES ON DATABASE mydb TO admin_user;
 ```
 
 ### TCL — Transaction Control Language
 
-Controls transaction boundaries.
+Manages transactions:
 
 ```sql
-BEGIN;              -- or START TRANSACTION
-SAVEPOINT my_save;
-ROLLBACK TO SAVEPOINT my_save;
-RELEASE SAVEPOINT my_save;
-COMMIT;
-ROLLBACK;
+BEGIN;                                -- Start transaction
+SAVEPOINT before_salary_update;
+UPDATE employees SET salary = 100000 WHERE id = 1;
+ROLLBACK TO before_salary_update;    -- Undo to savepoint
+COMMIT;                               -- Finalize transaction
 ```
 
 ## ACID Properties
 
-ACID is the set of properties that guarantee database transactions are processed reliably:
+ACID is the set of properties that guarantee database transactions are processed reliably.
 
 ### Atomicity
 
-A transaction is all-or-nothing. If any part fails, the entire transaction is rolled back.
+A transaction is **all or nothing**. If any step fails, the entire transaction is rolled back — no partial changes are committed.
 
 ```sql
+-- Transfer $100 from account A to account B
 BEGIN;
-
-UPDATE accounts SET balance = balance - 500 WHERE id = 1;  -- debit
-UPDATE accounts SET balance = balance + 500 WHERE id = 2;  -- credit
-
--- If the second UPDATE fails, the first is automatically rolled back
+UPDATE accounts SET balance = balance - 100 WHERE id = 'A';
+UPDATE accounts SET balance = balance + 100 WHERE id = 'B';
+-- If the second UPDATE fails, the first is also rolled back
 COMMIT;
 ```
 
 ### Consistency
 
-A transaction brings the database from one valid state to another. Constraints, triggers, and rules are enforced.
+A transaction takes the database from one **valid state** to another valid state. All data integrity constraints must be satisfied before the transaction can commit.
 
 ```sql
--- This will fail atomically — CHECK constraint prevents negative balance
-UPDATE accounts SET balance = balance - 10000
-WHERE id = 1;  -- fails if balance < 10000 due to CHECK (balance >= 0)
+-- Constraint ensures consistency
+ALTER TABLE accounts ADD CONSTRAINT balance_positive CHECK (balance >= 0);
+
+-- This transaction will be rejected if A's balance would go negative
+BEGIN;
+UPDATE accounts SET balance = balance - 1000 WHERE id = 'A';  -- May violate CHECK
+COMMIT;  -- Will fail if balance < 0
 ```
 
 ### Isolation
 
-Concurrent transactions execute as if they were sequential. Isolation levels control the trade-off between correctness and performance.
+Concurrent transactions execute as if they were **serial** (one after the other). The degree of isolation is configurable via isolation levels.
 
 ```sql
--- Isolation levels (from weakest to strongest):
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;   -- dirty reads possible
-SET TRANSACTION ISOLATION LEVEL READ COMMITTED;     -- PostgreSQL default
-SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
-SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;       -- strongest
+-- Set isolation level for this transaction
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+-- Other transactions cannot see your uncommitted changes
+-- You cannot see uncommitted changes from others
+COMMIT;
 ```
 
 ### Durability
 
-Once committed, data survives system failures. Achieved through write-ahead logging (WAL) and persistent storage.
+Once a transaction **commits**, its changes are permanent — even if the system crashes immediately after.
 
-:::caution[SQLite and ACID]
-SQLite is ACID-compliant in WAL mode. In the default rollback journal mode, it still provides ACID guarantees but with lower concurrency. Always enable `PRAGMA journal_mode=WAL` for application use.
-:::
+The database achieves durability via the **Write-Ahead Log (WAL)**: changes are written to a log before being applied to data files. On crash recovery, the log is replayed.
 
-## Explore This Section
+## Pages in This Section
 
 <CardGrid>
   <Card title="Getting Started" icon="rocket">
-    CREATE TABLE, data types, constraints, ALTER TABLE, and schema organization.
-    [Getting Started →](/db/sql/getting-started)
+    Create tables, define constraints, and learn data types and schema management.
+    [→ Getting Started](/db/sql/getting-started)
   </Card>
   <Card title="Queries" icon="magnifier">
-    SELECT, WHERE, subqueries, CTEs, CASE, INSERT, UPDATE, DELETE, and UPSERT.
-    [Queries →](/db/sql/queries)
+    SELECT, WHERE, ORDER BY, CTEs, CASE expressions, and data modification.
+    [→ Queries](/db/sql/queries)
   </Card>
-  <Card title="Joins" icon="open-book">
-    INNER, LEFT, RIGHT, FULL OUTER, CROSS, SELF, LATERAL, and anti-join
-    patterns. [Joins →](/db/sql/joins)
+  <Card title="Joins" icon="random">
+    INNER, OUTER, CROSS, LATERAL joins — with practical multi-table examples.
+    [→ Joins](/db/sql/joins)
   </Card>
   <Card title="Aggregation" icon="bars">
-    COUNT, SUM, AVG, GROUP BY, HAVING, ROLLUP, CUBE, and window functions.
-    [Aggregation →](/db/sql/aggregation)
+    Aggregate functions, GROUP BY, HAVING, ROLLUP, and window functions.
+    [→ Aggregation](/db/sql/aggregation)
   </Card>
-  <Card title="Advanced SQL" icon="setting">
-    Transactions, isolation levels, views, triggers, and normalization.
-    [Advanced →](/db/sql/advanced)
+  <Card title="Advanced SQL" icon="star">
+    Transactions, isolation levels, views, stored procedures, triggers, and normalization.
+    [→ Advanced](/db/sql/advanced)
   </Card>
 </CardGrid>

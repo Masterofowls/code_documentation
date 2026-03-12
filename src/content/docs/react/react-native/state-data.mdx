@@ -1,300 +1,245 @@
 ---
 title: State & Data Management
-description: Manage local, global, and server state in React Native using useState, useReducer, Context, Zustand, React Query, MMKV, AsyncStorage, SQLite, and offline-first patterns.
+description: Manage local state, global state, server state, and persistent storage in React Native using hooks, Zustand, TanStack Query, MMKV, SQLite, and more.
 sidebar:
   order: 5
 tags: [react, mobile]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-React Native apps need to manage several types of state: local UI state, shared global state, server-fetched data, and persisted data. This guide covers the full spectrum of options — from built-in hooks to production-ready libraries.
+React Native apps have the same state management needs as React web apps — plus the additional concerns of offline-first design, device storage, and secure credential handling. This guide covers the full stack from local component state to server state caching.
 
 ## Local State: useState and useReducer
 
-For simple component-level state, `useState` is all you need. For more complex logic with multiple related values, reach for `useReducer`.
+For state that lives within a single component or a small subtree, React's built-in hooks are all you need.
 
 ```tsx
 import React, { useState, useReducer } from 'react';
-import { View, TextInput, Pressable, Text, StyleSheet } from 'react-native';
+import { View, TextInput, Pressable, Text } from 'react-native';
 
-// Simple useState example
-export function SearchBar() {
-  const [query, setQuery] = useState('');
-  const [isFocused, setIsFocused] = useState(false);
-
+// useState for simple values:
+function Counter() {
+  const [count, setCount] = useState(0);
   return (
-    <View style={[styles.bar, isFocused && styles.barFocused]}>
-      <TextInput
-        value={query}
-        onChangeText={setQuery}
-        onFocus={() => setIsFocused(true)}
-        onBlur={() => setIsFocused(false)}
-        placeholder="Search..."
-      />
-      {query.length > 0 && (
-        <Pressable onPress={() => setQuery('')}>
-          <Text>✕</Text>
-        </Pressable>
-      )}
-    </View>
+    <Pressable onPress={() => setCount(c => c + 1)}>
+      <Text>Count: {count}</Text>
+    </Pressable>
   );
 }
 
-// useReducer for complex form state
-type FormState = {
-  email: string;
-  password: string;
-  loading: boolean;
-  error: string | null;
+// useReducer for complex state with multiple sub-values:
+type CartState = {
+  items: CartItem[];
+  total: number;
+  isLoading: boolean;
 };
 
-type FormAction =
-  | { type: 'SET_EMAIL'; payload: string }
-  | { type: 'SET_PASSWORD'; payload: string }
-  | { type: 'SUBMIT_START' }
-  | { type: 'SUBMIT_SUCCESS' }
-  | { type: 'SUBMIT_ERROR'; payload: string };
+type CartAction =
+  | { type: 'ADD_ITEM'; payload: CartItem }
+  | { type: 'REMOVE_ITEM'; payload: string }
+  | { type: 'CLEAR_CART' }
+  | { type: 'SET_LOADING'; payload: boolean };
 
-const initialState: FormState = {
-  email: '',
-  password: '',
-  loading: false,
-  error: null,
-};
-
-function formReducer(state: FormState, action: FormAction): FormState {
+function cartReducer(state: CartState, action: CartAction): CartState {
   switch (action.type) {
-    case 'SET_EMAIL':
-      return { ...state, email: action.payload, error: null };
-    case 'SET_PASSWORD':
-      return { ...state, password: action.payload, error: null };
-    case 'SUBMIT_START':
-      return { ...state, loading: true, error: null };
-    case 'SUBMIT_SUCCESS':
-      return { ...state, loading: false };
-    case 'SUBMIT_ERROR':
-      return { ...state, loading: false, error: action.payload };
+    case 'ADD_ITEM': {
+      const items = [...state.items, action.payload];
+      return { ...state, items, total: items.reduce((s, i) => s + i.price, 0) };
+    }
+    case 'REMOVE_ITEM': {
+      const items = state.items.filter(i => i.id !== action.payload);
+      return { ...state, items, total: items.reduce((s, i) => s + i.price, 0) };
+    }
+    case 'CLEAR_CART':
+      return { items: [], total: 0, isLoading: false };
+    case 'SET_LOADING':
+      return { ...state, isLoading: action.payload };
     default:
       return state;
   }
 }
 
-export function LoginForm() {
-  const [state, dispatch] = useReducer(formReducer, initialState);
+function CartScreen() {
+  const [state, dispatch] = useReducer(cartReducer, {
+    items: [],
+    total: 0,
+    isLoading: false,
+  });
 
-  const handleLogin = async () => {
-    dispatch({ type: 'SUBMIT_START' });
-    try {
-      await loginUser(state.email, state.password);
-      dispatch({ type: 'SUBMIT_SUCCESS' });
-    } catch (error) {
-      dispatch({ type: 'SUBMIT_ERROR', payload: (error as Error).message });
-    }
-  };
-
-  return (
-    <View style={styles.form}>
-      <TextInput
-        value={state.email}
-        onChangeText={(text) => dispatch({ type: 'SET_EMAIL', payload: text })}
-        keyboardType="email-address"
-        autoCapitalize="none"
-      />
-      <TextInput
-        value={state.password}
-        onChangeText={(text) =>
-          dispatch({ type: 'SET_PASSWORD', payload: text })
-        }
-        secureTextEntry
-      />
-      {state.error && <Text style={styles.error}>{state.error}</Text>}
-      <Pressable onPress={handleLogin} disabled={state.loading}>
-        <Text>{state.loading ? 'Signing in...' : 'Sign In'}</Text>
-      </Pressable>
-    </View>
-  );
+  return <View>{/* ... */}</View>;
 }
-
-const styles = StyleSheet.create({
-  bar: {
-    flexDirection: 'row',
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 8,
-    padding: 10,
-  },
-  barFocused: { borderColor: '#6366f1' },
-  form: { gap: 12, padding: 16 },
-  error: { color: '#e53e3e', fontSize: 13 },
-});
 ```
 
 ## Context API for Global State
 
-React Context is built in and works well for low-frequency global state (theme, auth, locale). Avoid using it for high-frequency updates (it re-renders all consumers on every change).
+The Context API is ideal for app-wide state like theme, locale, or auth user — values that change infrequently.
 
 ```tsx
 // src/context/ThemeContext.tsx
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, { createContext, useContext, useState, useMemo } from 'react';
 
 type Theme = 'light' | 'dark';
 
 interface ThemeContextValue {
   theme: Theme;
+  colors: typeof lightColors;
   toggleTheme: () => void;
-  colors: typeof lightColors | typeof darkColors;
 }
 
 const lightColors = {
-  background: '#ffffff',
-  text: '#111111',
-  primary: '#6366f1',
-  card: '#f9fafb',
-  border: '#e5e7eb',
+  background: '#f8fafc',
+  surface: '#ffffff',
+  text: '#1a202c',
+  textSecondary: '#718096',
+  primary: '#4f46e5',
+  border: '#e2e8f0',
 };
 
-const darkColors = {
-  background: '#111827',
-  text: '#f9fafb',
+const darkColors: typeof lightColors = {
+  background: '#0f172a',
+  surface: '#1e293b',
+  text: '#f1f5f9',
+  textSecondary: '#94a3b8',
   primary: '#818cf8',
-  card: '#1f2937',
-  border: '#374151',
+  border: '#334155',
 };
 
-const ThemeContext = createContext<ThemeContextValue | null>(null);
+const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setTheme] = useState<Theme>('light');
 
-  const toggleTheme = useCallback(() => {
-    setTheme((t) => (t === 'light' ? 'dark' : 'light'));
-  }, []);
-
-  const colors = theme === 'light' ? lightColors : darkColors;
-
-  return (
-    <ThemeContext.Provider value={{ theme, toggleTheme, colors }}>
-      {children}
-    </ThemeContext.Provider>
-  );
-}
-
-export function useTheme(): ThemeContextValue {
-  const context = useContext(ThemeContext);
-  if (!context) {
-    throw new Error('useTheme must be used within a ThemeProvider');
-  }
-  return context;
-}
-```
-
-## Zustand for Global State
-
-Zustand is the recommended lightweight state manager for React Native. It's simple, fast, and avoids the boilerplate of Redux.
-
-```bash
-npm install zustand
-```
-
-```tsx
-// src/store/auth.ts
-import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-
-interface User {
-  id: string;
-  email: string;
-  name: string;
-  avatar: string | null;
-}
-
-interface AuthState {
-  user: User | null;
-  token: string | null;
-  isAuthenticated: boolean;
-  isLoading: boolean;
-  login: (email: string, password: string) => Promise<void>;
-  logout: () => void;
-  updateProfile: (data: Partial<User>) => void;
-}
-
-export const useAuthStore = create<AuthState>()(
-  persist(
-    (set, get) => ({
-      user: null,
-      token: null,
-      isAuthenticated: false,
-      isLoading: false,
-
-      login: async (email, password) => {
-        set({ isLoading: true });
-        try {
-          const { user, token } = await apiLogin(email, password);
-          set({ user, token, isAuthenticated: true, isLoading: false });
-        } catch (error) {
-          set({ isLoading: false });
-          throw error;
-        }
-      },
-
-      logout: () => {
-        set({ user: null, token: null, isAuthenticated: false });
-      },
-
-      updateProfile: (data) => {
-        const currentUser = get().user;
-        if (currentUser) {
-          set({ user: { ...currentUser, ...data } });
-        }
-      },
+  const value = useMemo<ThemeContextValue>(
+    () => ({
+      theme,
+      colors: theme === 'light' ? lightColors : darkColors,
+      toggleTheme: () => setTheme(t => (t === 'light' ? 'dark' : 'light')),
     }),
-    {
-      name: 'auth-storage',
-      storage: createJSONStorage(() => AsyncStorage),
-      // Only persist specific fields
-      partialize: (state) => ({
-        token: state.token,
-        user: state.user,
-        isAuthenticated: state.isAuthenticated,
-      }),
-    },
-  ),
-);
+    [theme],
+  );
 
-// Usage in a component
-function ProfileHeader() {
-  const { user, logout } = useAuthStore();
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
+}
 
+export function useTheme() {
+  const ctx = useContext(ThemeContext);
+  if (!ctx) throw new Error('useTheme must be used within ThemeProvider');
+  return ctx;
+}
+
+// Usage:
+function Card() {
+  const { colors } = useTheme();
   return (
-    <View>
-      <Text>{user?.name}</Text>
-      <Pressable onPress={logout}>
-        <Text>Sign Out</Text>
-      </Pressable>
+    <View style={{ backgroundColor: colors.surface, borderColor: colors.border }}>
+      <Text style={{ color: colors.text }}>Content</Text>
     </View>
   );
 }
 ```
 
-## TanStack Query (React Query)
+:::tip[Context is Not a State Manager]
+Context is great for static-ish global values. For high-frequency updates (animations, form state, live data), Context re-renders every consumer on every change. Use Zustand or Jotai for that.
+:::
 
-TanStack Query manages server state — fetching, caching, background updates, and synchronisation with the server.
+## Zustand for Global State
+
+Zustand is a minimal, hook-based state manager with zero boilerplate. It shines for client-side global state like user profile, cart, and UI preferences.
+
+```bash
+npm install zustand
+```
+
+```typescript
+// src/store/cartStore.ts
+import { create } from 'zustand';
+import { devtools, persist, createJSONStorage } from 'zustand/middleware';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+interface CartItem {
+  id: string;
+  name: string;
+  price: number;
+  quantity: number;
+}
+
+interface CartStore {
+  items: CartItem[];
+  addItem: (item: Omit<CartItem, 'quantity'>) => void;
+  removeItem: (id: string) => void;
+  updateQuantity: (id: string, quantity: number) => void;
+  clearCart: () => void;
+  total: () => number;
+  itemCount: () => number;
+}
+
+export const useCartStore = create<CartStore>()(
+  devtools(
+    persist(
+      (set, get) => ({
+        items: [],
+
+        addItem: (newItem) =>
+          set((state) => {
+            const existing = state.items.find(i => i.id === newItem.id);
+            if (existing) {
+              return {
+                items: state.items.map(i =>
+                  i.id === newItem.id ? { ...i, quantity: i.quantity + 1 } : i,
+                ),
+              };
+            }
+            return { items: [...state.items, { ...newItem, quantity: 1 }] };
+          }),
+
+        removeItem: (id) =>
+          set((state) => ({ items: state.items.filter(i => i.id !== id) })),
+
+        updateQuantity: (id, quantity) =>
+          set((state) => ({
+            items: quantity <= 0
+              ? state.items.filter(i => i.id !== id)
+              : state.items.map(i => i.id === id ? { ...i, quantity } : i),
+          })),
+
+        clearCart: () => set({ items: [] }),
+
+        total: () => get().items.reduce((sum, i) => sum + i.price * i.quantity, 0),
+
+        itemCount: () => get().items.reduce((sum, i) => sum + i.quantity, 0),
+      }),
+      {
+        name: 'cart-storage',
+        storage: createJSONStorage(() => AsyncStorage),
+        // Only persist the items array, not computed functions:
+        partialize: (state) => ({ items: state.items }),
+      },
+    ),
+    { name: 'CartStore' },
+  ),
+);
+
+// Usage in a component:
+function CartIcon() {
+  const itemCount = useCartStore(state => state.itemCount());
+  return <Text>{itemCount}</Text>;
+}
+```
+
+:::caution[Selector Granularity]
+Always select only the slice of state you need: `useCartStore(state => state.items)` — not the whole store. Selecting the entire store object causes unnecessary re-renders on every state change.
+:::
+
+## TanStack Query for Server State
+
+TanStack Query (formerly React Query) is the gold standard for managing async server data: fetching, caching, background refetching, and mutations.
 
 ```bash
 npm install @tanstack/react-query
 ```
 
-<Steps>
-1. **Set up the QueryClient**
+### Setup
 
 ```tsx
 // App.tsx
@@ -303,10 +248,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      staleTime: 1000 * 60 * 5, // 5 minutes
-      gcTime: 1000 * 60 * 30, // 30 minutes
+      staleTime: 5 * 60 * 1000,   // Data is fresh for 5 minutes
+      gcTime: 10 * 60 * 1000,     // Keep unused data in cache for 10 minutes
       retry: 2,
-      retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 30000),
+      refetchOnWindowFocus: false, // Disable — mobile apps don't have "focus"
+      refetchOnReconnect: true,    // Refetch when network reconnects
     },
   },
 });
@@ -314,255 +260,275 @@ const queryClient = new QueryClient({
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <NavigationContainer>
-        <RootNavigator />
-      </NavigationContainer>
+      <NavigationContainer>{/* ... */}</NavigationContainer>
     </QueryClientProvider>
   );
 }
 ```
 
-2. **Use useQuery for data fetching**
+### useQuery
 
-   ```tsx
-   // src/hooks/usePosts.ts
-   import { useQuery, useInfiniteQuery } from '@tanstack/react-query';
+```typescript
+// src/hooks/useProducts.ts
+import { useQuery } from '@tanstack/react-query';
+import { fetchProducts, fetchProductById } from '../api/products';
 
-   export function usePosts() {
-     return useQuery({
-       queryKey: ['posts'],
-       queryFn: async () => {
-         const response = await fetch('https://api.example.com/posts');
-         if (!response.ok) throw new Error('Failed to fetch posts');
-         return response.json() as Promise<Post[]>;
-       },
-     });
-   }
+// Query keys as typed tuples prevent typos and enable precise invalidation:
+export const productKeys = {
+  all: ['products'] as const,
+  lists: () => [...productKeys.all, 'list'] as const,
+  list: (filters: Record<string, unknown>) => [...productKeys.lists(), filters] as const,
+  details: () => [...productKeys.all, 'detail'] as const,
+  detail: (id: string) => [...productKeys.details(), id] as const,
+};
 
-   // Infinite scrolling feed
-   export function useInfinitePosts() {
-     return useInfiniteQuery({
-       queryKey: ['posts', 'infinite'],
-       queryFn: async ({ pageParam = 0 }) => {
-         const response = await fetch(
-           `https://api.example.com/posts?cursor=${pageParam}&limit=20`,
-         );
-         return response.json() as Promise<{
-           posts: Post[];
-           nextCursor: string | null;
-         }>;
-       },
-       getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
-       initialPageParam: 0,
-     });
-   }
-   ```
+export function useProducts(category?: string) {
+  return useQuery({
+    queryKey: productKeys.list({ category }),
+    queryFn: () => fetchProducts({ category }),
+    select: (data) => data.sort((a, b) => a.name.localeCompare(b.name)),
+    placeholderData: (previousData) => previousData, // keep old data while fetching new
+  });
+}
 
-3. **Use useMutation for writes**
+export function useProduct(id: string) {
+  return useQuery({
+    queryKey: productKeys.detail(id),
+    queryFn: () => fetchProductById(id),
+    enabled: Boolean(id), // don't fetch if id is empty
+    staleTime: 10 * 60 * 1000, // product details stay fresh longer
+  });
+}
 
-   ```tsx
-   import { useMutation, useQueryClient } from '@tanstack/react-query';
+// Usage:
+function ProductListScreen() {
+  const { data: products, isLoading, isError, error, refetch } = useProducts();
 
-   export function useCreatePost() {
-     const queryClient = useQueryClient();
+  if (isLoading) return <ActivityIndicator />;
+  if (isError) return <ErrorView message={error.message} onRetry={refetch} />;
 
-     return useMutation({
-       mutationFn: async (newPost: { title: string; body: string }) => {
-         const response = await fetch('https://api.example.com/posts', {
-           method: 'POST',
-           headers: { 'Content-Type': 'application/json' },
-           body: JSON.stringify(newPost),
-         });
-         if (!response.ok) throw new Error('Failed to create post');
-         return response.json() as Promise<Post>;
-       },
-       onSuccess: (data) => {
-         // Optimistically add new post to the list
-         queryClient.setQueryData<Post[]>(['posts'], (old) =>
-           old ? [data, ...old] : [data],
-         );
-         // Refetch in background to ensure consistency
-         queryClient.invalidateQueries({ queryKey: ['posts'] });
-       },
-     });
-   }
-   ```
+  return (
+    <FlatList
+      data={products}
+      renderItem={({ item }) => <ProductCard product={item} />}
+      keyExtractor={item => item.id}
+      refreshControl={<RefreshControl refreshing={false} onRefresh={refetch} />}
+    />
+  );
+}
+```
 
-</Steps>
+### useMutation
 
-## MMKV: Fast Key-Value Storage
+```typescript
+// src/hooks/useCreateOrder.ts
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { createOrder } from '../api/orders';
 
-MMKV is a C++ key-value storage library offering read/write speeds ~10x faster than AsyncStorage. Ideal for preferences, tokens, and small cached values.
+export function useCreateOrder() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: createOrder,
+    onSuccess: (newOrder) => {
+      // Invalidate order lists so they refetch:
+      queryClient.invalidateQueries({ queryKey: ['orders'] });
+      // Optimistically add the new order to cache:
+      queryClient.setQueryData(['orders', newOrder.id], newOrder);
+    },
+    onError: (error) => {
+      Alert.alert('Order Failed', error.message);
+    },
+  });
+}
+
+// Usage:
+function CheckoutButton() {
+  const { mutate: createOrder, isPending } = useCreateOrder();
+
+  return (
+    <Pressable
+      onPress={() => createOrder({ items: cart.items, address })}
+      disabled={isPending}
+    >
+      {isPending ? <ActivityIndicator color="#fff" /> : <Text>Place Order</Text>}
+    </Pressable>
+  );
+}
+```
+
+## MMKV for Fast Local Storage
+
+MMKV is a key-value storage library from WeChat, **10× faster than AsyncStorage**. It's synchronous, type-safe, and supports encryption.
 
 ```bash
 npm install react-native-mmkv
+cd ios && pod install
 ```
 
-```tsx
-// src/lib/storage.ts
+```typescript
+// src/storage/mmkv.ts
 import { MMKV } from 'react-native-mmkv';
 
-export const storage = new MMKV({
-  id: 'app-storage',
-  encryptionKey: 'my-secret-key', // Optional AES encryption
+// Default storage (unencrypted):
+export const storage = new MMKV();
+
+// Encrypted storage (for sensitive data):
+export const secureStorage = new MMKV({
+  id: 'secure-storage',
+  encryptionKey: 'your-encryption-key', // In production, use Keychain/Keystore
 });
 
-// Typed storage helpers
+// TypeScript-safe wrappers:
 export const StorageKeys = {
   AUTH_TOKEN: 'auth_token',
   USER_ID: 'user_id',
+  ONBOARDING_COMPLETE: 'onboarding_complete',
   THEME: 'theme',
-  ONBOARDED: 'onboarded',
 } as const;
 
-export const secureStorage = {
-  setToken: (token: string) => storage.set(StorageKeys.AUTH_TOKEN, token),
-  getToken: () => storage.getString(StorageKeys.AUTH_TOKEN) ?? null,
-  clearToken: () => storage.delete(StorageKeys.AUTH_TOKEN),
-
-  setUserId: (id: string) => storage.set(StorageKeys.USER_ID, id),
-  getUserId: () => storage.getString(StorageKeys.USER_ID) ?? null,
-
-  setOnboarded: (value: boolean) => storage.set(StorageKeys.ONBOARDED, value),
-  isOnboarded: () => storage.getBoolean(StorageKeys.ONBOARDED) ?? false,
-
-  clear: () => storage.clearAll(),
-};
-
-// MMKV supports listeners for reactive state
-storage.addOnValueChangedListener((changedKey) => {
-  if (changedKey === StorageKeys.THEME) {
-    // React to theme changes
+export function getStorageItem<T>(key: string): T | undefined {
+  const json = storage.getString(key);
+  if (!json) return undefined;
+  try {
+    return JSON.parse(json) as T;
+  } catch {
+    return undefined;
   }
-});
+}
+
+export function setStorageItem<T>(key: string, value: T): void {
+  storage.set(key, JSON.stringify(value));
+}
+
+// Zustand storage adapter using MMKV:
+export const mmkvStorage = {
+  getItem: (name: string) => storage.getString(name) ?? null,
+  setItem: (name: string, value: string) => storage.set(name, value),
+  removeItem: (name: string) => storage.delete(name),
+};
 ```
 
 ## AsyncStorage (Legacy)
 
-AsyncStorage is the built-in asynchronous key-value store. Slower than MMKV but widely supported and built into Expo.
-
-:::caution[MMKV Preferred]
-For new projects, prefer `react-native-mmkv` for its performance advantages. AsyncStorage is still suitable for simple use cases and has zero native setup with Expo.
-:::
+AsyncStorage is the older, async key-value store. Prefer MMKV for new projects, but AsyncStorage is fine for simple cases.
 
 ```bash
-npx expo install @react-native-async-storage/async-storage
+npm install @react-native-async-storage/async-storage
 ```
 
-```tsx
+```typescript
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-// Helper for typed JSON storage
-export const Storage = {
-  async get<T>(key: string): Promise<T | null> {
-    try {
-      const value = await AsyncStorage.getItem(key);
-      return value ? (JSON.parse(value) as T) : null;
-    } catch {
-      return null;
-    }
-  },
+// Store a value:
+await AsyncStorage.setItem('@user_token', token);
 
-  async set(key: string, value: unknown): Promise<void> {
-    await AsyncStorage.setItem(key, JSON.stringify(value));
-  },
+// Retrieve a value:
+const token = await AsyncStorage.getItem('@user_token');
 
-  async remove(key: string): Promise<void> {
-    await AsyncStorage.removeItem(key);
-  },
+// Remove a value:
+await AsyncStorage.removeItem('@user_token');
 
-  async clear(): Promise<void> {
-    await AsyncStorage.clear();
-  },
-};
+// Store an object (must JSON.stringify):
+await AsyncStorage.setItem('@user_profile', JSON.stringify(profile));
+const raw = await AsyncStorage.getItem('@user_profile');
+const profile = raw ? JSON.parse(raw) : null;
+
+// Multi-operation batch:
+await AsyncStorage.multiSet([
+  ['@user_id', userId],
+  ['@user_email', email],
+]);
 ```
+
+:::caution[AsyncStorage is Slow]
+AsyncStorage uses a disk-based SQLite store on Android and a flat files store on iOS. For anything read on app startup or in a render loop, use MMKV instead.
+:::
 
 ## SQLite with expo-sqlite
 
-For structured, relational data that needs complex queries.
+For relational data, structured queries, or offline-first apps with complex data models:
 
 ```bash
 npx expo install expo-sqlite
 ```
 
-```tsx
+```typescript
+// src/db/database.ts
 import * as SQLite from 'expo-sqlite';
 
-// Open (or create) a database
-const db = SQLite.openDatabaseSync('app.db');
+const db = SQLite.openDatabaseSync('myapp.db');
 
-// Create tables
-db.execSync(`
-  CREATE TABLE IF NOT EXISTS notes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    body TEXT,
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-    updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
-  );
+// Run migrations synchronously on startup:
+export function initializeDatabase() {
+  db.execSync(`
+    PRAGMA journal_mode = WAL;
+    PRAGMA foreign_keys = ON;
 
-  CREATE INDEX IF NOT EXISTS idx_notes_created ON notes(created_at DESC);
-`);
+    CREATE TABLE IF NOT EXISTS products (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      price REAL NOT NULL,
+      category TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
 
-// CRUD operations with the async API
-export async function createNote(title: string, body: string): Promise<number> {
-  const result = await db.runAsync(
-    'INSERT INTO notes (title, body) VALUES (?, ?)',
-    [title, body],
-  );
-  return result.lastInsertRowId;
+    CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
+  `);
 }
 
-export async function getNotes(): Promise<Note[]> {
-  return db.getAllAsync<Note>('SELECT * FROM notes ORDER BY created_at DESC');
+// Typed queries:
+interface Product {
+  id: string;
+  name: string;
+  price: number;
+  category: string | null;
+  created_at: string;
 }
 
-export async function updateNote(
-  id: number,
-  title: string,
-  body: string,
-): Promise<void> {
-  await db.runAsync(
-    "UPDATE notes SET title = ?, body = ?, updated_at = strftime('%s', 'now') WHERE id = ?",
-    [title, body, id],
+export function getProductsByCategory(category: string): Product[] {
+  return db.getAllSync<Product>(
+    'SELECT * FROM products WHERE category = ? ORDER BY name ASC',
+    [category],
   );
 }
 
-export async function deleteNote(id: number): Promise<void> {
-  await db.runAsync('DELETE FROM notes WHERE id = ?', [id]);
+export function upsertProduct(product: Omit<Product, 'created_at'>): void {
+  db.runSync(
+    `INSERT OR REPLACE INTO products (id, name, price, category) VALUES (?, ?, ?, ?)`,
+    [product.id, product.name, product.price, product.category],
+  );
 }
 ```
 
 ## HTTP with fetch and axios
 
-```tsx
-// src/lib/api.ts
-import axios, { type AxiosInstance } from 'axios';
-import { secureStorage } from './storage';
+```typescript
+// src/api/client.ts
+import axios from 'axios';
+import { storage, StorageKeys } from '../storage/mmkv';
 
-// Create an axios instance with auth interceptor
-export const api: AxiosInstance = axios.create({
-  baseURL: 'https://api.example.com',
-  timeout: 10000,
+export const apiClient = axios.create({
+  baseURL: process.env.EXPO_PUBLIC_API_URL ?? 'https://api.example.com',
+  timeout: 10_000,
   headers: { 'Content-Type': 'application/json' },
 });
 
-// Attach auth token to every request
-api.interceptors.request.use((config) => {
-  const token = secureStorage.getToken();
+// Attach auth token to every request:
+apiClient.interceptors.request.use((config) => {
+  const token = storage.getString(StorageKeys.AUTH_TOKEN);
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
   return config;
 });
 
-// Handle 401 by redirecting to login
-api.interceptors.response.use(
+// Handle 401 globally (token refresh or logout):
+apiClient.interceptors.response.use(
   (response) => response,
   async (error) => {
     if (error.response?.status === 401) {
-      secureStorage.clearToken();
-      // Navigate to login screen
+      await signOut(); // clear auth state
     }
     return Promise.reject(error);
   },
@@ -571,99 +537,68 @@ api.interceptors.response.use(
 
 ## SecureStore for Sensitive Data
 
-Use `expo-secure-store` for tokens, passwords, and other sensitive values. Data is encrypted using the platform's secure enclave (Keychain on iOS, Keystore on Android).
+For credentials, tokens, and PII — store in the device's secure enclave (Keychain on iOS, Keystore on Android):
 
 ```bash
 npx expo install expo-secure-store
 ```
 
-```tsx
+```typescript
 import * as SecureStore from 'expo-secure-store';
 
-export const TokenStorage = {
-  async save(token: string): Promise<void> {
-    await SecureStore.setItemAsync('auth_token', token, {
-      keychainAccessible: SecureStore.WHEN_UNLOCKED,
-    });
-  },
+// Store a secret:
+await SecureStore.setItemAsync('user_token', token, {
+  keychainAccessible: SecureStore.WHEN_UNLOCKED, // require device unlock
+  requireAuthentication: false, // set true to require biometrics
+});
 
-  async get(): Promise<string | null> {
-    return SecureStore.getItemAsync('auth_token');
-  },
+// Retrieve a secret:
+const token = await SecureStore.getItemAsync('user_token');
 
-  async delete(): Promise<void> {
-    await SecureStore.deleteItemAsync('auth_token');
-  },
-};
+// Delete:
+await SecureStore.deleteItemAsync('user_token');
 ```
+
+:::tip[Never Store Tokens in MMKV or AsyncStorage]
+Use `expo-secure-store` for all authentication tokens, refresh tokens, API keys, and any user PII. MMKV and AsyncStorage are not encrypted by default and can be read from rooted/jailbroken devices.
+:::
 
 ## Offline-First Patterns
 
-:::tip[Offline-First Strategy]
-Design your app to work without a network connection by default. Cache data locally, queue mutations, and sync when connectivity is restored.
-:::
-
-```tsx
-// src/hooks/useOfflineSync.ts
-import NetInfo from '@react-native-community/netinfo';
-import { useEffect } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-
-export function useOfflineSync() {
+```typescript
+// Pattern: Optimistic updates with rollback
+function useUpdateProfile() {
   const queryClient = useQueryClient();
 
-  useEffect(() => {
-    // TanStack Query v5 has built-in online/offline support
-    const unsubscribe = NetInfo.addEventListener((state) => {
-      const isOnline = state.isConnected && state.isInternetReachable;
+  return useMutation({
+    mutationFn: updateProfileAPI,
 
-      if (isOnline) {
-        // Refetch stale queries when coming back online
-        queryClient.resumePausedMutations();
-        queryClient.invalidateQueries();
+    onMutate: async (newProfile) => {
+      // Cancel any in-flight refetches:
+      await queryClient.cancelQueries({ queryKey: ['profile'] });
+
+      // Snapshot the current value for rollback:
+      const previous = queryClient.getQueryData(['profile']);
+
+      // Optimistically update the cache:
+      queryClient.setQueryData(['profile'], newProfile);
+
+      // Return the snapshot so we can rollback on error:
+      return { previous };
+    },
+
+    onError: (err, variables, context) => {
+      // Rollback to the snapshot on failure:
+      if (context?.previous) {
+        queryClient.setQueryData(['profile'], context.previous);
       }
-    });
+      Alert.alert('Update failed', 'Your changes could not be saved.');
+    },
 
-    return unsubscribe;
-  }, [queryClient]);
+    onSettled: () => {
+      // Always refetch after success or failure:
+      queryClient.invalidateQueries({ queryKey: ['profile'] });
+    },
+  });
 }
 ```
-
-```tsx
-// Persist query cache to AsyncStorage for offline access
-import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client';
-import { createAsyncStoragePersister } from '@tanstack/query-async-storage-persister';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-
-const persister = createAsyncStoragePersister({
-  storage: AsyncStorage,
-  throttleTime: 3000,
-});
-
-export default function App() {
-  return (
-    <PersistQueryClientProvider
-      client={queryClient}
-      persistOptions={{ persister, maxAge: 1000 * 60 * 60 * 24 }} // 24 hours
-    >
-      <NavigationContainer>
-        <RootNavigator />
-      </NavigationContainer>
-    </PersistQueryClientProvider>
-  );
-}
-```
-
-## State Management Decision Guide
-
-| Use Case                                | Recommended Solution |
-| --------------------------------------- | -------------------- |
-| UI toggle, input value, scroll position | `useState`           |
-| Complex form or multi-step flow         | `useReducer`         |
-| Theme, auth status (low frequency)      | Context API          |
-| Global app state (cart, settings)       | Zustand              |
-| Server data (lists, profiles, feeds)    | TanStack Query       |
-| Fast preferences, tokens                | MMKV                 |
-| Auth tokens, passwords                  | expo-secure-store    |
-| Structured relational data              | expo-sqlite          |
-| Large file cache                        | expo-file-system     |

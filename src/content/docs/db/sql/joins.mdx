@@ -1,374 +1,380 @@
 ---
 title: SQL Joins
-description: Master all SQL join types — INNER, LEFT, RIGHT, FULL OUTER, CROSS, SELF, LATERAL — with practical examples and performance guidance.
+description: Master all SQL join types — INNER, LEFT, RIGHT, FULL OUTER, CROSS, SELF, and LATERAL joins — with practical multi-table examples and performance guidance.
 sidebar:
   order: 4
 tags: [database, sql]
 ---
 
-import {
-  Steps,
-  Aside,
-  Tabs,
-  TabItem,
-  Card,
-  CardGrid,
-} from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-Joins combine rows from two or more tables based on a related column. They are the primary tool for working with normalized relational data.
+Joins are how SQL combines rows from two or more tables based on a related column. Understanding joins is essential for working with normalized relational data.
 
-## Setup: Example Schema
+## Sample Schema
 
-All examples use this e-commerce schema:
+All examples on this page use this schema:
 
 ```sql
 CREATE TABLE customers (
-  id         SERIAL PRIMARY KEY,
-  name       TEXT NOT NULL,
-  email      TEXT UNIQUE NOT NULL,
+  id         BIGINT PRIMARY KEY,
+  name       TEXT   NOT NULL,
+  email      TEXT   UNIQUE NOT NULL,
   country    TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE products (
-  id          SERIAL PRIMARY KEY,
-  name        TEXT NOT NULL,
-  price       NUMERIC(10,2) NOT NULL,
-  category_id INTEGER REFERENCES categories(id),
-  stock       INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE categories (
-  id        SERIAL PRIMARY KEY,
-  name      TEXT NOT NULL,
-  parent_id INTEGER REFERENCES categories(id)
-);
-
 CREATE TABLE orders (
-  id          SERIAL PRIMARY KEY,
-  customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL,
-  status      TEXT NOT NULL DEFAULT 'pending',
-  total       NUMERIC(10,2),
+  id          BIGINT PRIMARY KEY,
+  customer_id BIGINT NOT NULL REFERENCES customers(id),
+  status      TEXT   NOT NULL DEFAULT 'pending',
+  total       NUMERIC(12,2) NOT NULL DEFAULT 0,
   created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE products (
+  id          BIGINT PRIMARY KEY,
+  name        TEXT           NOT NULL,
+  price       NUMERIC(10,2)  NOT NULL,
+  category_id BIGINT REFERENCES categories(id)
+);
+
+CREATE TABLE categories (
+  id        BIGINT PRIMARY KEY,
+  name      TEXT   NOT NULL,
+  parent_id BIGINT REFERENCES categories(id)
+);
+
 CREATE TABLE order_items (
-  id         SERIAL PRIMARY KEY,
-  order_id   INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-  product_id INTEGER NOT NULL REFERENCES products(id),
-  quantity   INTEGER NOT NULL,
-  unit_price NUMERIC(10,2) NOT NULL
+  order_id   BIGINT REFERENCES orders(id)   ON DELETE CASCADE,
+  product_id BIGINT REFERENCES products(id) ON DELETE RESTRICT,
+  quantity   INTEGER      NOT NULL CHECK (quantity > 0),
+  unit_price NUMERIC(10,2) NOT NULL,
+  PRIMARY KEY (order_id, product_id)
 );
 ```
 
 ## INNER JOIN
 
-Returns only rows where the join condition matches in **both** tables. Non-matching rows from either side are excluded.
+Returns only rows where the join condition is satisfied in **both** tables. Rows without a match are excluded.
 
 ```sql
--- ON clause
+-- ON clause: explicit join condition
 SELECT
-  o.id    AS order_id,
-  c.name  AS customer_name,
+  o.id          AS order_id,
+  c.name        AS customer_name,
   o.total,
   o.status
 FROM orders o
-INNER JOIN customers c ON c.id = o.customer_id
-WHERE o.status = 'pending';
+INNER JOIN customers c ON c.id = o.customer_id;
 
--- USING clause (when both tables have the same column name)
-SELECT o.id, c.name, o.total
+-- USING clause: shorthand when column names match
+SELECT o.id, o.total, c.name
 FROM orders o
-JOIN customers c USING (customer_id);    -- JOIN = INNER JOIN
+INNER JOIN customers c USING (customer_id);  -- Only works if both tables have customer_id
 
--- Multiple INNER JOINs
-SELECT
-  o.id          AS order_id,
-  c.name        AS customer,
-  p.name        AS product,
-  oi.quantity,
-  oi.unit_price,
-  cat.name      AS category
+-- Equivalent without USING:
+SELECT o.id, o.total, c.name
 FROM orders o
-JOIN customers c    ON c.id = o.customer_id
-JOIN order_items oi ON oi.order_id = o.id
-JOIN products p     ON p.id = oi.product_id
-JOIN categories cat ON cat.id = p.category_id
-WHERE o.created_at >= NOW() - INTERVAL '30 days'
-ORDER BY o.created_at DESC;
+INNER JOIN customers c ON o.customer_id = c.id;
 ```
+
+:::tip[INNER JOIN is the Default]
+The `INNER` keyword is optional — `JOIN` alone means `INNER JOIN`. However, writing `INNER JOIN` explicitly improves readability in complex queries.
+:::
 
 ## LEFT JOIN (LEFT OUTER JOIN)
 
-Returns **all rows from the left table**, plus matching rows from the right. Where no match exists, right table columns are NULL.
+Returns all rows from the **left** table plus matching rows from the right table. If there is no match, right-table columns are NULL.
 
 ```sql
--- All customers with their order count (including 0-order customers)
+-- All customers, with their order count (including customers with no orders)
 SELECT
   c.id,
   c.name,
-  c.email,
-  COUNT(o.id)       AS order_count,
-  SUM(o.total)      AS lifetime_value
+  COUNT(o.id) AS order_count,    -- Counts non-NULL values; 0 for no orders
+  SUM(o.total) AS total_spent    -- NULL for customers with no orders
 FROM customers c
 LEFT JOIN orders o ON o.customer_id = c.id
-GROUP BY c.id, c.name, c.email
-ORDER BY lifetime_value DESC NULLS LAST;
+GROUP BY c.id, c.name
+ORDER BY total_spent DESC NULLS LAST;
+```
 
--- Find customers with NO orders (NULL right side = no match)
+### Find Unmatched Rows
+
+LEFT JOIN + NULL filter is an efficient anti-join pattern:
+
+```sql
+-- Customers who have NEVER placed an order
 SELECT c.id, c.name, c.email
 FROM customers c
 LEFT JOIN orders o ON o.customer_id = c.id
-WHERE o.id IS NULL;   -- filter to unmatched rows only (anti-join pattern)
+WHERE o.id IS NULL;   -- NULL means no matching order was found
 
--- All products with their order count (including never-ordered products)
-SELECT
-  p.name,
-  p.price,
-  COUNT(oi.id)         AS times_ordered,
-  COALESCE(SUM(oi.quantity), 0) AS units_sold
+-- Products that have never been ordered
+SELECT p.id, p.name, p.price
 FROM products p
 LEFT JOIN order_items oi ON oi.product_id = p.id
-GROUP BY p.id, p.name, p.price
-ORDER BY units_sold DESC;
+WHERE oi.order_id IS NULL;
 ```
-
-:::tip[NULL Handling in LEFT JOIN]
-After a LEFT JOIN, use `COALESCE(value, 0)` to replace NULL numeric results with 0. Use `IS NULL` in WHERE (not `= NULL`) to find non-matching rows.
-:::
 
 ## RIGHT JOIN (RIGHT OUTER JOIN)
 
-Returns **all rows from the right table** plus matching rows from the left. The mirror image of LEFT JOIN. In practice, most developers rewrite RIGHT JOINs as LEFT JOINs by swapping table order (easier to read).
+Returns all rows from the **right** table plus matching rows from the left table. Much less common than LEFT JOIN — you can always rewrite a RIGHT JOIN as a LEFT JOIN by swapping table order.
 
 ```sql
--- Equivalent queries:
-SELECT c.name, o.id FROM orders o RIGHT JOIN customers c ON c.id = o.customer_id;
-SELECT c.name, o.id FROM customers c LEFT JOIN orders o ON o.customer_id = c.id;
+-- All orders, with customer info (RIGHT JOIN)
+SELECT c.name, o.id, o.total
+FROM customers c
+RIGHT JOIN orders o ON c.id = o.customer_id;
+
+-- Same query using LEFT JOIN (preferred style)
+SELECT c.name, o.id, o.total
+FROM orders o
+LEFT JOIN customers c ON c.id = o.customer_id;
 ```
 
 ## FULL OUTER JOIN
 
-Returns **all rows from both tables**. Where no match exists, the non-matching side's columns are NULL.
+Returns all rows from **both** tables. Where there is no match, the missing side's columns are NULL.
 
 ```sql
--- Find all mismatches between two tables (e.g., data sync audit)
+-- All customers and all orders, matched where possible
 SELECT
-  a.id   AS source_id,
-  b.id   AS dest_id,
-  a.email AS source_email,
-  b.email AS dest_email,
-  CASE
-    WHEN b.id IS NULL THEN 'only in source'
-    WHEN a.id IS NULL THEN 'only in destination'
-    ELSE 'matched'
-  END AS sync_status
-FROM source_users a
-FULL OUTER JOIN dest_users b ON a.email = b.email
-WHERE a.id IS NULL OR b.id IS NULL;   -- show only mismatches
+  c.name        AS customer_name,
+  o.id          AS order_id,
+  o.total
+FROM customers c
+FULL OUTER JOIN orders o ON c.id = o.customer_id;
+
+-- Find rows that only exist in one table or the other
+SELECT
+  c.id AS customer_id,
+  o.id AS order_id
+FROM customers c
+FULL OUTER JOIN orders o ON c.id = o.customer_id
+WHERE c.id IS NULL OR o.customer_id IS NULL;
 ```
-
-:::caution[MySQL FULL OUTER JOIN]
-MySQL does not support FULL OUTER JOIN natively. Emulate it with `LEFT JOIN UNION ALL RIGHT JOIN WHERE left.id IS NULL`:
-
-```sql
-SELECT * FROM a LEFT JOIN b ON a.id = b.a_id
-UNION ALL
-SELECT * FROM a RIGHT JOIN b ON a.id = b.a_id WHERE a.id IS NULL;
-```
-
-:::
 
 ## CROSS JOIN
 
-Returns the **Cartesian product** — every combination of rows from both tables. Rarely used directly but useful for generating test data or combinations.
+Returns every combination of rows from both tables — the Cartesian product.
 
 ```sql
--- Generate all possible size/color product variants
-SELECT
-  s.name AS size,
-  c.name AS color,
-  s.name || '-' || c.name AS variant_code
+-- Generate all combinations of sizes and colors
+SELECT s.name AS size, c.name AS color
 FROM sizes s
 CROSS JOIN colors c
-ORDER BY s.sort_order, c.name;
+ORDER BY s.id, c.id;
 
--- Generate a date series (PostgreSQL alternative using generate_series)
-SELECT
-  d::date AS report_date,
-  s.store_name
-FROM generate_series('2024-01-01', '2024-12-31', INTERVAL '1 day') d
-CROSS JOIN stores s
-ORDER BY d, s.store_name;
+-- Same without explicit CROSS JOIN keyword
+SELECT s.name, c.name FROM sizes s, colors c;  -- Implicit cross join (avoid this style)
 ```
+
+:::caution[CROSS JOIN Row Count]
+If table A has 100 rows and table B has 200 rows, the CROSS JOIN produces 20,000 rows. On large tables, this can easily overwhelm memory and disk.
+:::
 
 ## SELF JOIN
 
-A table joining to itself. Common for hierarchical or comparison queries.
+Join a table to itself. Useful for hierarchical data and finding relationships within a single table.
 
 ```sql
--- Employee hierarchy: employee with their manager's name
+-- Employee management hierarchy
 SELECT
-  e.id,
-  e.name       AS employee,
-  m.name       AS manager,
-  m.email      AS manager_email
+  e.name        AS employee,
+  e.title,
+  m.name        AS manager,
+  m.title       AS manager_title
 FROM employees e
-LEFT JOIN employees m ON m.id = e.manager_id
-ORDER BY m.name NULLS LAST, e.name;
+LEFT JOIN employees m ON m.id = e.manager_id    -- e is the employee, m is their manager
+ORDER BY m.name NULLS FIRST, e.name;
 
--- Find all pairs of products in the same category (within same price range)
+-- Category parent-child
 SELECT
-  a.name  AS product_a,
-  b.name  AS product_b,
-  a.price AS price_a,
-  b.price AS price_b
-FROM products a
-JOIN products b
-  ON a.category_id = b.category_id
-  AND a.id < b.id           -- avoid duplicates (a,b) and (b,a)
-  AND ABS(a.price - b.price) < 5
-ORDER BY a.category_id, a.name;
+  child.name  AS category,
+  parent.name AS parent_category
+FROM categories child
+LEFT JOIN categories parent ON child.parent_id = parent.id;
+
+-- Find pairs of customers in the same country
+SELECT
+  a.name AS customer_a,
+  b.name AS customer_b,
+  a.country
+FROM customers a
+INNER JOIN customers b
+  ON a.country = b.country
+  AND a.id < b.id      -- Avoid (A,B) and (B,A) duplicates
+ORDER BY a.country, a.name;
+```
+
+## Multiple Joins
+
+Real-world queries often join four or more tables:
+
+```sql
+-- Complete order detail: customer → order → items → products → categories
+SELECT
+  c.name                                     AS customer,
+  o.id                                       AS order_id,
+  o.created_at                               AS order_date,
+  p.name                                     AS product,
+  cat.name                                   AS category,
+  oi.quantity,
+  oi.unit_price,
+  oi.quantity * oi.unit_price                AS line_total
+FROM orders o
+INNER JOIN customers  c   ON c.id   = o.customer_id
+INNER JOIN order_items oi ON oi.order_id = o.id
+INNER JOIN products   p   ON p.id   = oi.product_id
+LEFT  JOIN categories cat ON cat.id = p.category_id
+WHERE o.status = 'completed'
+  AND o.created_at >= '2024-01-01'
+ORDER BY o.created_at DESC, p.name;
+```
+
+## Join Conditions
+
+Joins aren't limited to equality:
+
+```sql
+-- Range join: match events to time periods
+SELECT e.name, p.plan_name
+FROM user_events e
+INNER JOIN plans p
+  ON e.occurred_at BETWEEN p.started_at AND COALESCE(p.ended_at, NOW());
+
+-- Function in join condition
+SELECT * FROM users u
+INNER JOIN email_domains d ON LOWER(SPLIT_PART(u.email, '@', 2)) = LOWER(d.domain);
+
+-- Non-equi join: find all products cheaper than this one
+SELECT p1.name AS product, p2.name AS cheaper_alternative
+FROM products p1
+INNER JOIN products p2
+  ON p2.category_id = p1.category_id
+  AND p2.price < p1.price
+ORDER BY p1.name, p2.price;
 ```
 
 ## LATERAL JOIN
 
-A LATERAL join allows the right-side subquery to reference columns from the left side — essentially a correlated subquery as a table.
+A LATERAL join allows a subquery on the right side to reference columns from the left side — it's a correlated subquery that behaves like a table. Supported in PostgreSQL (and newer versions of MySQL/SQL Server).
 
 ```sql
--- Get the last 3 orders for each customer (PostgreSQL)
+-- Get the 3 most recent orders for each customer
 SELECT
-  c.id,
   c.name,
-  recent.order_id,
+  recent.id    AS order_id,
   recent.total,
   recent.created_at
 FROM customers c
-LEFT JOIN LATERAL (
-  SELECT id AS order_id, total, created_at
-  FROM orders
-  WHERE customer_id = c.id     -- references c from outer query
+CROSS JOIN LATERAL (
+  SELECT id, total, created_at
+  FROM orders o
+  WHERE o.customer_id = c.id      -- References outer table
   ORDER BY created_at DESC
   LIMIT 3
-) recent ON true
-ORDER BY c.name, recent.created_at DESC;
+) recent;
 
--- Apply a function to each row (useful with set-returning functions)
-SELECT p.name, kw.word
-FROM products p
-LEFT JOIN LATERAL unnest(string_to_array(p.keywords, ',')) AS kw(word) ON true;
+-- Equivalent to: for each customer, execute the subquery
+-- Much more efficient than a correlated subquery in SELECT
+```
+
+```sql
+-- Expand JSON array into rows (LATERAL is implicit with set-returning functions)
+SELECT u.id, tag
+FROM users u,
+     LATERAL jsonb_array_elements_text(u.tags) AS tag;
 ```
 
 ## Anti-Join Pattern
 
-Find rows in table A that have **no match** in table B.
+Find rows in the left table with **no match** in the right table. Two equivalent approaches:
 
 ```sql
--- Method 1: LEFT JOIN + IS NULL (most common)
+-- Method 1: LEFT JOIN + WHERE NULL (often more readable)
 SELECT c.id, c.name
 FROM customers c
 LEFT JOIN orders o ON o.customer_id = c.id
 WHERE o.id IS NULL;
 
--- Method 2: NOT EXISTS (more explicit intent, often faster)
+-- Method 2: NOT EXISTS (often more efficient)
 SELECT c.id, c.name
 FROM customers c
 WHERE NOT EXISTS (
   SELECT 1 FROM orders o WHERE o.customer_id = c.id
 );
 
--- Method 3: NOT IN (dangerous with NULLs — avoid if subquery may return NULL)
-SELECT c.id, c.name
-FROM customers c
-WHERE c.id NOT IN (
-  SELECT customer_id FROM orders WHERE customer_id IS NOT NULL  -- must add IS NOT NULL
-);
+-- Method 3: NOT IN (avoid — NULLs in subquery cause unexpected behavior)
+-- If any row in orders has NULL customer_id, this returns NO results:
+SELECT id, name FROM customers
+WHERE id NOT IN (SELECT customer_id FROM orders);  -- DANGEROUS if NULLs exist
 ```
+
+:::tip[NOT EXISTS vs NOT IN]
+Always prefer `NOT EXISTS` over `NOT IN` with subqueries. If the subquery returns any NULL values, `NOT IN` returns zero rows due to SQL's three-valued logic — a very common bug.
+:::
 
 ## Semi-Join Pattern
 
-Find rows in table A **where a match exists** in table B, without returning B's data.
+Find rows in the left table where a match **exists** in the right table, without returning duplicate rows from the left:
 
 ```sql
--- Method 1: EXISTS (most common)
-SELECT DISTINCT c.id, c.name
+-- Customers who have placed at least one order (semi-join via EXISTS)
+SELECT c.id, c.name
 FROM customers c
 WHERE EXISTS (
-  SELECT 1 FROM orders o
-  WHERE o.customer_id = c.id
-  AND o.status = 'delivered'
+  SELECT 1 FROM orders o WHERE o.customer_id = c.id
 );
 
--- Method 2: INNER JOIN + DISTINCT (may be slower due to dedup)
+-- Less efficient equivalent (may produce duplicate customers):
 SELECT DISTINCT c.id, c.name
 FROM customers c
-JOIN orders o ON o.customer_id = c.id
-WHERE o.status = 'delivered';
+INNER JOIN orders o ON o.customer_id = c.id;
 ```
 
-## Join Performance Guidance
+## Performance Considerations
 
-### Indexing Join Columns
+### Index Join Columns
 
-Always index foreign key columns and any column used in a join condition:
+Always index columns used in ON conditions:
 
 ```sql
--- Essential indexes for the example schema
+-- These indexes support the common join patterns
 CREATE INDEX idx_orders_customer_id ON orders(customer_id);
 CREATE INDEX idx_order_items_order_id ON order_items(order_id);
 CREATE INDEX idx_order_items_product_id ON order_items(product_id);
-CREATE INDEX idx_products_category_id ON products(category_id);
-
--- Covering index for a common query
-CREATE INDEX idx_orders_customer_status ON orders(customer_id, status)
-INCLUDE (total, created_at);
 ```
 
-### Understanding Join Algorithms
+### Join Order Matters
 
-PostgreSQL chooses among three join algorithms:
+The query planner usually figures out the optimal join order, but understanding it helps:
 
-| Algorithm       | When used                               | Notes                           |
-| --------------- | --------------------------------------- | ------------------------------- |
-| **Nested Loop** | Small inner table, index on join column | Fast for small result sets      |
-| **Hash Join**   | Large tables, no useful index           | Builds hash table in memory     |
-| **Merge Join**  | Both inputs sorted on join key          | Efficient for large sorted sets |
+- The **driving table** (usually the smaller one) is accessed first
+- Subsequent tables are joined using the index on the join column
+- LEFT JOINs constrain the order: the left table must be accessed before the right
 
 ```sql
--- Check which algorithm PostgreSQL chose
-EXPLAIN (ANALYZE, BUFFERS)
-SELECT o.id, c.name
-FROM orders o
-JOIN customers c ON c.id = o.customer_id
-WHERE o.status = 'pending';
+-- Hint to planner (PostgreSQL): disable nested loop for this query
+SET enable_nestloop = off;
+
+-- Check what plan the optimizer chose
+EXPLAIN (ANALYZE, BUFFERS) SELECT ...;
 ```
 
-## Complex Real-World Query
+### Avoid Implicit Joins
 
-Order summary report joining four tables:
+Never use the comma syntax — it produces a cross join that silently becomes an inner join only via the WHERE clause, and is easy to accidentally turn into a Cartesian product:
 
 ```sql
-SELECT
-  DATE_TRUNC('week', o.created_at)   AS week,
-  cat.name                            AS category,
-  COUNT(DISTINCT o.id)                AS order_count,
-  COUNT(DISTINCT o.customer_id)       AS unique_customers,
-  SUM(oi.quantity)                    AS units_sold,
-  SUM(oi.quantity * oi.unit_price)    AS revenue,
-  AVG(o.total)                        AS avg_order_value,
-  RANK() OVER (
-    PARTITION BY DATE_TRUNC('week', o.created_at)
-    ORDER BY SUM(oi.quantity * oi.unit_price) DESC
-  ) AS revenue_rank_this_week
-FROM orders o
-JOIN customers c    ON c.id = o.customer_id
-JOIN order_items oi ON oi.order_id = o.id
-JOIN products p     ON p.id = oi.product_id
-JOIN categories cat ON cat.id = p.category_id
-WHERE o.status IN ('delivered', 'shipped')
-  AND o.created_at >= NOW() - INTERVAL '12 weeks'
-  AND c.country = 'US'
-GROUP BY DATE_TRUNC('week', o.created_at), cat.id, cat.name
-HAVING SUM(oi.quantity * oi.unit_price) > 1000
-ORDER BY week DESC, revenue DESC;
+-- BAD: implicit cross join (comma syntax)
+SELECT c.name, o.id
+FROM customers c, orders o
+WHERE c.id = o.customer_id;
+
+-- GOOD: explicit INNER JOIN
+SELECT c.name, o.id
+FROM customers c
+INNER JOIN orders o ON c.id = o.customer_id;
 ```

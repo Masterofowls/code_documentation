@@ -1,0 +1,383 @@
+---
+title: SQL Joins
+description: Complete guide to INNER, LEFT, RIGHT, FULL OUTER, CROSS, SELF, and LATERAL joins, anti-join and semi-join patterns, and join performance.
+sidebar:
+  order: 4
+tags: [database, sql]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+JOINs are the mechanism for combining rows from multiple tables based on related columns. Mastering joins is essential to writing useful SQL — almost every real-world query involves multiple tables.
+
+## Sample Schema
+
+All examples use this e-commerce schema:
+
+```sql
+CREATE TABLE customers (
+    id          BIGSERIAL PRIMARY KEY,
+    name        VARCHAR(100) NOT NULL,
+    email       VARCHAR(255) NOT NULL UNIQUE,
+    country     VARCHAR(2),
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE categories (
+    id      SERIAL PRIMARY KEY,
+    name    VARCHAR(100) NOT NULL,
+    parent_id INTEGER REFERENCES categories(id)
+);
+
+CREATE TABLE products (
+    id          BIGSERIAL PRIMARY KEY,
+    category_id INTEGER REFERENCES categories(id),
+    name        VARCHAR(200) NOT NULL,
+    price       NUMERIC(10, 2),
+    sku         VARCHAR(50) UNIQUE
+);
+
+CREATE TABLE orders (
+    id          BIGSERIAL PRIMARY KEY,
+    customer_id BIGINT NOT NULL REFERENCES customers(id),
+    status      VARCHAR(20) DEFAULT 'pending',
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
+    total_amount NUMERIC(12, 2)
+);
+
+CREATE TABLE order_items (
+    id          BIGSERIAL PRIMARY KEY,
+    order_id    BIGINT NOT NULL REFERENCES orders(id),
+    product_id  BIGINT NOT NULL REFERENCES products(id),
+    quantity    INTEGER NOT NULL,
+    unit_price  NUMERIC(10, 2) NOT NULL
+);
+```
+
+## INNER JOIN
+
+Returns only rows where the join condition matches in **both** tables. Non-matching rows are excluded from the result.
+
+```
+customers:          orders:
+id | name           id | customer_id
+1  | Alice          101 | 1
+2  | Bob            102 | 1
+3  | Carol          103 | 2
+                            (no row for customer 3)
+
+INNER JOIN result: Carol excluded because she has no orders
+```
+
+```sql
+-- ON clause — explicit join condition
+SELECT
+    c.id     AS customer_id,
+    c.name   AS customer_name,
+    o.id     AS order_id,
+    o.status,
+    o.total_amount
+FROM customers c
+INNER JOIN orders o ON c.id = o.customer_id;
+
+-- USING clause — when column names are identical in both tables
+SELECT c.name, o.id, o.total_amount
+FROM customers c
+INNER JOIN orders o USING (customer_id);  -- assumes both have customer_id column
+
+-- JOIN without INNER keyword (INNER is the default)
+SELECT c.name, o.id
+FROM customers c
+JOIN orders o ON c.id = o.customer_id;
+```
+
+## LEFT JOIN (LEFT OUTER JOIN)
+
+Returns **all rows from the left table**, with matching rows from the right table. If no match exists, right-table columns are `NULL`.
+
+```sql
+-- All customers, with their orders (or NULL if no orders)
+SELECT
+    c.name,
+    COUNT(o.id)         AS order_count,
+    COALESCE(SUM(o.total_amount), 0) AS total_spent
+FROM customers c
+LEFT JOIN orders o ON c.id = o.customer_id
+GROUP BY c.id, c.name
+ORDER BY total_spent DESC;
+
+-- Products with optional category (NULL if category_id is null)
+SELECT
+    p.name       AS product_name,
+    p.price,
+    c.name       AS category_name
+FROM products p
+LEFT JOIN categories c ON p.category_id = c.id;
+```
+
+### Using LEFT JOIN to Find Unmatched Rows
+
+```sql
+-- Customers who have NEVER placed an order
+SELECT c.id, c.name, c.email
+FROM customers c
+LEFT JOIN orders o ON c.id = o.customer_id
+WHERE o.id IS NULL;   -- NULL means no matching order was found
+
+-- Products that have never been ordered
+SELECT p.id, p.name, p.sku
+FROM products p
+LEFT JOIN order_items oi ON p.id = oi.product_id
+WHERE oi.id IS NULL;
+```
+
+## RIGHT JOIN (RIGHT OUTER JOIN)
+
+Returns **all rows from the right table**, with matching rows from the left. Rarely used — you can always rewrite a RIGHT JOIN as a LEFT JOIN by swapping the tables.
+
+```sql
+-- All orders including those for deleted customers
+SELECT o.id, o.total_amount, c.name
+FROM customers c
+RIGHT JOIN orders o ON c.id = o.customer_id;
+
+-- Equivalent LEFT JOIN (preferred for readability):
+SELECT o.id, o.total_amount, c.name
+FROM orders o
+LEFT JOIN customers c ON c.id = o.customer_id;
+```
+
+## FULL OUTER JOIN
+
+Returns **all rows from both tables**, with NULLs on the side where no match exists.
+
+```sql
+-- Find all products and order_items, including products never ordered
+-- and any orphaned order_items
+SELECT
+    p.id   AS product_id,
+    p.name AS product_name,
+    oi.id  AS order_item_id,
+    oi.quantity
+FROM products p
+FULL OUTER JOIN order_items oi ON p.id = oi.product_id
+WHERE p.id IS NULL OR oi.id IS NULL;  -- only show non-matching rows
+```
+
+## CROSS JOIN
+
+Returns the **Cartesian product** — every row from the left table combined with every row from the right table. Produces M × N rows.
+
+```sql
+-- Generate a grid of all size/color combinations
+SELECT sizes.name AS size, colors.name AS color
+FROM sizes
+CROSS JOIN colors
+ORDER BY size, color;
+
+-- Generate date ranges (useful for reporting gaps)
+SELECT
+    d.day::DATE,
+    COALESCE(r.revenue, 0) AS revenue
+FROM generate_series(
+    '2024-01-01'::DATE,
+    '2024-12-31'::DATE,
+    '1 day'::INTERVAL
+) AS d(day)
+LEFT JOIN daily_revenue r ON r.date = d.day::DATE
+ORDER BY d.day;
+```
+
+## SELF JOIN
+
+A table joined to itself — essential for hierarchical or comparative data.
+
+```sql
+-- Employee hierarchy: each employee + their manager
+SELECT
+    e.id          AS employee_id,
+    e.name        AS employee_name,
+    m.name        AS manager_name
+FROM employees e
+LEFT JOIN employees m ON e.manager_id = m.id
+ORDER BY m.name NULLS FIRST, e.name;
+
+-- Find pairs of products in the same category with similar prices
+SELECT
+    p1.name AS product_a,
+    p2.name AS product_b,
+    ABS(p1.price - p2.price) AS price_diff
+FROM products p1
+JOIN products p2 ON
+    p1.category_id = p2.category_id
+    AND p1.id < p2.id           -- avoid duplicates and self-pairs
+    AND ABS(p1.price - p2.price) < 10
+ORDER BY price_diff;
+```
+
+## Multiple Joins
+
+```sql
+-- Complete order details: order + customer + items + products + categories
+SELECT
+    o.id            AS order_id,
+    o.created_at,
+    c.name          AS customer,
+    c.email,
+    p.name          AS product,
+    cat.name        AS category,
+    oi.quantity,
+    oi.unit_price,
+    oi.quantity * oi.unit_price AS line_total
+FROM orders o
+JOIN customers c     ON c.id   = o.customer_id
+JOIN order_items oi  ON oi.order_id = o.id
+JOIN products p      ON p.id   = oi.product_id
+LEFT JOIN categories cat ON cat.id = p.category_id
+WHERE o.status = 'completed'
+  AND o.created_at >= NOW() - INTERVAL '30 days'
+ORDER BY o.id, oi.id;
+```
+
+## JOIN Conditions
+
+```sql
+-- Non-equality join: find products in a price range
+SELECT p.name, p.price, pr.tier_name
+FROM products p
+JOIN price_tiers pr ON p.price BETWEEN pr.min_price AND pr.max_price;
+
+-- Multiple conditions
+SELECT o.id, c.name
+FROM orders o
+JOIN customers c ON
+    c.id = o.customer_id
+    AND c.country = 'US'
+    AND c.is_active = true;
+
+-- Join on function
+SELECT u.email, l.occurred_at
+FROM users u
+JOIN login_logs l ON LOWER(u.email) = LOWER(l.email_used);
+```
+
+:::caution[Functions on Join Columns]
+Applying functions to join columns (e.g., `LOWER(u.email)`) prevents the database from using indexes. Where possible, normalize data during ingestion and join on the stored normalized value.
+:::
+
+## Implicit Join (Avoid)
+
+The comma-separated `FROM` syntax is implicit cross join — avoid it because it's error-prone and the intention is unclear:
+
+```sql
+-- DON'T: implicit join (easy to accidentally omit WHERE condition = full cross join)
+SELECT c.name, o.id
+FROM customers c, orders o
+WHERE c.id = o.customer_id;
+
+-- DO: explicit JOIN
+SELECT c.name, o.id
+FROM customers c
+JOIN orders o ON c.id = o.customer_id;
+```
+
+## LATERAL JOIN
+
+A `LATERAL` join allows a subquery in the `FROM` clause to reference columns from tables earlier in the same `FROM` clause — it runs once per row:
+
+```sql
+-- Get the 3 most recent orders for each customer
+SELECT
+    c.name,
+    recent.id       AS order_id,
+    recent.created_at,
+    recent.total_amount
+FROM customers c
+CROSS JOIN LATERAL (
+    SELECT id, created_at, total_amount
+    FROM orders
+    WHERE customer_id = c.id         -- references outer c.id
+    ORDER BY created_at DESC
+    LIMIT 3
+) AS recent;
+
+-- Expand an array column into rows with context
+SELECT p.name, tag
+FROM products p
+CROSS JOIN LATERAL UNNEST(p.tags) AS tag
+WHERE tag IS NOT NULL;
+```
+
+## Anti-Join Pattern
+
+Find rows in table A that have NO match in table B. Two equivalent approaches:
+
+```sql
+-- Method 1: LEFT JOIN + IS NULL (most common)
+SELECT c.id, c.name
+FROM customers c
+LEFT JOIN orders o ON c.id = o.customer_id
+WHERE o.id IS NULL;
+
+-- Method 2: NOT EXISTS (often clearer intent)
+SELECT id, name
+FROM customers c
+WHERE NOT EXISTS (
+    SELECT 1 FROM orders WHERE customer_id = c.id
+);
+
+-- Method 3: NOT IN (avoid — fails if subquery returns any NULL)
+SELECT id, name
+FROM customers
+WHERE id NOT IN (SELECT DISTINCT customer_id FROM orders);
+-- ^ dangerous if any customer_id in orders is NULL
+```
+
+:::tip[Prefer NOT EXISTS Over NOT IN]
+`NOT IN` returns zero rows if the subquery contains any `NULL` values (because `x NOT IN (1, 2, NULL)` is always `NULL`, never `TRUE`). Use `NOT EXISTS` or `LEFT JOIN ... WHERE IS NULL` instead.
+:::
+
+## Semi-Join Pattern
+
+Find rows in table A that **do** have a match in table B, without including B's columns:
+
+```sql
+-- EXISTS semi-join (preferred for clarity)
+SELECT id, name
+FROM customers c
+WHERE EXISTS (
+    SELECT 1 FROM orders WHERE customer_id = c.id
+);
+
+-- DISTINCT with INNER JOIN also works but may be less efficient
+SELECT DISTINCT c.id, c.name
+FROM customers c
+JOIN orders o ON c.id = o.customer_id;
+```
+
+## Join Performance Tips
+
+1. **Index foreign key columns** — always index `customer_id`, `product_id`, etc.
+2. **Join on indexed columns** — the database uses indexes to avoid full table scans
+3. **Filter early** — put `WHERE` conditions on the most selective table first
+4. **Avoid functions on join columns** — they prevent index use
+5. **Check execution plans** — use `EXPLAIN ANALYZE` to verify the query uses joins efficiently
+
+```sql
+-- Check that an index exists on the join column
+SELECT indexname, indexdef
+FROM pg_indexes
+WHERE tablename = 'orders' AND indexdef LIKE '%customer_id%';
+
+-- Create if missing
+CREATE INDEX idx_orders_customer_id ON orders (customer_id);
+CREATE INDEX idx_order_items_order_id ON order_items (order_id);
+CREATE INDEX idx_order_items_product_id ON order_items (product_id);
+
+-- Verify the query plan uses index scans, not sequential scans
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT c.name, COUNT(o.id)
+FROM customers c
+LEFT JOIN orders o ON c.id = o.customer_id
+GROUP BY c.id;
+```

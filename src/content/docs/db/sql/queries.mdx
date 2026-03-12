@@ -1,0 +1,442 @@
+---
+title: SQL Queries
+description: SELECT statements, WHERE filtering, ORDER BY, subqueries, CTEs, CASE expressions, and INSERT/UPDATE/DELETE with RETURNING.
+sidebar:
+  order: 3
+tags: [database, sql]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Queries are the heart of SQL. This page covers everything from basic `SELECT` to complex correlated subqueries, recursive CTEs, and the full suite of data modification statements.
+
+## SELECT Basics
+
+```sql
+-- All columns (avoid in production — fragile to schema changes)
+SELECT * FROM products;
+
+-- Specific columns
+SELECT id, name, price FROM products;
+
+-- Column aliases
+SELECT
+    id,
+    name          AS product_name,
+    price         AS unit_price,
+    price * 1.1   AS price_with_tax,
+    UPPER(name)   AS name_upper
+FROM products;
+
+-- Eliminate duplicate rows
+SELECT DISTINCT category FROM products;
+SELECT DISTINCT ON (customer_id) customer_id, order_date, total
+FROM orders
+ORDER BY customer_id, order_date DESC;  -- PostgreSQL: first row per customer
+
+-- Limit results
+SELECT * FROM products LIMIT 10;
+SELECT * FROM products LIMIT 10 OFFSET 20;   -- page 3 (0-indexed)
+
+-- SQL standard pagination
+SELECT * FROM products
+FETCH FIRST 10 ROWS ONLY;
+
+SELECT * FROM products
+OFFSET 20 ROWS
+FETCH NEXT 10 ROWS ONLY;
+```
+
+## WHERE Clause
+
+```sql
+-- Comparison operators
+SELECT * FROM products WHERE price = 29.99;
+SELECT * FROM products WHERE price != 29.99;  -- or <>
+SELECT * FROM products WHERE price > 50;
+SELECT * FROM products WHERE price BETWEEN 10 AND 100;  -- inclusive
+SELECT * FROM products WHERE price NOT BETWEEN 10 AND 100;
+
+-- Logical operators
+SELECT * FROM products
+WHERE category = 'electronics'
+  AND price < 500
+  AND stock_count > 0;
+
+SELECT * FROM products
+WHERE category = 'books'
+   OR category = 'music';
+
+SELECT * FROM products
+WHERE NOT (price > 1000 OR discontinued = true);
+
+-- IN and NOT IN
+SELECT * FROM products
+WHERE category IN ('electronics', 'computers', 'phones');
+
+SELECT * FROM orders
+WHERE status NOT IN ('cancelled', 'refunded');
+
+-- LIKE and ILIKE (case-insensitive, PostgreSQL)
+SELECT * FROM products WHERE name LIKE 'Apple%';        -- starts with "Apple"
+SELECT * FROM products WHERE name LIKE '%Pro%';         -- contains "Pro"
+SELECT * FROM products WHERE name LIKE 'iPhone_';       -- single char wildcard
+SELECT * FROM products WHERE name ILIKE '%apple%';      -- case-insensitive (PostgreSQL)
+
+-- NULL checks (= NULL never works — always use IS NULL)
+SELECT * FROM customers WHERE phone IS NULL;
+SELECT * FROM customers WHERE phone IS NOT NULL;
+
+-- Combining conditions
+SELECT id, name, price
+FROM products
+WHERE (category = 'electronics' OR category = 'computers')
+  AND price > 100
+  AND name ILIKE '%pro%'
+  AND discontinued IS NOT TRUE;
+```
+
+## ORDER BY
+
+```sql
+-- Single column
+SELECT * FROM products ORDER BY price;          -- ASC (default)
+SELECT * FROM products ORDER BY price DESC;
+
+-- Multiple columns
+SELECT * FROM products
+ORDER BY category ASC, price DESC;
+
+-- By expression or alias
+SELECT name, price * 1.1 AS total
+FROM products
+ORDER BY total DESC;
+
+-- NULL placement
+SELECT * FROM products
+ORDER BY discontinued NULLS LAST;    -- NULLs at end
+
+SELECT * FROM products
+ORDER BY published_at DESC NULLS FIRST;  -- NULLs first
+```
+
+## Subqueries
+
+### Non-Correlated Subquery
+
+Executes once and the result is used by the outer query:
+
+```sql
+-- IN with subquery
+SELECT name, price FROM products
+WHERE category_id IN (
+    SELECT id FROM categories WHERE name = 'Electronics'
+);
+
+-- Scalar subquery
+SELECT
+    name,
+    price,
+    (SELECT AVG(price) FROM products) AS avg_price,
+    price - (SELECT AVG(price) FROM products) AS diff_from_avg
+FROM products;
+
+-- Subquery in FROM clause (derived table)
+SELECT category, avg_price
+FROM (
+    SELECT category, AVG(price) AS avg_price
+    FROM products
+    GROUP BY category
+) AS category_stats
+WHERE avg_price > 100
+ORDER BY avg_price DESC;
+```
+
+### Correlated Subquery
+
+References the outer query — executes once per row:
+
+```sql
+-- Find customers who have placed at least one order over $500
+SELECT c.id, c.name
+FROM customers c
+WHERE EXISTS (
+    SELECT 1
+    FROM orders o
+    WHERE o.customer_id = c.id
+      AND o.total_amount > 500
+);
+
+-- Find products more expensive than the average in their category
+SELECT name, category, price
+FROM products p
+WHERE price > (
+    SELECT AVG(price)
+    FROM products
+    WHERE category = p.category  -- correlated: references outer p.category
+);
+
+-- NOT EXISTS anti-pattern: customers with NO orders
+SELECT c.id, c.name
+FROM customers c
+WHERE NOT EXISTS (
+    SELECT 1 FROM orders o WHERE o.customer_id = c.id
+);
+```
+
+:::tip[EXISTS vs IN]
+`EXISTS` is generally faster for correlated subqueries, especially when the subquery would return many rows. `EXISTS` stops at the first matching row; `IN` collects all matching values.
+:::
+
+## CTEs (Common Table Expressions)
+
+CTEs defined with the `WITH` clause give names to subqueries, making complex queries readable.
+
+### Basic CTE
+
+```sql
+WITH high_value_customers AS (
+    SELECT
+        customer_id,
+        SUM(total_amount) AS lifetime_value,
+        COUNT(*) AS order_count
+    FROM orders
+    WHERE status != 'cancelled'
+    GROUP BY customer_id
+    HAVING SUM(total_amount) > 10000
+)
+SELECT
+    c.name,
+    c.email,
+    hvc.lifetime_value,
+    hvc.order_count
+FROM high_value_customers hvc
+JOIN customers c ON c.id = hvc.customer_id
+ORDER BY hvc.lifetime_value DESC;
+```
+
+### Multiple CTEs
+
+```sql
+WITH
+monthly_revenue AS (
+    SELECT
+        DATE_TRUNC('month', created_at) AS month,
+        SUM(total_amount) AS revenue
+    FROM orders
+    WHERE status = 'completed'
+    GROUP BY 1
+),
+monthly_growth AS (
+    SELECT
+        month,
+        revenue,
+        LAG(revenue) OVER (ORDER BY month) AS prev_revenue
+    FROM monthly_revenue
+)
+SELECT
+    month,
+    revenue,
+    prev_revenue,
+    ROUND((revenue - prev_revenue) / prev_revenue * 100, 2) AS growth_pct
+FROM monthly_growth
+WHERE prev_revenue IS NOT NULL
+ORDER BY month;
+```
+
+### Recursive CTE
+
+Recursive CTEs traverse hierarchical data (org charts, category trees, graphs):
+
+```sql
+-- Employee hierarchy: find all reports under a manager
+WITH RECURSIVE org_chart AS (
+    -- Anchor: the root manager
+    SELECT id, name, manager_id, 0 AS depth
+    FROM employees
+    WHERE id = 1                    -- starting employee
+
+    UNION ALL
+
+    -- Recursive: find their direct reports
+    SELECT e.id, e.name, e.manager_id, oc.depth + 1
+    FROM employees e
+    JOIN org_chart oc ON e.manager_id = oc.id
+    WHERE oc.depth < 10             -- prevent infinite loops
+)
+SELECT id, name, depth,
+       REPEAT('  ', depth) || name AS indented_name
+FROM org_chart
+ORDER BY depth, name;
+
+-- Category breadcrumb: path from root to a category
+WITH RECURSIVE category_path AS (
+    SELECT id, name, parent_id, name::TEXT AS path
+    FROM categories
+    WHERE id = 42       -- target category
+
+    UNION ALL
+
+    SELECT c.id, c.name, c.parent_id,
+           c.name || ' > ' || cp.path
+    FROM categories c
+    JOIN category_path cp ON c.id = cp.parent_id
+)
+SELECT path FROM category_path WHERE parent_id IS NULL;
+```
+
+## CASE Expression
+
+### Simple CASE
+
+```sql
+SELECT
+    name,
+    status,
+    CASE status
+        WHEN 'pending'   THEN 'Awaiting payment'
+        WHEN 'confirmed' THEN 'Processing'
+        WHEN 'shipped'   THEN 'On the way'
+        WHEN 'delivered' THEN 'Completed'
+        ELSE 'Unknown'
+    END AS status_label
+FROM orders;
+```
+
+### Searched CASE
+
+```sql
+SELECT
+    name,
+    price,
+    CASE
+        WHEN price < 25              THEN 'Budget'
+        WHEN price BETWEEN 25 AND 100 THEN 'Mid-range'
+        WHEN price > 100             THEN 'Premium'
+        ELSE 'Unknown'
+    END AS price_tier
+FROM products;
+```
+
+### CASE in ORDER BY
+
+```sql
+SELECT * FROM tasks
+ORDER BY
+    CASE status
+        WHEN 'urgent'   THEN 1
+        WHEN 'high'     THEN 2
+        WHEN 'medium'   THEN 3
+        WHEN 'low'      THEN 4
+        ELSE 5
+    END,
+    due_date;
+```
+
+## INSERT
+
+```sql
+-- Single row
+INSERT INTO products (name, price, category)
+VALUES ('Widget Pro', 49.99, 'tools');
+
+-- Multiple rows (more efficient than individual inserts)
+INSERT INTO products (name, price, category)
+VALUES
+    ('Widget Basic', 19.99, 'tools'),
+    ('Widget Pro',   49.99, 'tools'),
+    ('Widget Elite', 99.99, 'tools');
+
+-- INSERT ... SELECT (copy rows)
+INSERT INTO products_archive (name, price, archived_at)
+SELECT name, price, NOW()
+FROM products
+WHERE discontinued = true;
+
+-- Return the inserted row(s)
+INSERT INTO users (email, name)
+VALUES ('alice@example.com', 'Alice Smith')
+RETURNING id, created_at;
+```
+
+### ON CONFLICT (Upsert)
+
+```sql
+-- Do nothing on conflict
+INSERT INTO user_events (user_id, event_type, occurred_at)
+VALUES (123, 'login', NOW())
+ON CONFLICT (user_id, event_type) DO NOTHING;
+
+-- Update on conflict
+INSERT INTO products (sku, name, price, stock)
+VALUES ('WIDGET-001', 'Widget', 19.99, 100)
+ON CONFLICT (sku) DO UPDATE SET
+    name     = EXCLUDED.name,
+    price    = EXCLUDED.price,
+    stock    = products.stock + EXCLUDED.stock,  -- add to existing stock
+    updated_at = NOW();
+```
+
+## UPDATE
+
+```sql
+-- Basic update
+UPDATE products
+SET price = 24.99
+WHERE id = 1;
+
+-- Update multiple columns
+UPDATE users
+SET
+    last_login = NOW(),
+    login_count = login_count + 1,
+    updated_at  = NOW()
+WHERE id = $1;
+
+-- Update with calculation
+UPDATE order_items
+SET total_price = quantity * unit_price;
+
+-- Update from another table (PostgreSQL)
+UPDATE orders o
+SET status = 'shipped'
+FROM shipments s
+WHERE s.order_id = o.id
+  AND s.shipped_at IS NOT NULL
+  AND o.status = 'confirmed';
+
+-- Return updated rows
+UPDATE products
+SET price = price * 0.9
+WHERE category = 'clearance'
+RETURNING id, name, price AS new_price;
+```
+
+## DELETE
+
+```sql
+-- Delete specific rows
+DELETE FROM sessions
+WHERE expires_at < NOW();
+
+-- Delete with subquery
+DELETE FROM cart_items
+WHERE cart_id IN (
+    SELECT id FROM carts WHERE user_id = 456
+);
+
+-- Delete using another table (PostgreSQL)
+DELETE FROM notifications n
+USING users u
+WHERE n.user_id = u.id
+  AND u.is_active = false;
+
+-- Return deleted rows
+DELETE FROM expired_tokens
+WHERE expires_at < NOW()
+RETURNING id, user_id, expires_at;
+```
+
+:::tip[RETURNING Clause]
+The `RETURNING` clause (PostgreSQL, SQLite 3.35+) eliminates the need for a separate `SELECT` after `INSERT`, `UPDATE`, or `DELETE`. It's especially useful for getting auto-generated IDs and for audit logging deleted rows.
+:::

@@ -1,0 +1,502 @@
+---
+title: Getting Started with C
+description: Compiler command lines, build systems, data types, literals, operators, printf format specifiers, and type conversion rules.
+sidebar:
+  order: 2
+tags: [systems, cpp, c]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Getting Started with C
+
+This guide walks through everything you need to write, compile, and run C programs — from compiler flags to data types, operators, and I/O formatting.
+
+## Compiler Command Lines
+
+### GCC and Clang
+
+```bash
+# Basic compilation
+gcc main.c -o main          # Compile and link to produce 'main'
+clang main.c -o main        # Same with Clang
+
+# Recommended warning flags for development
+gcc -Wall -Wextra -Wpedantic -std=c11 main.c -o main
+
+# Debug build — includes debug symbols, no optimization
+gcc -g -O0 -std=c11 -Wall -Wextra main.c -o main_debug
+
+# Release build — optimized
+gcc -O2 -DNDEBUG -std=c11 main.c -o main_release
+
+# Aggressive optimization (may break aliasing assumptions)
+gcc -O3 -march=native -std=c11 main.c -o main_fast
+
+# Compile to object file only (no link step)
+gcc -c utils.c -o utils.o
+gcc -c main.c  -o main.o
+
+# Link object files together
+gcc main.o utils.o -o main
+
+# Link with a system library (e.g., math, pthreads)
+gcc main.c -o main -lm -lpthread
+
+# Sanitizers — catch bugs at runtime
+gcc -fsanitize=address,undefined -g main.c -o main_san
+
+# Generate dependency files for make
+gcc -MMD -MP -c main.c -o main.o  # produces main.d
+
+# Inspect preprocessor output
+gcc -E main.c -o main.i
+
+# Produce assembly
+gcc -S -O2 main.c -o main.s
+```
+
+### Important Flag Reference
+
+| Flag | Meaning |
+|------|---------|
+| `-Wall` | Enable most common warnings |
+| `-Wextra` | Additional warnings (unused params, etc.) |
+| `-Wpedantic` | Strictly follow the C standard |
+| `-Wshadow` | Warn when a variable shadows another |
+| `-Wconversion` | Warn on implicit narrowing conversions |
+| `-Wstrict-prototypes` | Require function prototypes |
+| `-std=c11` | Use the C11 standard |
+| `-g` | Embed debug symbols (DWARF) |
+| `-O0` | No optimization (default for debug) |
+| `-O1` | Light optimization |
+| `-O2` | Standard optimization (recommended) |
+| `-O3` | Aggressive optimization |
+| `-Os` | Optimize for binary size |
+| `-march=native` | Optimize for the current CPU's ISA |
+| `-DNAME=value` | Define a preprocessor macro |
+| `-Ipath` | Add to include search path |
+| `-Lpath` | Add to library search path |
+| `-lname` | Link against library `libname.so`/`libname.a` |
+
+:::tip[Always Develop with Sanitizers]
+Run `gcc -fsanitize=address,undefined -g` during development. AddressSanitizer (ASan) catches buffer overflows, use-after-free, and heap corruption. UndefinedBehaviorSanitizer (UBSan) catches signed overflow, null dereference, misaligned access, and more. These tools catch bugs that would otherwise manifest as mysterious crashes in production.
+:::
+
+## GNU Make
+
+Make is the traditional build system for C projects. It reads a `Makefile` to determine which files need recompilation.
+
+```makefile
+# Makefile — basic structure
+
+# Variables
+CC      := gcc
+CFLAGS  := -Wall -Wextra -Wpedantic -std=c11 -g -O2
+LDFLAGS :=
+LDLIBS  := -lm
+
+# Source and output files
+SRCS    := main.c utils.c parser.c
+OBJS    := $(SRCS:.c=.o)     # Replace .c with .o: main.o utils.o parser.o
+TARGET  := myapp
+
+# Default target (first target is default)
+all: $(TARGET)
+
+# Link: produce the final executable
+$(TARGET): $(OBJS)
+	$(CC) $(LDFLAGS) $^ -o $@ $(LDLIBS)
+
+# Pattern rule: compile any .c to .o
+%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Dependency files for incremental builds
+-include $(OBJS:.o=.d)
+%.o: %.c
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+# Phony targets — not actual files
+.PHONY: all clean run test
+
+clean:
+	rm -f $(OBJS) $(TARGET) $(OBJS:.o=.d)
+
+run: $(TARGET)
+	./$(TARGET)
+
+# Shorthand automatic variables:
+# $@  = target name
+# $<  = first prerequisite
+# $^  = all prerequisites (deduplicated)
+# $*  = stem of pattern (the % part)
+```
+
+## CMake for C Projects
+
+CMake is a cross-platform build system generator that produces Makefiles, Ninja files, or Visual Studio project files.
+
+```cmake
+# CMakeLists.txt — minimal C project
+
+cmake_minimum_required(VERSION 3.20)
+project(MyApp VERSION 1.0 LANGUAGES C)
+
+# Require C11
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)       # Disable GNU extensions; use ISO C only
+
+# Compile warnings
+add_compile_options(-Wall -Wextra -Wpedantic)
+
+# Add executable
+add_executable(myapp
+    src/main.c
+    src/utils.c
+    src/parser.c
+)
+
+# Include directories
+target_include_directories(myapp PRIVATE include)
+
+# Link libraries
+target_link_libraries(myapp PRIVATE m)  # -lm for math
+
+# Debug vs Release configurations
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_options(myapp PRIVATE -g -O0 -fsanitize=address,undefined)
+    target_link_options(myapp PRIVATE -fsanitize=address,undefined)
+endif()
+```
+
+```bash
+# Build with CMake
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Debug
+cmake --build .            # or: make
+
+# Release build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake --build . -- -j$(nproc)
+```
+
+## Data Types
+
+### Fundamental Integer Types
+
+```c
+#include <stdio.h>
+#include <limits.h>   // INT_MAX, CHAR_MIN, etc.
+#include <stdint.h>   // uint8_t, int32_t, etc.
+
+int main(void) {
+    // Signed integer types (sizes are platform-dependent)
+    char           c  = 'A';      // At least 8 bits (signed or unsigned — impl-defined)
+    signed char    sc = -1;       // Exactly signed 8-bit
+    short          s  = 32767;    // At least 16 bits
+    int            i  = -2147483648; // At least 16 bits, usually 32
+    long           l  = 2147483647L; // At least 32 bits
+    long long      ll = 9223372036854775807LL; // At least 64 bits
+
+    // Unsigned variants
+    unsigned char  uc = 255U;
+    unsigned short us = 65535U;
+    unsigned int   ui = 4294967295U;
+    unsigned long  ul = 4294967295UL;
+    unsigned long long ull = 18446744073709551615ULL;
+
+    // Print sizes
+    printf("char:      %zu bytes, range [%d, %d]\n", sizeof(char), CHAR_MIN, CHAR_MAX);
+    printf("short:     %zu bytes, range [%d, %d]\n", sizeof(short), SHRT_MIN, SHRT_MAX);
+    printf("int:       %zu bytes, range [%d, %d]\n", sizeof(int), INT_MIN, INT_MAX);
+    printf("long:      %zu bytes, range [%ld, %ld]\n", sizeof(long), LONG_MIN, LONG_MAX);
+    printf("long long: %zu bytes, range [%lld, %lld]\n", sizeof(long long), LLONG_MIN, LLONG_MAX);
+
+    return 0;
+}
+```
+
+### Fixed-Width Types (stdint.h)
+
+```c
+#include <stdint.h>
+#include <inttypes.h>  // PRI* format macros
+
+// Exact-width types — guaranteed width
+int8_t   a = -128;
+uint8_t  b = 255;
+int16_t  c = -32768;
+uint16_t d = 65535;
+int32_t  e = -2147483648;
+uint32_t f = 4294967295U;
+int64_t  g = INT64_MIN;
+uint64_t h = UINT64_MAX;
+
+// At-least-width types — at least N bits
+int_least8_t  al8  = 0;
+uint_least16_t al16 = 0;
+
+// Fast types — at least N bits, chosen for speed on this platform
+int_fast32_t fast = 0;
+
+// Pointer-sized integer
+intptr_t  ptr_int  = (intptr_t)&a;
+uintptr_t uptr_int = (uintptr_t)&a;
+
+// Maximum-width integer
+intmax_t  maxint = INTMAX_MAX;
+uintmax_t umaxint = UINTMAX_MAX;
+
+// Portable printf format macros from inttypes.h
+printf("int32: %" PRId32 "\n", e);   // PRId32 = "d" on most platforms
+printf("uint64: %" PRIu64 "\n", h);  // PRIu64 = "llu" on LP64
+```
+
+### Floating-Point Types
+
+```c
+#include <float.h>    // FLT_MAX, DBL_EPSILON, etc.
+#include <math.h>
+
+float       f32  = 3.14159265358979f;  // ~7 significant decimal digits
+double      f64  = 3.14159265358979;   // ~15-16 significant decimal digits
+long double f80  = 3.14159265358979L;  // 80-bit extended on x86 (or 128-bit on SPARC)
+
+printf("FLT_MAX  = %e\n", FLT_MAX);     // 3.402823e+38
+printf("DBL_MAX  = %e\n", DBL_MAX);     // 1.797693e+308
+printf("FLT_EPSILON = %e\n", FLT_EPSILON); // 1.192093e-07
+printf("DBL_EPSILON = %e\n", DBL_EPSILON); // 2.220446e-16
+```
+
+## Literals and Suffixes
+
+```c
+// Integer literals
+int decimal     = 42;
+int hex         = 0xFF;          // Hexadecimal (255)
+int octal       = 0777;          // Octal (511)  — note leading zero!
+int binary      = 0b101010;      // Binary (42)  — C23 only; GCC extension in earlier standards
+
+// Integer suffixes
+unsigned int ui = 42U;
+long         l  = 42L;
+unsigned long ul = 42UL;
+long long     ll = 42LL;
+unsigned long long ull = 42ULL;
+
+// Floating-point literals
+float  f  = 3.14f;    // float suffix
+double d  = 3.14;     // double (default)
+long double ld = 3.14L; // long double suffix
+
+// Hex float literals (C99, useful for exact floating-point representation)
+double hf = 0x1.8p+1; // = 1.5 * 2^1 = 3.0
+
+// Character literals
+char newline  = '\n';   // 10
+char tab      = '\t';   // 9
+char null_ch  = '\0';   // 0 — null terminator
+char hex_char = '\x41'; // 'A' via hex escape
+char oct_char = '\101'; // 'A' via octal escape
+
+// String literals (array of char, null-terminated)
+const char *str   = "Hello";
+const char *multi = "Hello "
+                    "World\n";  // Adjacent string literals are concatenated
+```
+
+## printf / scanf Format Specifiers
+
+```c
+#include <stdio.h>
+#include <stdint.h>
+
+int i = -42;
+unsigned u = 42;
+long l = 1234567890L;
+long long ll = 9876543210LL;
+float f = 3.14f;
+double d = 3.14159265358979;
+char c = 'A';
+char *s = "hello";
+void *p = &i;
+size_t sz = 100;
+
+// Integer formats
+printf("%d\n",   i);   // Signed decimal int:           -42
+printf("%i\n",   i);   // Same as %d                    -42
+printf("%u\n",   u);   // Unsigned decimal:              42
+printf("%o\n",   u);   // Unsigned octal:                52
+printf("%x\n",   u);   // Unsigned hex (lowercase):      2a
+printf("%X\n",   u);   // Unsigned hex (uppercase):      2A
+printf("%ld\n",  l);   // long signed decimal:  1234567890
+printf("%lld\n", ll);  // long long decimal:   9876543210
+printf("%zu\n",  sz);  // size_t:                       100
+printf("%td\n",  (ptrdiff_t)10); // ptrdiff_t
+
+// Floating-point formats
+printf("%f\n",   d);   // Decimal notation:     3.141593
+printf("%e\n",   d);   // Scientific:           3.141593e+00
+printf("%g\n",   d);   // Shorter of %f/%e:     3.14159
+printf("%a\n",   d);   // Hex float (C99):      0x1.921fb54442d18p+1
+printf("%.10f\n",d);   // 10 decimal places:    3.1415926536
+printf("%10.2f\n",d);  // Width 10, 2 decimal: "      3.14"
+printf("%-10.2f|\n",d);// Left-aligned:         "3.14      |"
+
+// String and char
+printf("%c\n",   c);   // Character:            A
+printf("%s\n",   s);   // String:               hello
+printf("%10s\n", s);   // Right-padded width 10:"     hello"
+printf("%.3s\n", s);   // Max 3 chars:          hel
+
+// Pointer
+printf("%p\n",   p);   // Pointer address:      0x7ffee1234abc
+
+// Misc
+printf("%%\n");         // Literal percent sign: %
+printf("%5d\n",  i);   // Width 5, right-align: "  -42"
+printf("%-5d|\n",i);   // Width 5, left-align:  "-42  |"
+printf("%05d\n", u);   // Zero-padded:          "00042"
+printf("%+d\n",  i);   // Always show sign:     "-42"
+printf("%+d\n",  u);   // Always show sign:     "+42"
+```
+
+:::tip[scanf is Dangerous]
+Never use `scanf("%s", buf)` without a width limit — it is a buffer overflow vulnerability. Use `scanf("%99s", buf)` or better yet, use `fgets` for string input. Also always check the return value of `scanf` (number of items successfully matched).
+:::
+
+## Operators
+
+```c
+// Arithmetic
+int a = 10, b = 3;
+int sum   = a + b;   // 13
+int diff  = a - b;   // 7
+int prod  = a * b;   // 30
+int quot  = a / b;   // 3  (integer division — truncates toward zero)
+int rem   = a % b;   // 1  (remainder, same sign as dividend in C99+)
+a++;                 // Post-increment (use result then increment)
+++a;                 // Pre-increment (increment then use result)
+a--;                 // Post-decrement
+--a;                 // Pre-decrement
+
+// Bitwise
+unsigned x = 0b1010, y = 0b1100;
+unsigned and_  = x & y;    // 0b1000  — AND
+unsigned or_   = x | y;    // 0b1110  — OR
+unsigned xor_  = x ^ y;    // 0b0110  — XOR
+unsigned not_  = ~x;       // bitwise NOT (flip all bits)
+unsigned shl   = x << 2;   // 0b101000 — shift left (multiply by 4)
+unsigned shr   = x >> 1;   // 0b0101   — shift right (divide by 2 for unsigned)
+
+// Logical
+int p = 1, q = 0;
+int land = p && q; // 0 — logical AND (short-circuits)
+int lor  = p || q; // 1 — logical OR  (short-circuits)
+int lnot = !p;     // 0 — logical NOT
+
+// Comparison
+int eq  = (a == b); // 0
+int neq = (a != b); // 1
+int lt  = (a <  b); // 0
+int gt  = (a >  b); // 1
+int lte = (a <= b); // 0
+int gte = (a >= b); // 1
+
+// Assignment
+a += b;  // a = a + b
+a -= b;  // a = a - b
+a *= b;  // a = a * b
+a /= b;  // a = a / b
+a %= b;  // a = a % b
+a &= b;  // a = a & b
+a |= b;  // a = a | b
+a ^= b;  // a = a ^ b
+a <<= 1; // a = a << 1
+a >>= 1; // a = a >> 1
+
+// Ternary (conditional)
+int max = (a > b) ? a : b;
+
+// sizeof: compile-time size in bytes (returns size_t)
+printf("sizeof(int) = %zu\n", sizeof(int));
+printf("sizeof arr = %zu\n", sizeof(int[10])); // 40 on 32-bit
+
+// Comma operator: evaluate left, discard, evaluate and return right
+int z = (a = 5, a + 2); // z = 7 (a is 5, then a+2 = 7)
+
+// Pointer operators
+int val = 42;
+int *ptr = &val; // & = address-of
+int deref = *ptr; // * = dereference (gets value at address)
+```
+
+## Type Casting and Implicit Conversions
+
+```c
+// Explicit cast (C-style)
+double d = 3.99;
+int i = (int)d;      // i = 3 (truncates, does NOT round)
+
+int a = 5, b = 2;
+double result = (double)a / b;  // 2.5 — cast before division!
+// WITHOUT cast: a / b = 2 (integer division)
+
+// Integer promotion rules (used in arithmetic expressions)
+// Short/char operands are promoted to int before arithmetic
+char c1 = 100, c2 = 200;
+int sum = c1 + c2;   // Both promoted to int first (no overflow during addition)
+// But: char res = c1 + c2; — WARNING: may overflow when assigned back
+
+// Usual Arithmetic Conversions (applied to both operands of binary operators)
+// Rule: narrower types are converted to the wider type
+// Hierarchy: long double > double > float > unsigned long long > long long > ...
+int    x = 5;
+double y = 2.5;
+double z = x + y;  // x promoted to double; result is double (7.5)
+
+// Signedness pitfalls
+unsigned int u = 1;
+int          n = -1;
+if (n < u) {         // WARNING: -1 is converted to unsigned = UINT_MAX!
+    puts("n < u");
+} else {
+    puts("n >= u");  // This branch executes! -1 as unsigned is 4294967295
+}
+```
+
+:::caution[Signed/Unsigned Comparison]
+Mixing signed and unsigned types in comparisons is a common bug. GCC warns about this with `-Wsign-compare` (included in `-Wextra`). When a signed negative integer is compared to an unsigned value, the signed integer is converted to unsigned — making `-1` become a very large positive number.
+:::
+
+## Integer Overflow
+
+```c
+#include <stdint.h>
+#include <limits.h>
+
+// Signed integer overflow is UNDEFINED BEHAVIOR in C
+int x = INT_MAX;
+int y = x + 1;  // UB! The compiler may "optimize away" overflow checks.
+
+// Use unsigned types for wrapping arithmetic (unsigned overflow is well-defined)
+uint32_t u = UINT32_MAX;
+uint32_t v = u + 1;  // Well-defined: wraps to 0
+
+// Safe signed overflow check (C11 — portable)
+#include <stdbool.h>
+bool add_overflows(int a, int b) {
+    // If both positive and result negative (or both negative, result positive)
+    if (b > 0 && a > INT_MAX - b) return true;
+    if (b < 0 && a < INT_MIN - b) return true;
+    return false;
+}
+
+// GCC/Clang built-ins for overflow-checked arithmetic
+int result;
+if (__builtin_add_overflow(x, y, &result)) {
+    fprintf(stderr, "Overflow!\n");
+}
+```

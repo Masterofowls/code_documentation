@@ -1,0 +1,499 @@
+---
+title: Commands
+description: Write Rust commands, handle async operations, manage application state, and call commands from TypeScript with full type safety.
+sidebar:
+  order: 3
+tags: [rust, javascript, desktop]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Commands are the primary way your frontend JavaScript communicates with your Rust backend. They are regular Rust functions annotated with `#[tauri::command]` and registered in `generate_handler![]`.
+
+## Defining a Command
+
+```rust
+// src-tauri/src/lib.rs
+
+#[tauri::command]
+fn hello_world() -> String {
+    "Hello from Rust!".to_string()
+}
+
+// With parameters
+#[tauri::command]
+fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+```
+
+Register all commands in the invoke handler:
+
+```rust
+tauri::Builder::default()
+    .invoke_handler(tauri::generate_handler![hello_world, add])
+    .run(tauri::generate_context!())
+    .expect("error while running application");
+```
+
+Call from TypeScript:
+
+```typescript
+import { invoke } from '@tauri-apps/api/core';
+
+const message = await invoke<string>('hello_world');
+const result = await invoke<number>('add', { a: 5, b: 3 });
+console.log(result); // 8
+```
+
+## Function Name Convention
+
+Rust uses `snake_case`. In Tauri 2, command names are used exactly as defined in Rust when calling `invoke`:
+
+```rust
+#[tauri::command]
+fn get_system_info() -> String { /* ... */ }
+
+#[tauri::command]
+fn read_user_config() -> Config { /* ... */ }
+```
+
+```typescript
+// Use the exact Rust snake_case name
+await invoke('get_system_info');
+await invoke('read_user_config');
+```
+
+## Parameters
+
+Command parameters are automatically deserialized from JSON. Supported types:
+
+```rust
+use serde::{Deserialize, Serialize};
+
+// Primitive types
+#[tauri::command]
+fn with_primitives(
+    name: String,
+    count: i32,
+    ratio: f64,
+    enabled: bool,
+) -> String {
+    format!("{name}: {count} ({ratio}, enabled={enabled})")
+}
+
+// Optional parameters
+#[tauri::command]
+fn with_optional(label: Option<String>) -> String {
+    label.unwrap_or_else(|| "default".to_string())
+}
+
+// Struct parameters (must implement Deserialize)
+#[derive(Deserialize, Debug)]
+pub struct CreateUserInput {
+    pub name: String,
+    pub email: String,
+    pub age: Option<u32>,
+}
+
+#[tauri::command]
+fn create_user(input: CreateUserInput) -> String {
+    format!("Created user: {} <{}>", input.name, input.email)
+}
+```
+
+```typescript
+// Calling with a struct parameter
+await invoke('create_user', {
+  input: {
+    name: 'Alice',
+    email: 'alice@example.com',
+    age: 30,
+  },
+});
+```
+
+:::tip[Parameter Naming]
+In Tauri 2, parameter names in `invoke` must exactly match the Rust parameter names (as `camelCase` is automatically mapped from `snake_case` in Tauri 1, but Tauri 2 uses the field names directly from the JSON). Always check the deserialized field names in your `Deserialize` structs.
+:::
+
+## Return Types
+
+Commands can return any type that implements `serde::Serialize`:
+
+```rust
+use serde::Serialize;
+
+// Return primitive
+#[tauri::command]
+fn get_count() -> u32 {
+    42
+}
+
+// Return struct
+#[derive(Serialize)]
+pub struct AppInfo {
+    pub name: String,
+    pub version: String,
+    pub os: String,
+}
+
+#[tauri::command]
+fn get_app_info() -> AppInfo {
+    AppInfo {
+        name: "MyApp".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        os: std::env::consts::OS.to_string(),
+    }
+}
+
+// Return a Vec
+#[derive(Serialize)]
+pub struct FileEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+}
+
+#[tauri::command]
+async fn list_files(dir: String) -> Result<Vec<FileEntry>, String> {
+    let mut entries = Vec::new();
+    let mut read_dir = tokio::fs::read_dir(&dir)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    while let Some(entry) = read_dir.next_entry().await.map_err(|e| e.to_string())? {
+        let metadata = entry.metadata().await.map_err(|e| e.to_string())?;
+        entries.push(FileEntry {
+            name: entry.file_name().to_string_lossy().to_string(),
+            path: entry.path().to_string_lossy().to_string(),
+            is_dir: metadata.is_dir(),
+        });
+    }
+
+    Ok(entries)
+}
+```
+
+```typescript
+interface AppInfo {
+  name: string;
+  version: string;
+  os: string;
+}
+
+interface FileEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+}
+
+const info = await invoke<AppInfo>('get_app_info');
+const files = await invoke<FileEntry[]>('list_files', { dir: '/tmp' });
+```
+
+## Async Commands
+
+Mark commands `async` for I/O-bound or long-running operations. Tauri uses Tokio as its async runtime:
+
+```rust
+use tokio::time::{sleep, Duration};
+
+#[tauri::command]
+async fn fetch_data(url: String) -> Result<String, String> {
+    // Use reqwest for HTTP requests
+    let response = reqwest::get(&url)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let text = response.text()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(text)
+}
+
+#[tauri::command]
+async fn slow_operation(duration_ms: u64) -> String {
+    sleep(Duration::from_millis(duration_ms)).await;
+    "Done!".to_string()
+}
+```
+
+Add `reqwest` to your `Cargo.toml`:
+
+```toml
+[dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
+```
+
+## Error Handling
+
+The recommended pattern is `Result<T, E>` where `E` is a type that implements `Serialize`. Use `thiserror` for ergonomic error definitions:
+
+```toml
+[dependencies]
+thiserror = "1"
+```
+
+```rust
+use serde::Serialize;
+use thiserror::Error;
+
+#[derive(Debug, Error, Serialize)]
+pub enum AppError {
+    #[error("File not found: {0}")]
+    FileNotFound(String),
+
+    #[error("Permission denied: {0}")]
+    PermissionDenied(String),
+
+    #[error("IO error: {0}")]
+    Io(
+        // thiserror with serde requires custom serialize for std::io::Error
+        #[serde(serialize_with = "serialize_error")]
+        #[from]
+        std::io::Error,
+    ),
+
+    #[error("Parse error: {0}")]
+    Parse(String),
+}
+
+fn serialize_error<S>(error: &std::io::Error, s: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    s.serialize_str(&error.to_string())
+}
+
+#[tauri::command]
+async fn read_config(path: String) -> Result<String, AppError> {
+    let content = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => AppError::FileNotFound(path),
+            std::io::ErrorKind::PermissionDenied => AppError::PermissionDenied(e.to_string()),
+            _ => AppError::Io(e),
+        })?;
+
+    Ok(content)
+}
+```
+
+```typescript
+// TypeScript — catching structured errors
+try {
+  const config = await invoke<string>('read_config', {
+    path: '/etc/app/config.json',
+  });
+  console.log(config);
+} catch (error) {
+  // error is the serialized AppError variant
+  console.error('Failed to read config:', error);
+  // For thiserror with Serialize, error will be an object like:
+  // { "FileNotFound": "/etc/app/config.json" }
+  // or just the error string if serialized as a string
+}
+```
+
+:::tip[Simple Error Pattern]
+For simpler cases, mapping errors to `String` is perfectly acceptable:
+
+```rust
+#[tauri::command]
+async fn simple_op(path: String) -> Result<String, String> {
+    tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| e.to_string())
+}
+```
+:::
+
+## State Management
+
+Use Tauri's `State` type to share data across commands — this is the idiomatic way to implement a repository, cache, or configuration store:
+
+```rust
+use std::sync::Mutex;
+use tauri::State;
+use serde::{Deserialize, Serialize};
+
+// Define your state structure
+#[derive(Default, Serialize, Deserialize)]
+pub struct AppState {
+    pub counter: i32,
+    pub recent_files: Vec<String>,
+}
+
+// Wrap in Mutex for interior mutability across threads
+pub struct AppStateWrapper(pub Mutex<AppState>);
+
+// Commands that use state
+#[tauri::command]
+fn increment_counter(state: State<'_, AppStateWrapper>) -> i32 {
+    let mut s = state.0.lock().unwrap();
+    s.counter += 1;
+    s.counter
+}
+
+#[tauri::command]
+fn get_counter(state: State<'_, AppStateWrapper>) -> i32 {
+    state.0.lock().unwrap().counter
+}
+
+#[tauri::command]
+fn add_recent_file(path: String, state: State<'_, AppStateWrapper>) {
+    let mut s = state.0.lock().unwrap();
+    s.recent_files.retain(|f| f != &path);
+    s.recent_files.insert(0, path);
+    if s.recent_files.len() > 10 {
+        s.recent_files.truncate(10);
+    }
+}
+
+#[tauri::command]
+fn get_recent_files(state: State<'_, AppStateWrapper>) -> Vec<String> {
+    state.0.lock().unwrap().recent_files.clone()
+}
+```
+
+Register state in the app builder:
+
+```rust
+pub fn run() {
+    tauri::Builder::default()
+        .manage(AppStateWrapper(Mutex::new(AppState::default())))
+        .invoke_handler(tauri::generate_handler![
+            increment_counter,
+            get_counter,
+            add_recent_file,
+            get_recent_files,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running application");
+}
+```
+
+## AppHandle in Commands
+
+`AppHandle` gives commands access to the entire Tauri application — emit events, access state, open windows:
+
+```rust
+use tauri::{AppHandle, Manager};
+
+#[tauri::command]
+async fn perform_task(app: AppHandle) -> Result<(), String> {
+    // Access managed state
+    let state = app.state::<AppStateWrapper>();
+    let mut s = state.0.lock().unwrap();
+    s.counter += 1;
+
+    // Emit an event to all windows
+    app.emit("task-complete", &serde_json::json!({
+        "status": "done",
+        "counter": s.counter,
+    }))
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+```
+
+## Window Handle in Commands
+
+Commands can receive a handle to the specific window that invoked them:
+
+```rust
+use tauri::WebviewWindow;
+
+#[tauri::command]
+fn set_window_title(window: WebviewWindow, title: String) -> Result<(), String> {
+    window.set_title(&title).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn toggle_fullscreen(window: WebviewWindow) -> Result<bool, String> {
+    let is_fullscreen = window.is_fullscreen().map_err(|e| e.to_string())?;
+    window.set_fullscreen(!is_fullscreen).map_err(|e| e.to_string())?;
+    Ok(!is_fullscreen)
+}
+```
+
+## Creating New Windows from Commands
+
+```rust
+use tauri::{AppHandle, Manager, WebviewWindowBuilder, WebviewUrl};
+
+#[tauri::command]
+async fn open_settings_window(app: AppHandle) -> Result<(), String> {
+    // Check if settings window already exists
+    if let Some(win) = app.get_webview_window("settings") {
+        win.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    let _settings_window = WebviewWindowBuilder::new(
+        &app,
+        "settings",
+        WebviewUrl::App("settings.html".into()),
+    )
+    .title("Settings")
+    .inner_size(600.0, 500.0)
+    .resizable(false)
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+```
+
+## Organizing Commands into Modules
+
+For larger apps, split commands into separate modules:
+
+```rust
+// src-tauri/src/commands/mod.rs
+pub mod file_commands;
+pub mod settings_commands;
+pub mod window_commands;
+
+// src-tauri/src/lib.rs
+mod commands;
+use commands::{file_commands, settings_commands, window_commands};
+
+pub fn run() {
+    tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            file_commands::open_file,
+            file_commands::save_file,
+            file_commands::list_directory,
+            settings_commands::get_settings,
+            settings_commands::save_settings,
+            window_commands::open_settings_window,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running application");
+}
+```
+
+```rust
+// src-tauri/src/commands/file_commands.rs
+use tauri::State;
+use crate::AppStateWrapper;
+
+#[tauri::command]
+pub async fn open_file(path: String) -> Result<String, String> {
+    tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn save_file(path: String, content: String) -> Result<(), String> {
+    tokio::fs::write(&path, content)
+        .await
+        .map_err(|e| e.to_string())
+}
+```

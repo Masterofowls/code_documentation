@@ -1,0 +1,467 @@
+---
+title: IPC Communication
+description: Master Electron's inter-process communication — invoke/handle, one-way messaging, type-safe channels, and real-world patterns.
+sidebar:
+  order: 5
+tags: [javascript, desktop]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Inter-Process Communication (IPC) is the only safe way for the renderer process and main process to exchange data. Electron provides `ipcMain` (main process), `ipcRenderer` (preload), and `contextBridge` (bridge to renderer) to implement this securely.
+
+## IPC Architecture
+
+```
+Renderer (window)
+     │  window.electronAPI.doSomething(args)
+     │
+Preload (contextBridge)
+     │  ipcRenderer.invoke('channel', args)
+     │
+     ╔══════════ IPC boundary ══════════╗
+     │
+Main Process
+     │  ipcMain.handle('channel', handler)
+     │
+  Node.js / OS APIs
+```
+
+The golden rule: **never expose `ipcRenderer` directly to the renderer**. Always wrap IPC calls in specific, named functions via `contextBridge`. This creates an explicit, auditable API surface.
+
+## invoke / handle (Two-Way Communication)
+
+The `invoke`/`handle` pattern is the recommended approach for operations that return a value. `ipcRenderer.invoke` returns a Promise that resolves with the handler's return value.
+
+### Main Process — `ipcMain.handle`
+
+```typescript
+// src/main.ts
+import { ipcMain, dialog, app } from 'electron';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+
+// Handle file open dialog
+ipcMain.handle('dialog:openFile', async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+
+  const result = await dialog.showOpenDialog(win!, {
+    properties: ['openFile'],
+    filters: [
+      { name: 'Text Files', extensions: ['txt', 'md', 'json'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  });
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return null;
+  }
+
+  return result.filePaths[0];
+});
+
+// Handle file read
+ipcMain.handle('fs:readFile', async (_event, filePath: string) => {
+  // Always validate paths from the renderer
+  const resolvedPath = path.resolve(filePath);
+  const allowedBase = app.getPath('documents');
+
+  if (!resolvedPath.startsWith(allowedBase)) {
+    throw new Error('Access denied: path outside allowed directory');
+  }
+
+  const content = await fs.readFile(resolvedPath, 'utf-8');
+  return content;
+});
+
+// Handle file write with error propagation
+ipcMain.handle('fs:writeFile', async (_event, filePath: string, content: string) => {
+  try {
+    await fs.writeFile(filePath, content, 'utf-8');
+    return { success: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return { success: false, error: message };
+  }
+});
+
+// Return the app version
+ipcMain.handle('app:getVersion', () => {
+  return app.getVersion();
+});
+```
+
+### Preload — Bridge via contextBridge
+
+```typescript
+// src/preload.ts
+import { contextBridge, ipcRenderer } from 'electron';
+
+contextBridge.exposeInMainWorld('electronAPI', {
+  openFile: (): Promise<string | null> =>
+    ipcRenderer.invoke('dialog:openFile'),
+
+  readFile: (filePath: string): Promise<string> =>
+    ipcRenderer.invoke('fs:readFile', filePath),
+
+  writeFile: (filePath: string, content: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('fs:writeFile', filePath, content),
+
+  getAppVersion: (): Promise<string> =>
+    ipcRenderer.invoke('app:getVersion'),
+});
+```
+
+### Renderer — Calling the API
+
+```typescript
+// src/App.tsx (React)
+import React, { useState, useCallback } from 'react';
+
+export const FileEditor: React.FC = () => {
+  const [content, setContent] = useState('');
+  const [filePath, setFilePath] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleOpen = useCallback(async () => {
+    setError(null);
+    try {
+      const path = await window.electronAPI.openFile();
+      if (!path) return;
+
+      const text = await window.electronAPI.readFile(path);
+      setFilePath(path);
+      setContent(text);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to open file');
+    }
+  }, []);
+
+  const handleSave = useCallback(async () => {
+    if (!filePath) return;
+    const result = await window.electronAPI.writeFile(filePath, content);
+    if (!result.success) {
+      setError(result.error ?? 'Save failed');
+    }
+  }, [filePath, content]);
+
+  return (
+    <div>
+      <button onClick={handleOpen}>Open</button>
+      <button onClick={handleSave} disabled={!filePath}>Save</button>
+      {error && <p className="error">{error}</p>}
+      <textarea
+        value={content}
+        onChange={(e) => setContent(e.target.value)}
+      />
+    </div>
+  );
+};
+```
+
+## Error Handling in invoke/handle
+
+Errors thrown inside `ipcMain.handle` are serialized and re-thrown in the renderer:
+
+```typescript
+// main.ts
+ipcMain.handle('risky:operation', async () => {
+  throw new Error('Something went wrong'); // Propagates to renderer
+});
+
+// renderer (or preload-exposed function)
+try {
+  await window.electronAPI.riskyOperation();
+} catch (error) {
+  // error.message === 'Something went wrong'
+  console.error(error);
+}
+```
+
+:::caution[Error Serialization]
+Only the `message` property of an `Error` is serialized across the IPC boundary. Stack traces, custom properties, and error class types are lost. If you need structured error data, return an object with a `{ success: false, error: string, code?: string }` shape instead of throwing.
+:::
+
+## send / on (One-Way: Renderer → Main)
+
+Use `ipcRenderer.send` when the renderer fires an event it doesn't need a response to:
+
+```typescript
+// Preload
+contextBridge.exposeInMainWorld('electronAPI', {
+  logAction: (action: string, data: unknown): void => {
+    ipcRenderer.send('analytics:log', action, data);
+  },
+  minimizeWindow: (): void => {
+    ipcRenderer.send('window:minimize');
+  },
+  quitApp: (): void => {
+    ipcRenderer.send('app:quit');
+  },
+});
+
+// Main process
+ipcMain.on('analytics:log', (_event, action: string, data: unknown) => {
+  console.log(`[Analytics] ${action}:`, data);
+  // Write to a log file, send to server, etc.
+});
+
+ipcMain.on('window:minimize', (event) => {
+  BrowserWindow.fromWebContents(event.sender)?.minimize();
+});
+
+ipcMain.on('app:quit', () => {
+  app.quit();
+});
+```
+
+## send / on (One-Way: Main → Renderer)
+
+The main process pushes data to a renderer using `webContents.send`:
+
+```typescript
+// Main process — send to a specific window
+const win = BrowserWindow.getAllWindows()[0];
+win.webContents.send('update-available', { version: '2.0.0', notes: '...' });
+
+// Main process — send to ALL windows
+BrowserWindow.getAllWindows().forEach((win) => {
+  win.webContents.send('system-event', { type: 'suspend' });
+});
+
+// Preload — receive and forward to renderer
+contextBridge.exposeInMainWorld('electronAPI', {
+  onUpdateAvailable: (callback: (info: { version: string; notes: string }) => void): void => {
+    ipcRenderer.on('update-available', (_event, info) => callback(info));
+  },
+  onSystemEvent: (callback: (event: { type: string }) => void): void => {
+    ipcRenderer.on('system-event', (_event, data) => callback(data));
+  },
+  removeListener: (channel: string): void => {
+    ipcRenderer.removeAllListeners(channel);
+  },
+});
+```
+
+## Removing Listeners
+
+Memory leaks from IPC listeners are a common source of bugs. Always clean up:
+
+```typescript
+// Preload — return an unlisten function (recommended pattern)
+contextBridge.exposeInMainWorld('electronAPI', {
+  onDownloadProgress: (
+    callback: (progress: number) => void
+  ): (() => void) => {
+    const handler = (_event: unknown, progress: number) => callback(progress);
+    ipcRenderer.on('download-progress', handler);
+
+    // Return a cleanup function the renderer can call
+    return () => ipcRenderer.removeListener('download-progress', handler);
+  },
+});
+
+// React — using the returned unlisten function
+useEffect(() => {
+  const unlisten = window.electronAPI.onDownloadProgress((progress) => {
+    setProgress(progress);
+  });
+
+  return unlisten; // Called on component unmount
+}, []);
+```
+
+## Type-Safe IPC with TypeScript
+
+Define all IPC channels in a shared interface file:
+
+```typescript
+// src/shared/ipc-types.ts
+// This file is imported by both main and preload/renderer
+
+export interface IPCChannels {
+  // invoke/handle channels: [RequestArgs, ResponseType]
+  'dialog:openFile': [[], string | null];
+  'dialog:saveFile': [[content: string], boolean];
+  'fs:readFile': [[path: string], string];
+  'fs:writeFile': [[path: string, content: string], { success: boolean; error?: string }];
+  'app:getVersion': [[], string];
+  'app:getPath': [[name: string], string];
+}
+
+export interface IPCEvents {
+  // main → renderer push events: [PayloadType]
+  'update-available': [{ version: string; notes: string }];
+  'update-downloaded': [{ version: string }];
+  'download-progress': [number];
+  'theme-changed': [{ dark: boolean }];
+}
+
+// Type-safe invoke wrapper
+export type InvokeChannel = keyof IPCChannels;
+export type InvokeArgs<C extends InvokeChannel> = IPCChannels[C][0];
+export type InvokeReturn<C extends InvokeChannel> = IPCChannels[C][1];
+```
+
+```typescript
+// src/preload.ts — type-safe wrapper
+import { contextBridge, ipcRenderer } from 'electron';
+import type { IPCChannels, IPCEvents } from './shared/ipc-types';
+
+type InvokeChannel = keyof IPCChannels;
+type EventChannel = keyof IPCEvents;
+
+contextBridge.exposeInMainWorld('electronAPI', {
+  invoke: <C extends InvokeChannel>(
+    channel: C,
+    ...args: IPCChannels[C][0]
+  ): Promise<IPCChannels[C][1]> => {
+    return ipcRenderer.invoke(channel, ...args);
+  },
+
+  on: <C extends EventChannel>(
+    channel: C,
+    callback: (payload: IPCEvents[C][0]) => void
+  ): (() => void) => {
+    const handler = (_event: unknown, payload: IPCEvents[C][0]) =>
+      callback(payload);
+    ipcRenderer.on(channel, handler);
+    return () => ipcRenderer.removeListener(channel, handler);
+  },
+});
+```
+
+## Channels Naming Convention
+
+Use a `domain:action` naming convention for clarity and namespacing:
+
+```typescript
+// Good channel names
+'dialog:openFile'
+'dialog:saveFile'
+'dialog:showMessage'
+'fs:read'
+'fs:write'
+'fs:delete'
+'fs:exists'
+'app:getVersion'
+'app:getPath'
+'app:quit'
+'app:relaunch'
+'window:minimize'
+'window:maximize'
+'window:close'
+'window:setTitle'
+'update:check'
+'update:download'
+'update:install'
+
+// Avoid generic names
+'ipc'
+'message'
+'data'
+'action'
+```
+
+## Progress Updates — Streaming from Main to Renderer
+
+A common pattern: trigger a long operation from the renderer, stream progress back, resolve when done:
+
+```typescript
+// Main process
+ipcMain.handle('file:processLarge', async (event, filePath: string) => {
+  const win = BrowserWindow.fromWebContents(event.sender)!;
+  const stats = await fs.stat(filePath);
+  const totalBytes = stats.size;
+  let processedBytes = 0;
+
+  const stream = createReadStream(filePath, { highWaterMark: 64 * 1024 });
+
+  for await (const chunk of stream) {
+    // Process chunk...
+    processedBytes += chunk.length;
+    const progress = Math.round((processedBytes / totalBytes) * 100);
+
+    // Push progress to renderer
+    win.webContents.send('file:progress', progress);
+  }
+
+  return { success: true, bytesProcessed: processedBytes };
+});
+
+// Renderer
+const [progress, setProgress] = useState(0);
+const [isProcessing, setIsProcessing] = useState(false);
+
+useEffect(() => {
+  const unlisten = window.electronAPI.on('file:progress', setProgress);
+  return unlisten;
+}, []);
+
+const processFile = async (path: string) => {
+  setIsProcessing(true);
+  setProgress(0);
+  try {
+    await window.electronAPI.invoke('file:processLarge', path);
+  } finally {
+    setIsProcessing(false);
+  }
+};
+```
+
+## Complete Flow: File Dialog → Read → Send to Renderer
+
+A real-world example tying all IPC patterns together:
+
+<Steps>
+
+1. **Define the IPC handler in main.ts**
+
+   ```typescript
+   ipcMain.handle('editor:openAndRead', async (event) => {
+     const win = BrowserWindow.fromWebContents(event.sender)!;
+
+     const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+       properties: ['openFile'],
+       filters: [{ name: 'Text', extensions: ['txt', 'md', 'ts', 'js'] }],
+     });
+
+     if (canceled || filePaths.length === 0) return null;
+
+     const content = await fs.readFile(filePaths[0], 'utf-8');
+     return { path: filePaths[0], content };
+   });
+   ```
+
+2. **Expose in preload.ts**
+
+   ```typescript
+   contextBridge.exposeInMainWorld('electronAPI', {
+     openAndReadFile: (): Promise<{ path: string; content: string } | null> =>
+       ipcRenderer.invoke('editor:openAndRead'),
+   });
+   ```
+
+3. **Declare the type in electron.d.ts**
+
+   ```typescript
+   interface Window {
+     electronAPI: {
+       openAndReadFile: () => Promise<{ path: string; content: string } | null>;
+     };
+   }
+   ```
+
+4. **Use in the renderer component**
+
+   ```typescript
+   const handleOpen = async () => {
+     const result = await window.electronAPI.openAndReadFile();
+     if (result) {
+       setFilePath(result.path);
+       setFileContent(result.content);
+     }
+   };
+   ```
+
+</Steps>

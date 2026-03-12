@@ -1,0 +1,494 @@
+---
+title: Image Operations
+description: Master Pillow's image transformation toolkit — resize, crop, rotate, flip, paste, composite, blend, and split or merge channels with detailed examples.
+sidebar:
+  order: 3
+tags: [python, imaging]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+This guide covers the full range of geometric and compositing operations available on Pillow `Image` objects. All methods return **new** `Image` instances — the original is never modified in place.
+
+---
+
+## Resizing: `resize()`
+
+`Image.resize()` scales an image to an exact size regardless of aspect ratio:
+
+```python
+from PIL import Image
+
+img = Image.open("photo.jpg")   # 1920 × 1080
+
+# Resize to exact dimensions — may distort the image
+resized = img.resize((800, 600))
+print(resized.size)   # (800, 600)
+
+# Resize with a high-quality resampling filter (default is BICUBIC for downscaling)
+resized_hq = img.resize((800, 600), resample=Image.Resampling.LANCZOS)
+# LANCZOS produces the sharpest result when downscaling photographs
+# Output: a 800×600 image — if the original was 16:9, this looks slightly squished
+
+# Resampling filter reference:
+# Image.Resampling.NEAREST  — no interpolation, pixelated, fastest
+# Image.Resampling.BOX      — average surrounding pixels, good for downscaling
+# Image.Resampling.BILINEAR — linear interpolation, smooth
+# Image.Resampling.HAMMING  — like BILINEAR with better anti-aliasing
+# Image.Resampling.BICUBIC  — cubic interpolation, good balance of speed/quality
+# Image.Resampling.LANCZOS  — best quality for downscaling photographs
+```
+
+### Resizing with Resampling Comparison
+
+```python
+from PIL import Image
+
+img = Image.open("photo.jpg")
+
+filters = {
+    "nearest":  Image.Resampling.NEAREST,
+    "bilinear": Image.Resampling.BILINEAR,
+    "bicubic":  Image.Resampling.BICUBIC,
+    "lanczos":  Image.Resampling.LANCZOS,
+}
+
+for name, filt in filters.items():
+    out = img.resize((200, 150), resample=filt)
+    out.save(f"resize_{name}.jpg", quality=95)
+# Output: four 200×150 JPEGs — NEAREST looks blocky/pixelated,
+#         BILINEAR is smooth but soft, BICUBIC is sharp, LANCZOS is sharpest
+```
+
+---
+
+## Thumbnail: `thumbnail()`
+
+`thumbnail()` **modifies the image in place** and preserves the aspect ratio. It never upscales — if the image is already smaller than the target size, it stays unchanged.
+
+```python
+from PIL import Image
+
+img = Image.open("photo.jpg")   # 1920 × 1080
+print(img.size)                 # (1920, 1080)
+
+# thumbnail() MODIFIES img in place — use .copy() if you need the original
+img.thumbnail((400, 400), resample=Image.Resampling.LANCZOS)
+print(img.size)   # (400, 225) — width capped at 400, height proportionally scaled
+
+img.save("thumb.jpg", quality=80)
+# Output: a 400×225 JPEG — same subject, same proportions, no distortion
+```
+
+:::tip[thumbnail() Preserves Aspect Ratio — resize() Does Not]
+Use `thumbnail()` when you want to fit an image into a bounding box without distortion (profile pictures, gallery previews). Use `resize()` when you need exact pixel dimensions (e.g., a fixed-size sprite or canvas slot).
+
+```python
+# Fit inside 400×400 — use thumbnail
+img.thumbnail((400, 400))
+
+# Exact 400×400 — use resize (may squish the image)
+img = img.resize((400, 400))
+```
+:::
+
+---
+
+## Cropping: `crop()`
+
+`crop()` extracts a rectangular region defined by the box `(left, upper, right, lower)`:
+
+```python
+from PIL import Image
+
+img = Image.open("photo.jpg")   # 1920 × 1080
+
+# Crop the top-left 400×300 region
+region = img.crop((0, 0, 400, 300))
+print(region.size)   # (400, 300)
+
+# Crop center 640×480
+w, h = img.size
+cx, cy = w // 2, h // 2
+center_crop = img.crop((cx - 320, cy - 240, cx + 320, cy + 240))
+print(center_crop.size)   # (640, 480)
+
+center_crop.save("center_crop.jpg")
+# Output: the central 640×480 portion of the original photograph
+```
+
+### Smart Center Crop for Social Media
+
+```python
+from PIL import Image
+
+def center_crop(img: "Image.Image", target_w: int, target_h: int) -> "Image.Image":
+    """Crop to the center of the image to match a target aspect ratio."""
+    w, h = img.size
+    target_ratio = target_w / target_h
+    src_ratio = w / h
+
+    if src_ratio > target_ratio:
+        # Image is wider than target — crop sides
+        new_w = int(h * target_ratio)
+        offset = (w - new_w) // 2
+        box = (offset, 0, offset + new_w, h)
+    else:
+        # Image is taller than target — crop top/bottom
+        new_h = int(w / target_ratio)
+        offset = (h - new_h) // 2
+        box = (0, offset, w, offset + new_h)
+
+    return img.crop(box).resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+img = Image.open("photo.jpg")
+square    = center_crop(img, 1080, 1080)   # Instagram square
+landscape = center_crop(img, 1200, 628)    # Twitter/OG card
+story     = center_crop(img, 1080, 1920)   # Instagram Story / TikTok
+
+square.save("instagram.jpg", quality=90)
+landscape.save("twitter_card.jpg", quality=90)
+story.save("story.jpg", quality=90)
+```
+
+---
+
+## Rotating: `rotate()`
+
+```python
+from PIL import Image
+
+img = Image.open("photo.jpg")
+
+# Rotate 45 degrees counter-clockwise — crops to original size (black corners appear)
+rot_crop = img.rotate(45)
+rot_crop.save("rotate_45_cropped.png")
+# Output: diagonally rotated photo with black (or zero) triangular corners
+
+# Rotate 45 degrees and expand canvas to fit the full rotated image
+rot_expand = img.rotate(45, expand=True)
+rot_expand.save("rotate_45_expanded.png")
+# Output: larger canvas containing the full rotated photo with black triangles filled
+
+# Rotate around a custom center point
+rot_center = img.rotate(30, center=(img.width // 4, img.height // 4))
+rot_center.save("rotate_custom_center.png")
+
+# Fill background with a color instead of black
+rot_white_bg = img.rotate(45, expand=True, fillcolor=(255, 255, 255))
+rot_white_bg.save("rotate_white_bg.png")
+# Output: rotated photo on a white background instead of black
+```
+
+:::tip[expand=True Avoids Corner Cropping]
+Always pass `expand=True` when rotating by arbitrary angles if you want the entire image content visible. Without it, the canvas stays the original size and corners are cropped.
+:::
+
+---
+
+## Flipping and Transposing: `transpose()`
+
+```python
+from PIL import Image
+
+img = Image.open("photo.jpg")
+
+# Mirror horizontally (left ↔ right)
+mirror = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+mirror.save("mirror.jpg")
+# Output: horizontally mirrored photo — left side becomes right side
+
+# Flip vertically (top ↔ bottom)
+flip = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+flip.save("flip_vertical.jpg")
+# Output: upside-down photo
+
+# Rotate 90° counter-clockwise — canvas becomes (height, width)
+rot90 = img.transpose(Image.Transpose.ROTATE_90)
+rot90.save("rotate_90.jpg")
+# Output: portrait-oriented photo (if original was landscape)
+
+# Rotate 180° — equivalent to two 90° rotations
+rot180 = img.transpose(Image.Transpose.ROTATE_180)
+
+# Rotate 270° counter-clockwise (= 90° clockwise)
+rot270 = img.transpose(Image.Transpose.ROTATE_270)
+
+# Transpose — reflect along main diagonal (x,y → y,x)
+transposed = img.transpose(Image.Transpose.TRANSPOSE)
+
+# Transverse — reflect along anti-diagonal
+transverse = img.transpose(Image.Transpose.TRANSVERSE)
+
+# Auto-rotate based on EXIF Orientation tag
+exif_fixed = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)   # example only
+```
+
+:::caution[rotate() vs transpose() for 90/180/270]
+`transpose(ROTATE_90/180/270)` is always **lossless and pixel-perfect** — it rearranges pixels without any interpolation. `rotate(90)` with default settings uses resampling and can introduce minor quality loss. For right-angle rotations, always prefer `transpose()`.
+:::
+
+---
+
+## Pasting: `paste()`
+
+`paste()` places one image on top of another at a given position:
+
+```python
+from PIL import Image
+
+background = Image.open("background.jpg").convert("RGBA")   # 800 × 600
+overlay    = Image.open("logo.png").convert("RGBA")          # 200 × 100
+
+# Paste without mask — completely replaces the destination pixels
+background_copy = background.copy()
+background_copy.paste(overlay, (20, 20))
+background_copy.convert("RGB").save("pasted_no_mask.jpg")
+# Output: logo pasted in the top-left corner, rectangular, ignoring transparency
+
+# Paste with the overlay's own alpha channel as mask
+# Only the non-transparent parts of the overlay are pasted
+background_copy2 = background.copy()
+background_copy2.paste(overlay, (20, 20), mask=overlay)
+# When the third argument is an RGBA image, Pillow uses its alpha channel as the mask
+
+background_copy2.convert("RGB").save("pasted_with_mask.jpg")
+# Output: logo blended into the background using its alpha channel — transparent areas
+#         of the logo show the background through instead of being black/white squares
+```
+
+### Tiling a Watermark Across an Image
+
+```python
+from PIL import Image
+
+def tile_watermark(base_path: str, mark_path: str, output_path: str) -> None:
+    with Image.open(base_path).convert("RGBA") as base:
+        with Image.open(mark_path).convert("RGBA") as mark:
+            # Make the watermark semi-transparent
+            r, g, b, a = mark.split()
+            a = a.point(lambda x: x * 0 + 60)    # set alpha to 60/255 (~24%)
+            mark = Image.merge("RGBA", (r, g, b, a))
+
+            bw, bh = base.size
+            mw, mh = mark.size
+
+            for y in range(0, bh, mh + 30):
+                for x in range(0, bw, mw + 30):
+                    base.paste(mark, (x, y), mask=mark)
+
+    base.convert("RGB").save(output_path)
+    # Output: full image covered in a repeating semi-transparent watermark grid
+
+tile_watermark("photo.jpg", "logo.png", "tiled_watermark.jpg")
+```
+
+---
+
+## Alpha Compositing: `alpha_composite()`
+
+`alpha_composite()` correctly blends two RGBA images using the Porter-Duff **over** operator. It handles partial transparency properly, unlike a simple `paste()`:
+
+```python
+from PIL import Image
+
+# Both images must be RGBA and the same size
+base    = Image.new("RGBA", (400, 400), (100, 149, 237, 255))   # cornflower blue
+overlay = Image.new("RGBA", (400, 400), (255, 99, 71, 128))     # semi-transparent tomato
+
+# Composite: overlay blends over base using Porter-Duff "over" operator
+result = Image.alpha_composite(base, overlay)
+result.save("alpha_composite.png")
+# Output: bluish-purple — tomato red at 50% opacity layered over cornflower blue
+#         Colors blend perceptually: (100+255*0.5)/(1+0.5) approximate
+
+# Compositing an overlay of different size — create a full-size transparent carrier
+base2   = Image.open("photo.jpg").convert("RGBA")
+badge   = Image.open("badge.png").convert("RGBA")   # smaller image
+
+# Create a full-size transparent canvas, paste badge, then composite
+carrier = Image.new("RGBA", base2.size, (0, 0, 0, 0))
+bx = base2.width  - badge.width  - 20
+by = base2.height - badge.height - 20
+carrier.paste(badge, (bx, by))
+
+final = Image.alpha_composite(base2, carrier)
+final.convert("RGB").save("photo_with_badge.jpg")
+# Output: photo with badge positioned in the bottom-right corner, alpha-blended correctly
+```
+
+---
+
+## Blending: `blend()`
+
+`Image.blend()` linearly interpolates between two same-size, same-mode images:
+
+```python
+from PIL import Image
+
+img1 = Image.open("photo_day.jpg").convert("RGB")
+img2 = Image.open("photo_night.jpg").convert("RGB")
+
+# blend(im1, im2, alpha):  out = im1 * (1 - alpha) + im2 * alpha
+day   = Image.blend(img1, img2, alpha=0.0)   # 100% day image
+half  = Image.blend(img1, img2, alpha=0.5)   # 50/50 crossfade
+night = Image.blend(img1, img2, alpha=1.0)   # 100% night image
+
+half.save("crossfade.jpg")
+# Output: a ghostly double exposure blending day and night scenes at equal weight
+
+# Create a dissolve animation
+for i, alpha in enumerate([0.0, 0.2, 0.4, 0.6, 0.8, 1.0]):
+    frame = Image.blend(img1, img2, alpha=alpha)
+    frame.save(f"frame_{i:02d}.jpg")
+# Output: 6 frames showing a gradual crossfade from day to night
+```
+
+---
+
+## Splitting and Merging Channels
+
+```python
+from PIL import Image
+
+img = Image.open("photo.jpg")   # RGB
+
+# Split into individual channel images (each is an "L" mode image)
+r, g, b = img.split()
+print(r.mode, r.size)   # L (1920, 1080)
+
+r.save("channel_red.png")    # grayscale image representing red intensity
+g.save("channel_green.png")  # brighter in foliage and vegetation areas
+b.save("channel_blue.png")   # brighter in sky and water areas
+
+# Merge channels back into a multi-channel image
+merged = Image.merge("RGB", (r, g, b))   # identical to original
+
+# Swap channels for artistic effects (false color)
+false_color = Image.merge("RGB", (b, r, g))   # swap R↔B, shift G
+false_color.save("false_color.png")
+# Output: image with alien/infrared color palette — sky looks orange, foliage cyan
+
+# Boost the red channel before merging (warm tone effect)
+import numpy as np
+r_arr = np.clip(np.array(r).astype(int) + 40, 0, 255).astype(np.uint8)
+r_boosted = Image.fromarray(r_arr, mode="L")
+warmer = Image.merge("RGB", (r_boosted, g, b))
+warmer.save("warmer.jpg")
+# Output: the photo with a warm orange/golden tint applied
+```
+
+### Working with RGBA Alpha Channel
+
+```python
+from PIL import Image
+import numpy as np
+
+img = Image.open("logo.png").convert("RGBA")
+r, g, b, a = img.split()
+
+# Reduce transparency to 50% by halving alpha values
+a_half = a.point(lambda x: x // 2)
+semi_transparent = Image.merge("RGBA", (r, g, b, a_half))
+semi_transparent.save("semi_transparent.png")
+# Output: logo at 50% opacity — same colors but shows through more
+
+# Create a circular alpha mask to make logo circular
+w, h = img.size
+circle_mask = Image.new("L", (w, h), 0)
+from PIL import ImageDraw
+draw = ImageDraw.Draw(circle_mask)
+draw.ellipse((0, 0, w, h), fill=255)
+circular = Image.merge("RGBA", (r, g, b, circle_mask))
+circular.save("circular_logo.png")
+# Output: logo with circular crop — corners transparent, circle fully visible
+```
+
+---
+
+## `Image.composite()` — Mask-Based Compositing
+
+```python
+from PIL import Image
+
+img1 = Image.open("background.jpg").convert("RGB")
+img2 = Image.open("foreground.jpg").convert("RGB")
+
+# Create a gradient mask: left side shows img1, right side shows img2
+import numpy as np
+gradient = np.tile(np.linspace(0, 255, img1.width, dtype=np.uint8), (img1.height, 1))
+mask = Image.fromarray(gradient, mode="L")
+
+# composite(img1, img2, mask):
+#   where mask=0   → img1 pixel
+#   where mask=255 → img2 pixel
+#   where mask=128 → 50% blend
+result = Image.composite(img1, img2, mask)
+result.save("gradient_blend.jpg")
+# Output: left edge shows background, right edge shows foreground,
+#         with a smooth horizontal gradient crossfade between them
+```
+
+---
+
+## Chained Transform Pattern
+
+Combine multiple operations in a clean, readable pipeline using method chaining where possible, or a simple helper function:
+
+```python
+from PIL import Image, ImageOps
+
+def process_avatar(path: str, size: int = 256) -> "Image.Image":
+    """
+    Process a user avatar image:
+    1. Open and convert to RGBA
+    2. Square-crop to center
+    3. Resize to target size
+    4. Apply circular mask
+    """
+    with Image.open(path) as img:
+        img = img.convert("RGBA")
+
+        # 1. Square crop
+        w, h = img.size
+        side = min(w, h)
+        left   = (w - side) // 2
+        top    = (h - side) // 2
+        img    = img.crop((left, top, left + side, top + side))
+
+        # 2. Resize
+        img = img.resize((size, size), Image.Resampling.LANCZOS)
+
+        # 3. Circular mask
+        mask = Image.new("L", (size, size), 0)
+        from PIL import ImageDraw
+        ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
+        img.putalpha(mask)
+
+        return img.copy()   # return before context manager closes
+
+avatar = process_avatar("user_photo.jpg", size=256)
+avatar.save("avatar.png")
+# Output: 256×256 PNG with circular crop and transparency outside the circle
+#         — ready to use as a profile picture or icon
+
+# Batch process a folder of avatars
+import os
+input_dir  = "photos"
+output_dir = "avatars"
+os.makedirs(output_dir, exist_ok=True)
+
+for filename in os.listdir(input_dir):
+    if filename.lower().endswith((".jpg", ".jpeg", ".png")):
+        src = os.path.join(input_dir, filename)
+        dst = os.path.join(output_dir, os.path.splitext(filename)[0] + ".png")
+        try:
+            process_avatar(src).save(dst)
+            print(f"✓ {filename}")
+        except Exception as e:
+            print(f"✗ {filename}: {e}")
+```
+
+:::tip[Always Return a Copy from Context Managers]
+When building helper functions that open images using `with Image.open(...) as img:`, call `img.copy()` before returning if you process the image inside the block. Without `.copy()`, the returned object references data from a closed file handle and will raise `OSError` on access.
+:::

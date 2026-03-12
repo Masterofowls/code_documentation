@@ -1,0 +1,574 @@
+---
+title: Authentication
+description: Implement JWT authentication, Passport strategies, role-based access control, and OAuth2 in NestJS.
+sidebar:
+  order: 8
+tags: [typescript, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Authentication
+
+NestJS integrates with [Passport.js](https://www.passportjs.org/) via `@nestjs/passport` to provide a
+flexible, strategy-based authentication system. This page covers local (username/password), JWT, refresh
+tokens, RBAC, OAuth2, and session-based authentication.
+
+## Installation
+
+```bash
+npm install @nestjs/passport passport passport-local passport-jwt
+npm install --save-dev @types/passport-local @types/passport-jwt
+npm install @nestjs/jwt bcrypt
+npm install --save-dev @types/bcrypt
+```
+
+## Local Strategy (Username + Password)
+
+### LocalStrategy
+
+```typescript
+// auth/strategies/local.strategy.ts
+import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { PassportStrategy } from '@nestjs/passport';
+import { Strategy } from 'passport-local';
+import { AuthService } from '../auth.service';
+
+@Injectable()
+export class LocalStrategy extends PassportStrategy(Strategy) {
+  constructor(private authService: AuthService) {
+    super({
+      usernameField: 'email',   // Use 'email' instead of 'username'
+      passwordField: 'password',
+    });
+  }
+
+  async validate(email: string, password: string): Promise<any> {
+    const user = await this.authService.validateUser(email, password);
+    if (!user) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+    return user;  // Attached to req.user
+  }
+}
+```
+
+### AuthService with bcrypt
+
+```typescript
+// auth/auth.service.ts
+import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import { UsersService } from '../users/users.service';
+import * as bcrypt from 'bcrypt';
+
+@Injectable()
+export class AuthService {
+  constructor(
+    private usersService: UsersService,
+    private jwtService: JwtService,
+  ) {}
+
+  async validateUser(email: string, password: string): Promise<any> {
+    const user = await this.usersService.findByEmailWithPassword(email);
+    if (!user) return null;
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) return null;
+
+    const { password: _, ...result } = user;
+    return result;  // Never return the password hash
+  }
+
+  async login(user: any) {
+    const payload = { sub: user.id, email: user.email, role: user.role };
+    return {
+      accessToken: this.jwtService.sign(payload),
+      refreshToken: await this.generateRefreshToken(user.id),
+      user: { id: user.id, email: user.email, name: user.name },
+    };
+  }
+
+  async register(email: string, password: string, name: string) {
+    const hashedPassword = await bcrypt.hash(password, 12);
+    const user = await this.usersService.create(email, hashedPassword, name);
+    return this.login(user);
+  }
+
+  private async generateRefreshToken(userId: number): Promise<string> {
+    return this.jwtService.sign(
+      { sub: userId, type: 'refresh' },
+      { expiresIn: '7d', secret: process.env.JWT_REFRESH_SECRET },
+    );
+  }
+}
+```
+
+### Password Hashing Best Practices
+
+```typescript
+// users.service.ts
+import * as bcrypt from 'bcrypt';
+
+const SALT_ROUNDS = 12; // 12 rounds is a good balance of security and speed
+
+async create(email: string, password: string, name: string): Promise<User> {
+  const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
+  return this.userRepository.save(
+    this.userRepository.create({ email, password: hashedPassword, name }),
+  );
+}
+
+async updatePassword(userId: number, newPassword: string): Promise<void> {
+  const hashed = await bcrypt.hash(newPassword, SALT_ROUNDS);
+  await this.userRepository.update(userId, { password: hashed });
+}
+```
+
+:::caution[Never Store Plain Text Passwords]
+Always hash passwords with bcrypt (minimum 10 rounds, recommended 12) before storing. Never log passwords,
+never store them in environment variables, and never send them in responses — not even hashed versions.
+:::
+
+## JWT Strategy
+
+### JwtStrategy
+
+```typescript
+// auth/strategies/jwt.strategy.ts
+import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { PassportStrategy } from '@nestjs/passport';
+import { ExtractJwt, Strategy } from 'passport-jwt';
+import { ConfigService } from '@nestjs/config';
+import { UsersService } from '../../users/users.service';
+
+export interface JwtPayload {
+  sub: number;
+  email: string;
+  role: string;
+  iat?: number;
+  exp?: number;
+}
+
+@Injectable()
+export class JwtStrategy extends PassportStrategy(Strategy) {
+  constructor(
+    configService: ConfigService,
+    private usersService: UsersService,
+  ) {
+    super({
+      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      ignoreExpiration: false,
+      secretOrKey: configService.getOrThrow('JWT_SECRET'),
+    });
+  }
+
+  async validate(payload: JwtPayload): Promise<any> {
+    const user = await this.usersService.findOne(payload.sub);
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException('User account is inactive or not found');
+    }
+    return { id: payload.sub, email: payload.email, role: payload.role };
+  }
+}
+```
+
+### JwtModule Configuration
+
+```typescript
+// auth/auth.module.ts
+import { Module } from '@nestjs/common';
+import { JwtModule } from '@nestjs/jwt';
+import { PassportModule } from '@nestjs/passport';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { AuthService } from './auth.service';
+import { AuthController } from './auth.controller';
+import { LocalStrategy } from './strategies/local.strategy';
+import { JwtStrategy } from './strategies/jwt.strategy';
+import { UsersModule } from '../users/users.module';
+
+@Module({
+  imports: [
+    UsersModule,
+    PassportModule.register({ defaultStrategy: 'jwt' }),
+    JwtModule.registerAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        secret: configService.getOrThrow('JWT_SECRET'),
+        signOptions: {
+          expiresIn: configService.get('JWT_EXPIRES_IN', '15m'),
+          issuer: 'my-app',
+          audience: 'my-app-users',
+        },
+      }),
+    }),
+  ],
+  providers: [AuthService, LocalStrategy, JwtStrategy],
+  controllers: [AuthController],
+  exports: [AuthService, JwtModule],
+})
+export class AuthModule {}
+```
+
+### Auth Controller
+
+```typescript
+// auth/auth.controller.ts
+import {
+  Controller,
+  Post,
+  Body,
+  UseGuards,
+  HttpCode,
+  HttpStatus,
+  Get,
+} from '@nestjs/common';
+import { AuthGuard } from '@nestjs/passport';
+import { AuthService } from './auth.service';
+import { CurrentUser } from './decorators/current-user.decorator';
+import { RegisterDto } from './dto/register.dto';
+import { RefreshTokenDto } from './dto/refresh-token.dto';
+
+@Controller('auth')
+export class AuthController {
+  constructor(private readonly authService: AuthService) {}
+
+  // Uses LocalStrategy — validates email/password, attaches user to req
+  @Post('login')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(AuthGuard('local'))
+  login(@CurrentUser() user: any) {
+    return this.authService.login(user);
+  }
+
+  @Post('register')
+  register(@Body() registerDto: RegisterDto) {
+    return this.authService.register(
+      registerDto.email,
+      registerDto.password,
+      registerDto.name,
+    );
+  }
+
+  // Protected route — uses JwtStrategy
+  @Get('me')
+  @UseGuards(AuthGuard('jwt'))
+  getProfile(@CurrentUser() user: any) {
+    return user;
+  }
+
+  @Post('refresh')
+  @HttpCode(HttpStatus.OK)
+  refreshTokens(@Body() refreshTokenDto: RefreshTokenDto) {
+    return this.authService.refreshTokens(refreshTokenDto.refreshToken);
+  }
+}
+```
+
+## @Public() Decorator — Opt-Out of Auth
+
+When JWT guard is applied globally, use `@Public()` to mark routes that should bypass authentication:
+
+```typescript
+// auth/decorators/public.decorator.ts
+import { SetMetadata } from '@nestjs/common';
+
+export const IS_PUBLIC_KEY = 'isPublic';
+export const Public = () => SetMetadata(IS_PUBLIC_KEY, true);
+```
+
+```typescript
+// auth/guards/jwt-auth.guard.ts
+import { Injectable, ExecutionContext } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import { AuthGuard } from '@nestjs/passport';
+import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
+
+@Injectable()
+export class JwtAuthGuard extends AuthGuard('jwt') {
+  constructor(private reflector: Reflector) {
+    super();
+  }
+
+  canActivate(context: ExecutionContext) {
+    const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    if (isPublic) return true;
+    return super.canActivate(context);
+  }
+}
+```
+
+Register the guard globally:
+
+```typescript
+// app.module.ts
+@Module({
+  providers: [
+    { provide: APP_GUARD, useClass: JwtAuthGuard },
+  ],
+})
+export class AppModule {}
+```
+
+Usage:
+
+```typescript
+@Controller('health')
+export class HealthController {
+  @Public()
+  @Get()
+  check() {
+    return { status: 'ok' };
+  }
+}
+```
+
+## @CurrentUser() Custom Decorator
+
+```typescript
+// auth/decorators/current-user.decorator.ts
+import { createParamDecorator, ExecutionContext } from '@nestjs/common';
+
+export const CurrentUser = createParamDecorator(
+  (data: string | undefined, ctx: ExecutionContext) => {
+    const request = ctx.switchToHttp().getRequest();
+    const user = request.user;
+    return data ? user?.[data] : user;
+  },
+);
+```
+
+Usage:
+
+```typescript
+@Get('profile')
+getProfile(@CurrentUser() user: JwtPayload) {
+  return user;
+}
+
+@Get('email')
+getEmail(@CurrentUser('email') email: string) {
+  return { email };
+}
+```
+
+## Refresh Tokens
+
+```typescript
+// auth/auth.service.ts — Refresh token logic
+async refreshTokens(refreshToken: string): Promise<{ accessToken: string }> {
+  try {
+    const payload = this.jwtService.verify(refreshToken, {
+      secret: process.env.JWT_REFRESH_SECRET,
+    });
+
+    if (payload.type !== 'refresh') {
+      throw new UnauthorizedException('Invalid token type');
+    }
+
+    const user = await this.usersService.findOne(payload.sub);
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException('User not found or inactive');
+    }
+
+    const newPayload = { sub: user.id, email: user.email, role: user.role };
+    return {
+      accessToken: this.jwtService.sign(newPayload),
+    };
+  } catch {
+    throw new UnauthorizedException('Invalid or expired refresh token');
+  }
+}
+```
+
+:::tip[Refresh Token Rotation]
+For maximum security, rotate the refresh token on every use. Store refresh tokens in the database and
+invalidate old ones when a new one is issued. This prevents token theft from persisting after detection.
+:::
+
+## Role-Based Access Control (RBAC)
+
+### @Roles() Decorator
+
+```typescript
+// auth/decorators/roles.decorator.ts
+import { SetMetadata } from '@nestjs/common';
+
+export enum Role {
+  Admin = 'admin',
+  User = 'user',
+  Moderator = 'moderator',
+}
+
+export const ROLES_KEY = 'roles';
+export const Roles = (...roles: Role[]) => SetMetadata(ROLES_KEY, roles);
+```
+
+### RolesGuard
+
+```typescript
+// auth/guards/roles.guard.ts
+import { Injectable, CanActivate, ExecutionContext, ForbiddenException } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import { Role, ROLES_KEY } from '../decorators/roles.decorator';
+
+@Injectable()
+export class RolesGuard implements CanActivate {
+  constructor(private reflector: Reflector) {}
+
+  canActivate(context: ExecutionContext): boolean {
+    const requiredRoles = this.reflector.getAllAndOverride<Role[]>(ROLES_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+
+    if (!requiredRoles || requiredRoles.length === 0) return true;
+
+    const { user } = context.switchToHttp().getRequest();
+
+    if (!user) throw new ForbiddenException('User not authenticated');
+
+    const hasRole = requiredRoles.some((role) => user.role === role);
+    if (!hasRole) {
+      throw new ForbiddenException(
+        `Requires one of: [${requiredRoles.join(', ')}]`,
+      );
+    }
+
+    return true;
+  }
+}
+```
+
+### Using RBAC
+
+```typescript
+// admin.controller.ts
+import { Controller, Get, Delete, Param, UseGuards } from '@nestjs/common';
+import { Roles, Role } from '../auth/decorators/roles.decorator';
+import { RolesGuard } from '../auth/guards/roles.guard';
+
+@Controller('admin')
+@UseGuards(RolesGuard)  // JwtAuthGuard already applied globally
+export class AdminController {
+  @Get('dashboard')
+  @Roles(Role.Admin, Role.Moderator)
+  getDashboard() {
+    return { stats: {} };
+  }
+
+  @Delete('users/:id')
+  @Roles(Role.Admin)
+  deleteUser(@Param('id') id: string) {
+    return { deleted: id };
+  }
+}
+```
+
+## OAuth2 with Passport
+
+### Google OAuth2
+
+```bash
+npm install passport-google-oauth20
+npm install --save-dev @types/passport-google-oauth20
+```
+
+```typescript
+// auth/strategies/google.strategy.ts
+import { Injectable } from '@nestjs/common';
+import { PassportStrategy } from '@nestjs/passport';
+import { Strategy, VerifyCallback } from 'passport-google-oauth20';
+import { ConfigService } from '@nestjs/config';
+
+@Injectable()
+export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
+  constructor(configService: ConfigService) {
+    super({
+      clientID: configService.getOrThrow('GOOGLE_CLIENT_ID'),
+      clientSecret: configService.getOrThrow('GOOGLE_CLIENT_SECRET'),
+      callbackURL: configService.getOrThrow('GOOGLE_CALLBACK_URL'),
+      scope: ['email', 'profile'],
+    });
+  }
+
+  async validate(
+    accessToken: string,
+    refreshToken: string,
+    profile: any,
+    done: VerifyCallback,
+  ): Promise<any> {
+    const { name, emails, photos } = profile;
+    const user = {
+      email: emails[0].value,
+      firstName: name.givenName,
+      lastName: name.familyName,
+      picture: photos[0].value,
+      accessToken,
+    };
+    done(null, user);
+  }
+}
+```
+
+```typescript
+// auth.controller.ts
+@Get('google')
+@UseGuards(AuthGuard('google'))
+googleAuth() {
+  // Redirects to Google
+}
+
+@Get('google/callback')
+@UseGuards(AuthGuard('google'))
+googleAuthCallback(@CurrentUser() user: any, @Res() res: Response) {
+  const token = this.authService.login(user);
+  res.redirect(`/auth/success?token=${token.accessToken}`);
+}
+```
+
+## Session-Based Authentication Alternative
+
+For server-rendered apps, use sessions instead of JWTs:
+
+```bash
+npm install express-session @types/express-session passport-local
+```
+
+```typescript
+// main.ts
+import * as session from 'express-session';
+import * as passport from 'passport';
+
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      secure: process.env.NODE_ENV === 'production',
+      httpOnly: true,
+      maxAge: 24 * 60 * 60 * 1000, // 1 day
+      sameSite: 'strict',
+    },
+  }),
+);
+app.use(passport.initialize());
+app.use(passport.session());
+```
+
+```typescript
+// auth/auth.module.ts
+PassportModule.register({ session: true }),
+```
+
+:::tip[JWT vs Sessions]
+Use **JWT** for stateless APIs and microservices where horizontal scaling is important.
+Use **sessions** for server-rendered applications with a single origin where you need immediate token
+revocation without a token blacklist. JWT with short expiry + refresh tokens is the recommended pattern
+for most modern NestJS APIs.
+:::

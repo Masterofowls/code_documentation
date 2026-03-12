@@ -1,0 +1,671 @@
+---
+title: React Components
+description: Deep dive into function components, props and TypeScript interfaces, children, composition, compound components, forwarding refs, error boundaries, Suspense, and Portals.
+sidebar:
+  order: 3
+tags: [react, javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Components are the fundamental building blocks of React applications. This guide covers everything from basic function components to advanced patterns like compound components, forwarding refs, and error boundaries.
+
+## Function Components
+
+A React component is a JavaScript function that accepts **props** and returns **JSX**:
+
+```tsx
+// Minimal component
+function HelloWorld() {
+  return <h1>Hello, World!</h1>;
+}
+
+// Arrow function style (common in modern codebases)
+const HelloWorld = () => <h1>Hello, World!</h1>;
+
+// With TypeScript return type annotation
+const HelloWorld = (): JSX.Element => <h1>Hello, World!</h1>;
+
+// React.FC is controversial — prefer explicit props typing
+// (React.FC omits generic children, has implicit children in older versions)
+```
+
+## Props and TypeScript Interfaces
+
+Always type your props with a `TypeScript` `interface` or `type`:
+
+```tsx
+interface UserCardProps {
+  name: string;
+  email: string;
+  avatarUrl?: string;          // optional prop
+  role: 'admin' | 'user';     // union type
+  onSelect: (id: string) => void; // callback prop
+}
+
+function UserCard({ name, email, avatarUrl, role, onSelect }: UserCardProps) {
+  return (
+    <article className="user-card" onClick={() => onSelect(email)}>
+      {avatarUrl && <img src={avatarUrl} alt={`${name}'s avatar`} />}
+      <h2>{name}</h2>
+      <p>{email}</p>
+      <span className={`badge badge--${role}`}>{role}</span>
+    </article>
+  );
+}
+```
+
+### Props with Default Values
+
+The modern approach uses JavaScript default parameter syntax:
+
+```tsx
+interface ButtonProps {
+  children: React.ReactNode;
+  variant?: 'primary' | 'secondary' | 'ghost';
+  size?: 'sm' | 'md' | 'lg';
+  disabled?: boolean;
+  loading?: boolean;
+  onClick?: React.MouseEventHandler<HTMLButtonElement>;
+}
+
+function Button({
+  children,
+  variant = 'primary',
+  size = 'md',
+  disabled = false,
+  loading = false,
+  onClick,
+}: ButtonProps) {
+  return (
+    <button
+      className={`btn btn--${variant} btn--${size}`}
+      disabled={disabled || loading}
+      onClick={onClick}
+    >
+      {loading ? <Spinner size="sm" /> : children}
+    </button>
+  );
+}
+```
+
+:::tip[defaultProps is Legacy]
+`Component.defaultProps` is deprecated in React 18 and will be removed in a future version. Always use ES6 default parameter values in the destructuring assignment.
+:::
+
+## The children Prop
+
+```tsx
+interface CardProps {
+  title: string;
+  children: React.ReactNode;  // any renderable content
+  footer?: React.ReactNode;
+}
+
+function Card({ title, children, footer }: CardProps) {
+  return (
+    <div className="card">
+      <div className="card__header">
+        <h3>{title}</h3>
+      </div>
+      <div className="card__body">
+        {children}
+      </div>
+      {footer && (
+        <div className="card__footer">
+          {footer}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Usage
+<Card
+  title="Welcome"
+  footer={<Button>Close</Button>}
+>
+  <p>This is the card body content.</p>
+  <p>You can put anything here.</p>
+</Card>
+```
+
+### Typing children More Precisely
+
+```tsx
+// Accept only a single React element
+interface Props {
+  children: React.ReactElement;
+}
+
+// Accept only a function (render prop pattern)
+interface Props {
+  children: (value: string) => React.ReactNode;
+}
+
+// Accept a string
+interface Props {
+  children: string;
+}
+```
+
+## Prop Drilling Problem
+
+When data needs to reach deeply nested components, it must be passed through every intermediate layer — this is **prop drilling**:
+
+```tsx
+// ❌ Prop drilling: theme passed through 3 layers that don't need it
+function App() {
+  const theme = 'dark';
+  return <Layout theme={theme} />;
+}
+
+function Layout({ theme }: { theme: string }) {
+  return <Sidebar theme={theme} />;
+}
+
+function Sidebar({ theme }: { theme: string }) {
+  return <NavItem theme={theme} />;
+}
+
+function NavItem({ theme }: { theme: string }) {
+  return <div className={`nav-item nav-item--${theme}`}>Home</div>;
+}
+```
+
+Solutions include **Context API**, **component composition**, or **state management libraries** (covered in [State Management](/react/react/state-management)).
+
+## Component Composition
+
+Composition avoids prop drilling by passing components as children or props:
+
+```tsx
+// ✅ Composition: pass elements down, no prop drilling needed
+function App() {
+  const theme = 'dark';
+
+  return (
+    <Layout
+      sidebar={
+        <Sidebar>
+          <NavItem className={`nav-item--${theme}`}>Home</NavItem>
+          <NavItem className={`nav-item--${theme}`}>About</NavItem>
+        </Sidebar>
+      }
+    >
+      <main>Main content here</main>
+    </Layout>
+  );
+}
+
+function Layout({ sidebar, children }: {
+  sidebar: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="layout">
+      <aside>{sidebar}</aside>
+      <div className="layout__content">{children}</div>
+    </div>
+  );
+}
+```
+
+## Compound Components Pattern
+
+Compound components give consumers a clean API that reads like HTML, while sharing state implicitly:
+
+```tsx
+import { createContext, useContext, useState } from 'react';
+
+// --- Context ---
+interface AccordionContextValue {
+  openItem: string | null;
+  toggle: (id: string) => void;
+}
+
+const AccordionContext = createContext<AccordionContextValue | null>(null);
+
+function useAccordion() {
+  const ctx = useContext(AccordionContext);
+  if (!ctx) throw new Error('useAccordion must be used within <Accordion>');
+  return ctx;
+}
+
+// --- Compound Components ---
+function Accordion({ children }: { children: React.ReactNode }) {
+  const [openItem, setOpenItem] = useState<string | null>(null);
+
+  const toggle = (id: string) => {
+    setOpenItem(prev => (prev === id ? null : id));
+  };
+
+  return (
+    <AccordionContext.Provider value={{ openItem, toggle }}>
+      <div className="accordion">{children}</div>
+    </AccordionContext.Provider>
+  );
+}
+
+function AccordionItem({ id, children }: { id: string; children: React.ReactNode }) {
+  return <div className="accordion__item" data-id={id}>{children}</div>;
+}
+
+function AccordionTrigger({ id, children }: { id: string; children: React.ReactNode }) {
+  const { openItem, toggle } = useAccordion();
+  const isOpen = openItem === id;
+
+  return (
+    <button
+      className="accordion__trigger"
+      aria-expanded={isOpen}
+      onClick={() => toggle(id)}
+    >
+      {children}
+      <span aria-hidden>{isOpen ? '▲' : '▼'}</span>
+    </button>
+  );
+}
+
+function AccordionPanel({ id, children }: { id: string; children: React.ReactNode }) {
+  const { openItem } = useAccordion();
+  if (openItem !== id) return null;
+  return <div className="accordion__panel">{children}</div>;
+}
+
+// Attach sub-components to the parent
+Accordion.Item    = AccordionItem;
+Accordion.Trigger = AccordionTrigger;
+Accordion.Panel   = AccordionPanel;
+
+// --- Consumer usage ---
+function FAQ() {
+  return (
+    <Accordion>
+      <Accordion.Item id="q1">
+        <Accordion.Trigger id="q1">What is React?</Accordion.Trigger>
+        <Accordion.Panel id="q1">
+          React is a JavaScript library for building user interfaces.
+        </Accordion.Panel>
+      </Accordion.Item>
+      <Accordion.Item id="q2">
+        <Accordion.Trigger id="q2">What is JSX?</Accordion.Trigger>
+        <Accordion.Panel id="q2">
+          JSX is a syntax extension that looks like HTML inside JavaScript.
+        </Accordion.Panel>
+      </Accordion.Item>
+    </Accordion>
+  );
+}
+```
+
+## Render Props
+
+A render prop is a function prop that a component calls to know what to render:
+
+```tsx
+interface MousePosition {
+  x: number;
+  y: number;
+}
+
+interface MouseTrackerProps {
+  render: (position: MousePosition) => React.ReactNode;
+}
+
+function MouseTracker({ render }: MouseTrackerProps) {
+  const [position, setPosition] = useState<MousePosition>({ x: 0, y: 0 });
+
+  return (
+    <div
+      style={{ height: '100vh' }}
+      onMouseMove={e => setPosition({ x: e.clientX, y: e.clientY })}
+    >
+      {render(position)}
+    </div>
+  );
+}
+
+// Usage
+<MouseTracker
+  render={({ x, y }) => (
+    <p>Mouse position: {x}, {y}</p>
+  )}
+/>
+```
+
+:::tip[Prefer Custom Hooks Over Render Props]
+In most cases, a custom hook is cleaner than a render prop for logic sharing. Use render props when you specifically need to control *where* the render output is placed in the component tree.
+:::
+
+## Forwarding Refs
+
+`forwardRef` allows a parent component to access a DOM node inside a child component:
+
+```tsx
+import { forwardRef, useRef } from 'react';
+
+interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
+  label: string;
+  error?: string;
+}
+
+const Input = forwardRef<HTMLInputElement, InputProps>(
+  ({ label, error, ...rest }, ref) => {
+    return (
+      <div className="field">
+        <label htmlFor={rest.id}>{label}</label>
+        <input
+          ref={ref}
+          className={error ? 'input input--error' : 'input'}
+          {...rest}
+        />
+        {error && <span className="field__error">{error}</span>}
+      </div>
+    );
+  }
+);
+
+Input.displayName = 'Input';
+
+// Parent component uses a ref to focus the input
+function Form() {
+  const emailRef = useRef<HTMLInputElement>(null);
+
+  const focusEmail = () => {
+    emailRef.current?.focus();
+  };
+
+  return (
+    <form>
+      <Input
+        ref={emailRef}
+        id="email"
+        label="Email"
+        type="email"
+        placeholder="you@example.com"
+      />
+      <button type="button" onClick={focusEmail}>
+        Focus Email Field
+      </button>
+    </form>
+  );
+}
+```
+
+### useImperativeHandle
+
+Expose a custom imperative API instead of the raw DOM node:
+
+```tsx
+import { forwardRef, useRef, useImperativeHandle } from 'react';
+
+interface VideoPlayerHandle {
+  play: () => void;
+  pause: () => void;
+  seek: (time: number) => void;
+}
+
+const VideoPlayer = forwardRef<VideoPlayerHandle, { src: string }>(
+  ({ src }, ref) => {
+    const videoRef = useRef<HTMLVideoElement>(null);
+
+    useImperativeHandle(ref, () => ({
+      play:  () => videoRef.current?.play(),
+      pause: () => videoRef.current?.pause(),
+      seek:  (time) => { if (videoRef.current) videoRef.current.currentTime = time; },
+    }));
+
+    return <video ref={videoRef} src={src} />;
+  }
+);
+```
+
+## Error Boundaries
+
+Error boundaries catch JavaScript errors anywhere in the child component tree and display a fallback UI:
+
+<Tabs>
+  <TabItem label="Class Error Boundary">
+
+```tsx
+import { Component, ErrorInfo, ReactNode } from 'react';
+
+interface Props {
+  children: ReactNode;
+  fallback?: ReactNode;
+}
+
+interface State {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class ErrorBoundary extends Component<Props, State> {
+  state: State = { hasError: false, error: null };
+
+  static getDerivedStateFromError(error: Error): State {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    // Log to error reporting service
+    console.error('Caught by ErrorBoundary:', error, info.componentStack);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback ?? (
+        <div role="alert">
+          <h2>Something went wrong.</h2>
+          <pre>{this.state.error?.message}</pre>
+          <button onClick={() => this.setState({ hasError: false, error: null })}>
+            Try again
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+```
+
+  </TabItem>
+  <TabItem label="react-error-boundary Library">
+
+```bash
+npm install react-error-boundary
+```
+
+```tsx
+import { ErrorBoundary, useErrorBoundary } from 'react-error-boundary';
+
+function ErrorFallback({
+  error,
+  resetErrorBoundary,
+}: {
+  error: Error;
+  resetErrorBoundary: () => void;
+}) {
+  return (
+    <div role="alert">
+      <p>Something went wrong:</p>
+      <pre style={{ color: 'red' }}>{error.message}</pre>
+      <button onClick={resetErrorBoundary}>Try again</button>
+    </div>
+  );
+}
+
+function App() {
+  return (
+    <ErrorBoundary
+      FallbackComponent={ErrorFallback}
+      onError={(error, info) => logToSentry(error, info)}
+      onReset={() => {
+        // Reset app state before retry
+      }}
+    >
+      <Dashboard />
+    </ErrorBoundary>
+  );
+}
+
+// Throw from within components
+function Dashboard() {
+  const { showBoundary } = useErrorBoundary();
+
+  const handleClick = async () => {
+    try {
+      await riskyOperation();
+    } catch (error) {
+      showBoundary(error); // trigger the nearest ErrorBoundary
+    }
+  };
+
+  return <button onClick={handleClick}>Load data</button>;
+}
+```
+
+  </TabItem>
+</Tabs>
+
+:::caution[Error Boundaries Don't Catch Everything]
+Error boundaries only catch errors during rendering, in lifecycle methods, and in constructors. They do NOT catch errors in event handlers (use try/catch), async code (use `.catch()`), or server-side rendering.
+:::
+
+## Suspense and Lazy Loading
+
+`React.lazy` enables code splitting at the component level:
+
+```tsx
+import { lazy, Suspense } from 'react';
+
+// The component is loaded lazily — its JS chunk is fetched on demand
+const Dashboard  = lazy(() => import('./pages/Dashboard'));
+const Settings   = lazy(() => import('./pages/Settings'));
+const Analytics  = lazy(() => import('./pages/Analytics'));
+
+function App() {
+  return (
+    <Suspense
+      fallback={
+        <div className="page-loader">
+          <Spinner size="lg" />
+          <p>Loading…</p>
+        </div>
+      }
+    >
+      <Routes>
+        <Route path="/dashboard"  element={<Dashboard />} />
+        <Route path="/settings"   element={<Settings />} />
+        <Route path="/analytics"  element={<Analytics />} />
+      </Routes>
+    </Suspense>
+  );
+}
+```
+
+:::tip[Nest Suspense Boundaries]
+Place `Suspense` boundaries close to the components that suspend. Deeply nested suspense gives users incremental loading rather than a full-page spinner.
+:::
+
+## Portals
+
+Portals render children into a DOM node outside the parent component's DOM hierarchy:
+
+```tsx
+import { createPortal } from 'react-dom';
+import { useEffect, useRef } from 'react';
+
+interface ModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  children: React.ReactNode;
+}
+
+function Modal({ isOpen, onClose, children }: ModalProps) {
+  const overlayRef = useRef<HTMLDivElement>(null);
+
+  // Close on Escape key
+  useEffect(() => {
+    if (!isOpen) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [isOpen, onClose]);
+
+  if (!isOpen) return null;
+
+  // Portal renders outside #root, directly in <body>
+  return createPortal(
+    <div
+      ref={overlayRef}
+      className="modal-overlay"
+      onClick={e => { if (e.target === overlayRef.current) onClose(); }}
+      role="dialog"
+      aria-modal="true"
+    >
+      <div className="modal">
+        <button className="modal__close" onClick={onClose} aria-label="Close modal">
+          ✕
+        </button>
+        {children}
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+// Usage — Modal renders in <body> but events still bubble through React tree
+function Page() {
+  const [showModal, setShowModal] = useState(false);
+
+  return (
+    <div>
+      <button onClick={() => setShowModal(true)}>Open Modal</button>
+      <Modal isOpen={showModal} onClose={() => setShowModal(false)}>
+        <h2>Modal Title</h2>
+        <p>Portal content renders in document.body but is logically here.</p>
+      </Modal>
+    </div>
+  );
+}
+```
+
+## Component Lifecycle with Hooks
+
+Class component lifecycle methods map to hooks as follows:
+
+| Class Lifecycle | Hook Equivalent |
+|---|---|
+| `constructor` | `useState` / `useReducer` initial value |
+| `componentDidMount` | `useEffect(() => { ... }, [])` |
+| `componentDidUpdate` | `useEffect(() => { ... }, [dep])` |
+| `componentWillUnmount` | cleanup function returned from `useEffect` |
+| `shouldComponentUpdate` | `React.memo` / `useMemo` |
+| `getDerivedStateFromProps` | Derive from existing state during render |
+| `getSnapshotBeforeUpdate` | `useLayoutEffect` |
+| `componentDidCatch` | Error Boundary class component |
+
+```tsx
+function LifecycleDemo({ userId }: { userId: string }) {
+  const [data, setData] = useState(null);
+
+  useEffect(() => {
+    // componentDidMount + componentDidUpdate
+    let cancelled = false;
+    fetch(`/api/users/${userId}`)
+      .then(r => r.json())
+      .then(d => { if (!cancelled) setData(d); });
+
+    return () => {
+      // componentWillUnmount
+      cancelled = true;
+    };
+  }, [userId]); // re-runs when userId changes
+
+  return <pre>{JSON.stringify(data, null, 2)}</pre>;
+}
+```

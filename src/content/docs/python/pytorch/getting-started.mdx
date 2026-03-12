@@ -1,0 +1,487 @@
+---
+title: Getting Started with PyTorch
+description: Install PyTorch, configure CPU and CUDA environments, and build your first complete model with a structured project layout.
+sidebar:
+  order: 2
+tags: [python, ml]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+This guide walks you from a fresh Python environment to a fully working PyTorch model. By the end you will have PyTorch installed, GPU verified, and a complete train-evaluate workflow running.
+
+## Prerequisites
+
+Before installing PyTorch, ensure your environment meets these requirements:
+
+| Requirement | Minimum | Recommended |
+|-------------|---------|-------------|
+| Python | 3.9 | 3.11+ |
+| pip | 21.0 | latest |
+| RAM | 4 GB | 16 GB+ |
+| CUDA (GPU) | 11.8 | 12.1+ |
+| NVIDIA Driver | 450.x | latest |
+
+```bash
+# Check Python version
+python --version       # Python 3.11.x
+
+# Upgrade pip before installing
+pip install --upgrade pip
+
+# Optional: create an isolated virtual environment
+python -m venv .venv
+source .venv/bin/activate        # Linux / macOS
+.venv\Scripts\activate           # Windows
+```
+
+:::tip[Always Use a Virtual Environment]
+PyTorch has large dependencies. Using `venv` or `conda` prevents conflicts with other projects and makes it easy to reproduce your environment across machines.
+:::
+
+## Installation
+
+<Tabs>
+  <TabItem label="CPU (pip)">
+```bash
+# Stable CPU build — works on any machine
+pip install torch torchvision torchaudio
+
+# Verify
+python -c "import torch; print(torch.__version__)"
+# 2.4.0+cpu
+```
+  </TabItem>
+  <TabItem label="CUDA 12.1 (pip)">
+```bash
+# CUDA 12.1 — NVIDIA GPU required
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# Verify GPU is visible
+python -c "import torch; print(torch.cuda.is_available())"
+# True
+```
+  </TabItem>
+  <TabItem label="CUDA 11.8 (pip)">
+```bash
+# CUDA 11.8 — older NVIDIA GPUs / drivers
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+# Check CUDA version detected
+python -c "import torch; print(torch.version.cuda)"
+# 11.8
+```
+  </TabItem>
+  <TabItem label="Conda">
+```bash
+# Create new conda environment with CUDA 12.1
+conda create -n pytorch python=3.11 -y
+conda activate pytorch
+
+conda install pytorch torchvision torchaudio pytorch-cuda=12.1 \
+    -c pytorch -c nvidia
+
+# Verify
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+# 2.4.0  True
+```
+  </TabItem>
+  <TabItem label="Apple Silicon (MPS)">
+```bash
+# macOS with M1/M2/M3 — use the standard pip install
+pip install torch torchvision torchaudio
+
+# Verify MPS (Metal Performance Shaders) backend
+python -c "import torch; print(torch.backends.mps.is_available())"
+# True
+```
+  </TabItem>
+</Tabs>
+
+### Installing Additional Packages
+
+```bash
+# Common ML companion libraries
+pip install \
+    numpy \
+    matplotlib \
+    scikit-learn \
+    tqdm \
+    tensorboard \
+    Pillow \
+    pandas
+
+# For experiment tracking
+pip install wandb
+
+# PyTorch Lightning (high-level training framework)
+pip install lightning
+```
+
+## Verifying Installation
+
+Run this complete verification script after installation:
+
+```python
+import torch
+import torchvision
+import torchaudio
+import sys
+
+print(f'Python      : {sys.version.split()[0]}')
+print(f'PyTorch     : {torch.__version__}')
+print(f'torchvision : {torchvision.__version__}')
+print(f'torchaudio  : {torchaudio.__version__}')
+print()
+
+# CUDA / GPU status
+print(f'CUDA available  : {torch.cuda.is_available()}')
+if torch.cuda.is_available():
+    print(f'CUDA version    : {torch.version.cuda}')
+    print(f'cuDNN version   : {torch.backends.cudnn.version()}')
+    print(f'GPU count       : {torch.cuda.device_count()}')
+    for i in range(torch.cuda.device_count()):
+        props = torch.cuda.get_device_properties(i)
+        vram  = props.total_memory / 1024**3
+        print(f'  GPU {i}: {props.name} ({vram:.1f} GB VRAM)')
+
+# MPS status (Apple Silicon)
+print(f'MPS available   : {torch.backends.mps.is_available()}')
+
+# Quick smoke test — tensor operation
+x = torch.tensor([1.0, 2.0, 3.0])
+y = x ** 2
+print(f'\nSmoke test: {x} ** 2 = {y}')
+# Smoke test: tensor([1., 2., 3.]) ** 2 = tensor([1., 4., 9.])
+```
+
+## Device Selection Pattern
+
+Always use this pattern to write hardware-agnostic code:
+
+```python
+import torch
+
+# ── Universal device selection ───────────────────────────────────────────────
+device = (
+    'cuda'  if torch.cuda.is_available()          else   # NVIDIA GPU
+    'mps'   if torch.backends.mps.is_available()  else   # Apple Silicon
+    'cpu'                                                   # Fallback
+)
+
+print(f'Using device: {device}')
+
+# ── Move everything to the same device ──────────────────────────────────────
+tensor = torch.randn(3, 4).to(device)          # move a tensor
+model  = torch.nn.Linear(10, 5).to(device)     # move a model
+
+# ── Multi-GPU: specify GPU index ─────────────────────────────────────────────
+if torch.cuda.device_count() > 1:
+    device_0 = torch.device('cuda:0')
+    device_1 = torch.device('cuda:1')
+    x0 = torch.randn(64, 128).to(device_0)
+    x1 = torch.randn(64, 128).to(device_1)
+
+# ── Check where a tensor lives ───────────────────────────────────────────────
+t = torch.zeros(2, 3)
+print(t.device)   # device(type='cpu')
+t = t.to('cuda')
+print(t.device)   # device(type='cuda', index=0)
+```
+
+:::caution[Always Keep Tensors on the Same Device]
+Mixing tensors from different devices causes a `RuntimeError`. Always ensure model parameters and input tensors are on the same device before calling `model(input)`.
+:::
+
+## Your First Tensor
+
+```python
+import torch
+
+# Scalar (0-D tensor)
+scalar = torch.tensor(3.14)
+print(scalar)           # tensor(3.1400)
+print(scalar.ndim)      # 0
+print(scalar.item())    # 3.14  (Python float)
+
+# Vector (1-D tensor)
+v = torch.tensor([1.0, 2.0, 3.0, 4.0])
+print(v.shape)          # torch.Size([4])
+print(v.dtype)          # torch.float32
+
+# Matrix (2-D tensor)
+m = torch.tensor([[1, 2, 3], [4, 5, 6]])
+print(m.shape)          # torch.Size([2, 3])
+print(m)
+# tensor([[1, 2, 3],
+#         [4, 5, 6]])
+
+# 3-D tensor (e.g., a batch of images: batch × height × width)
+imgs = torch.randn(8, 28, 28)
+print(imgs.shape)       # torch.Size([8, 28, 28])
+print(imgs.dtype)       # torch.float32
+```
+
+## Reproducibility
+
+Set seeds before any random operations to ensure reproducible results:
+
+```python
+import torch
+import numpy as np
+import random
+import os
+
+def set_seed(seed: int = 42) -> None:
+    """Make experiments reproducible across CPU, GPU, and DataLoader."""
+    torch.manual_seed(seed)             # PyTorch CPU
+    torch.cuda.manual_seed(seed)        # PyTorch CUDA (current GPU)
+    torch.cuda.manual_seed_all(seed)    # all GPUs
+    np.random.seed(seed)                # NumPy
+    random.seed(seed)                   # Python stdlib
+
+    # cuDNN determinism — slightly slower but reproducible
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark     = False
+
+    # DataLoader worker seeds (PyTorch 1.9+)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+
+set_seed(42)
+
+# Every run now produces identical results
+a = torch.randn(3)
+b = torch.randn(3)
+print(a)   # tensor([ 0.3367,  0.1288,  0.2345])
+print(b)   # tensor([ 0.2303, -1.1229, -0.1863])
+```
+
+:::tip[DataLoader Reproducibility]
+For full DataLoader reproducibility, pass `generator=torch.Generator().manual_seed(42)` and a `worker_init_fn` to `DataLoader`. See the Datasets guide for details.
+:::
+
+## Complete First Workflow
+
+<Steps>
+1. **Generate or load data**
+
+   ```python
+   import torch
+
+   torch.manual_seed(0)
+   # 200 samples, 1 feature: y = 5x + 2 + noise
+   X = torch.randn(200, 1)                         # shape: (200, 1)
+   y = 5 * X + 2 + 0.3 * torch.randn(200, 1)      # shape: (200, 1)
+
+   # 80 / 20 train-test split
+   split   = int(0.8 * len(X))
+   X_train, X_test = X[:split], X[split:]
+   y_train, y_test = y[:split], y[split:]
+   ```
+
+2. **Define the model**
+
+   ```python
+   import torch.nn as nn
+
+   model = nn.Linear(1, 1)      # ŷ = W·x + b
+   device = 'cuda' if torch.cuda.is_available() else 'cpu'
+   model  = model.to(device)
+   X_train, y_train = X_train.to(device), y_train.to(device)
+   X_test,  y_test  = X_test.to(device),  y_test.to(device)
+   ```
+
+3. **Choose a loss function and optimizer**
+
+   ```python
+   import torch.optim as optim
+
+   criterion = nn.MSELoss()
+   optimizer = optim.Adam(model.parameters(), lr=0.05)
+   ```
+
+4. **Run the training loop**
+
+   ```python
+   for epoch in range(500):
+       model.train()
+       preds = model(X_train)              # forward pass  shape: (160, 1)
+       loss  = criterion(preds, y_train)   # scalar MSE
+
+       optimizer.zero_grad()   # clear stale gradients
+       loss.backward()         # compute ∂loss/∂W, ∂loss/∂b
+       optimizer.step()        # W ← W - lr·∇W
+
+       if (epoch + 1) % 100 == 0:
+           print(f'Epoch {epoch+1:4d} | Train loss: {loss.item():.4f}')
+   ```
+
+5. **Evaluate on the test set**
+
+   ```python
+   model.eval()
+   with torch.no_grad():                           # no gradient tracking needed
+       test_preds = model(X_test)
+       test_loss  = criterion(test_preds, y_test)
+
+   print(f'\nTest MSE : {test_loss.item():.4f}')
+
+   W = model.weight.item()
+   b = model.bias.item()
+   print(f'Learned  : ŷ = {W:.3f}·x + {b:.3f}')
+   # Learned  : ŷ = 4.996·x + 1.998
+   ```
+
+</Steps>
+
+Expected training output:
+```
+Epoch  100 | Train loss: 0.1821
+Epoch  200 | Train loss: 0.0934
+Epoch  300 | Train loss: 0.0900
+Epoch  400 | Train loss: 0.0900
+Epoch  500 | Train loss: 0.0900
+
+Test MSE : 0.0893
+Learned  : ŷ = 4.996·x + 1.998
+```
+
+## Recommended Project Structure
+
+A well-organised ML project separates data, model, training logic, and configuration:
+
+```
+my_project/
+├── data/
+│   ├── raw/                  # original, immutable data
+│   ├── processed/            # cleaned / preprocessed data
+│   └── splits/               # train.csv, val.csv, test.csv
+│
+├── src/
+│   ├── __init__.py
+│   ├── dataset.py            # Dataset & DataLoader definitions
+│   ├── model.py              # nn.Module class definitions
+│   ├── train.py              # training loop + scheduler
+│   ├── evaluate.py           # evaluation metrics
+│   └── utils.py              # seed, logging, checkpoint helpers
+│
+├── experiments/
+│   ├── checkpoints/          # saved model weights (*.pth)
+│   └── logs/                 # TensorBoard / W&B logs
+│
+├── notebooks/
+│   └── exploration.ipynb     # EDA and quick experiments
+│
+├── tests/
+│   └── test_model.py         # unit tests for model shapes, etc.
+│
+├── configs/
+│   └── default.yaml          # hyperparameters (lr, batch_size…)
+│
+├── requirements.txt
+├── .env                      # API keys — never commit
+└── README.md
+```
+
+### Minimal `src/utils.py`
+
+```python
+import torch
+import random
+import numpy as np
+import os
+from pathlib import Path
+
+def set_seed(seed: int = 42) -> None:
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    torch.backends.cudnn.deterministic = True
+
+def get_device() -> torch.device:
+    return torch.device(
+        'cuda'  if torch.cuda.is_available()          else
+        'mps'   if torch.backends.mps.is_available()  else
+        'cpu'
+    )
+
+def save_checkpoint(state: dict, path: str | Path) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    torch.save(state, path)
+    print(f'Checkpoint saved → {path}')
+
+def load_checkpoint(path: str | Path, model: torch.nn.Module,
+                    optimizer: torch.optim.Optimizer | None = None):
+    ckpt = torch.load(path, weights_only=True)
+    model.load_state_dict(ckpt['model_state'])
+    if optimizer and 'optimizer_state' in ckpt:
+        optimizer.load_state_dict(ckpt['optimizer_state'])
+    return ckpt.get('epoch', 0), ckpt.get('best_val_loss', float('inf'))
+```
+
+### Minimal `src/train.py`
+
+```python
+import torch
+from src.utils import get_device, set_seed, save_checkpoint
+
+def train_one_epoch(model, loader, criterion, optimizer, device):
+    model.train()
+    total_loss = 0.0
+    for X_batch, y_batch in loader:
+        X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+        preds = model(X_batch)
+        loss  = criterion(preds, y_batch)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item() * len(X_batch)
+    return total_loss / len(loader.dataset)
+
+@torch.no_grad()
+def evaluate(model, loader, criterion, device):
+    model.eval()
+    total_loss = 0.0
+    for X_batch, y_batch in loader:
+        X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+        preds      = model(X_batch)
+        total_loss += criterion(preds, y_batch).item() * len(X_batch)
+    return total_loss / len(loader.dataset)
+```
+
+:::tip[Use configs for hyperparameters]
+Store all hyperparameters (learning rate, batch size, number of epochs) in a YAML or JSON config file. Load them at runtime with `PyYAML` or `OmegaConf`. This makes experiments reproducible and easy to compare.
+:::
+
+## GPU Memory Management
+
+```python
+import torch
+
+# Check available GPU memory
+if torch.cuda.is_available():
+    total  = torch.cuda.get_device_properties(0).total_memory
+    reserved  = torch.cuda.memory_reserved(0)
+    allocated = torch.cuda.memory_allocated(0)
+    free   = reserved - allocated
+    print(f'Total  VRAM : {total  / 1e9:.2f} GB')
+    print(f'Reserved    : {reserved  / 1e9:.2f} GB')
+    print(f'Allocated   : {allocated / 1e9:.2f} GB')
+    print(f'Free (pool) : {free  / 1e9:.2f} GB')
+
+# Release cached memory between experiments
+torch.cuda.empty_cache()
+
+# Context manager to track peak memory
+with torch.cuda.device(0):
+    torch.cuda.reset_peak_memory_stats()
+    # ... run your model ...
+    peak = torch.cuda.max_memory_allocated(0)
+    print(f'Peak usage: {peak / 1e6:.1f} MB')
+```
+
+:::caution[Out-of-Memory Errors]
+If you hit `CUDA out of memory`: reduce `batch_size`, use mixed precision (`torch.autocast`), enable gradient checkpointing (`torch.utils.checkpoint`), or accumulate gradients over multiple smaller mini-batches. Never try to `torch.cuda.empty_cache()` inside the training loop as a fix — it does not free model/gradient memory, only the cache pool.
+:::

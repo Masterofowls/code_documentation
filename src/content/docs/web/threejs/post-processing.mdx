@@ -1,0 +1,384 @@
+---
+title: Post-Processing
+description: Add cinematic post-processing effects to Three.js — bloom, SSAO, outline, bokeh, glitch, film grain, and custom shader passes — using EffectComposer and the pmndrs/postprocessing library.
+sidebar:
+  order: 8
+tags: [javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Post-processing applies full-screen shader effects to the rendered scene image before it reaches the screen. Effects like bloom, depth of field, ambient occlusion, and tone mapping can transform a technically correct render into a cinematic one.
+
+---
+
+## The Two Post-Processing APIs
+
+| API | Package | Style | Performance |
+|---|---|---|---|
+| **Three.js built-in** (`three/addons/postprocessing/`) | `three` | Each effect is a class, `EffectComposer` chains them | Good; some older effects |
+| **pmndrs/postprocessing** | `postprocessing` | Modern, optimised, less draw calls | Better; recommended for new projects |
+
+This guide covers both.
+
+---
+
+## Three.js Built-In EffectComposer
+
+### Setup
+
+```js
+import * as THREE from 'three';
+import { EffectComposer }    from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass }         from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass }    from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass }         from 'three/addons/postprocessing/OutputPass.js';
+
+const renderer = new THREE.WebGLRenderer({ antialias: false }); // MSAA off — FXAA replaces it
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+
+// EffectComposer manages a render-target pipeline
+const composer = new EffectComposer(renderer);
+
+// Pass 1: render the scene normally
+const renderPass = new RenderPass(scene, camera);
+composer.addPass(renderPass);
+
+// Pass 2: bloom
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  1.5,  // strength
+  0.4,  // radius
+  0.85, // threshold — pixels brighter than this bloom
+);
+composer.addPass(bloomPass);
+
+// Pass N (last): convert from linear to sRGB output
+const outputPass = new OutputPass();
+composer.addPass(outputPass);
+
+// Render loop — use composer.render() instead of renderer.render()
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  const delta = clock.getDelta();
+  // update logic...
+  composer.render(delta);  // replaces renderer.render(scene, camera)
+}
+animate();
+
+// Resize
+window.addEventListener('resize', () => {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h);
+  composer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+});
+```
+
+---
+
+## UnrealBloomPass
+
+Creates a bright-area glow — the most common post effect:
+
+```js
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  1.5,   // strength — overall bloom intensity
+  0.4,   // radius — spread of the glow (0–1)
+  0.85,  // threshold — luminance threshold (0 = always bloom, 1 = only very bright)
+);
+
+// Tune at runtime with lil-gui
+gui.add(bloomPass, 'strength', 0, 5, 0.01);
+gui.add(bloomPass, 'radius',   0, 1, 0.01);
+gui.add(bloomPass, 'threshold', 0, 1, 0.01);
+```
+
+### Selective Bloom
+
+Bloom everything is expensive and can look wrong. Bloom only emissive objects:
+
+```js
+// Approach: render in two passes
+// Pass 1: render emissive objects only with bloom
+// Pass 2: render full scene without bloom, merge with ShaderPass
+
+const BLOOM_LAYER = 1;
+const bloomLayer = new THREE.Layers();
+bloomLayer.set(BLOOM_LAYER);
+
+// Mark objects that should bloom
+emissiveMesh.layers.enable(BLOOM_LAYER);
+
+// Darken materials not in bloom layer during bloom pass
+const darkMat = new THREE.MeshBasicMaterial({ color: 'black' });
+const materials = {};
+
+function darkenNonBloomed(obj) {
+  if (obj.isMesh && !bloomLayer.test(obj.layers)) {
+    materials[obj.uuid] = obj.material;
+    obj.material = darkMat;
+  }
+}
+function restoreMaterial(obj) {
+  if (materials[obj.uuid]) {
+    obj.material = materials[obj.uuid];
+    delete materials[obj.uuid];
+  }
+}
+
+function render() {
+  scene.traverse(darkenNonBloomed);
+  bloomComposer.render();
+  scene.traverse(restoreMaterial);
+  finalComposer.render();
+}
+```
+
+---
+
+## SSAOPass (Screen-Space Ambient Occlusion)
+
+Darkens crevices and contact shadows between objects:
+
+```js
+import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
+
+const ssaoPass = new SSAOPass(scene, camera, window.innerWidth, window.innerHeight);
+ssaoPass.kernelRadius = 16;   // sample radius
+ssaoPass.minDistance  = 0.005; // min depth difference to create AO
+ssaoPass.maxDistance  = 0.1;   // max depth difference
+
+composer.addPass(ssaoPass);
+```
+
+---
+
+## OutlinePass
+
+Renders a coloured outline around selected objects:
+
+```js
+import { OutlinePass } from 'three/addons/postprocessing/OutlinePass.js';
+
+const outlinePass = new OutlinePass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  scene,
+  camera,
+);
+
+outlinePass.edgeStrength   = 3.0;
+outlinePass.edgeGlow       = 0.0;
+outlinePass.edgeThickness  = 1.0;
+outlinePass.pulsePeriod    = 0;     // 0 = no pulse, >0 = seconds per pulse
+outlinePass.visibleEdgeColor.set('#ff6b35');
+outlinePass.hiddenEdgeColor.set('#4f46e5');
+
+// Add objects to outline
+outlinePass.selectedObjects = [selectedMesh, anotherMesh];
+
+composer.addPass(outlinePass);
+
+// Interactive selection on click
+renderer.domElement.addEventListener('click', (e) => {
+  const raycaster = new THREE.Raycaster();
+  const mouse = new THREE.Vector2(
+    (e.clientX / window.innerWidth) * 2 - 1,
+    -(e.clientY / window.innerHeight) * 2 + 1,
+  );
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObjects(scene.children, true);
+  if (hits.length > 0) {
+    outlinePass.selectedObjects = [hits[0].object];
+  }
+});
+```
+
+---
+
+## GlitchPass, FilmPass, and BokehPass
+
+```js
+import { GlitchPass } from 'three/addons/postprocessing/GlitchPass.js';
+import { FilmPass }   from 'three/addons/postprocessing/FilmPass.js';
+import { BokehPass }  from 'three/addons/postprocessing/BokehPass.js';
+
+// Glitch — digital distortion
+const glitchPass = new GlitchPass();
+glitchPass.goWild = false;  // true = constant glitch
+composer.addPass(glitchPass);
+
+// Film grain + scanlines
+const filmPass = new FilmPass(
+  0.35,   // noise intensity
+  false,  // grayscale
+);
+composer.addPass(filmPass);
+
+// Bokeh (depth of field)
+const bokehPass = new BokehPass(scene, camera, {
+  focus:    10,    // depth at which object is in focus
+  aperture: 0.025, // controls strength of blur
+  maxblur:  0.01,  // maximum blur amount
+});
+composer.addPass(bokehPass);
+```
+
+---
+
+## ShaderPass with Custom GLSL
+
+Write a completely custom full-screen shader effect:
+
+```js
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+
+const VignetteShader = {
+  uniforms: {
+    tDiffuse:  { value: null },              // input texture (auto-set by composer)
+    uOffset:   { value: 1.0 },              // vignette size (lower = bigger)
+    uDarkness: { value: 0.8 },              // vignette darkness
+  },
+  vertexShader: /* glsl */`
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */`
+    uniform sampler2D tDiffuse;
+    uniform float uOffset;
+    uniform float uDarkness;
+    varying vec2 vUv;
+
+    void main() {
+      vec4 texel = texture2D(tDiffuse, vUv);
+      vec2 uv = (vUv - vec2(0.5)) * uOffset;
+      gl_FragColor = vec4(
+        mix(texel.rgb, vec3(0.0), dot(uv, uv) * uDarkness),
+        texel.a
+      );
+    }
+  `,
+};
+
+const vignettePass = new ShaderPass(VignetteShader);
+vignettePass.uniforms.uOffset.value   = 1.6;
+vignettePass.uniforms.uDarkness.value = 1.2;
+composer.addPass(vignettePass);
+```
+
+---
+
+## Anti-Aliasing Passes
+
+```js
+import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
+import { ShaderPass }  from 'three/addons/postprocessing/ShaderPass.js';
+import { SMAAPass }    from 'three/addons/postprocessing/SMAAPass.js';
+
+// FXAA — fast, low quality
+const fxaaPass = new ShaderPass(FXAAShader);
+fxaaPass.uniforms.resolution.value.set(
+  1 / window.innerWidth,
+  1 / window.innerHeight,
+);
+composer.addPass(fxaaPass);
+
+// SMAA — better quality, slightly slower
+const smaaPass = new SMAAPass(window.innerWidth, window.innerHeight);
+composer.addPass(smaaPass);
+```
+
+---
+
+## pmndrs/postprocessing (Modern API)
+
+The `postprocessing` package by vanruesc is the modern successor. It batches many effects into fewer render passes and has a cleaner API:
+
+```bash
+npm install postprocessing
+```
+
+```js
+import { WebGLRenderer } from 'three';
+import {
+  EffectComposer,
+  RenderPass,
+  EffectPass,
+  BloomEffect,
+  SSAOEffect,
+  ToneMappingEffect,
+  VignetteEffect,
+  GlitchEffect,
+  NoiseEffect,
+  SMAAEffect,
+  SMAAPreset,
+} from 'postprocessing';
+
+const renderer = new WebGLRenderer({ antialias: false });
+const composer = new EffectComposer(renderer);
+
+composer.addPass(new RenderPass(scene, camera));
+
+// Combine multiple effects into a SINGLE EffectPass (massive performance win)
+composer.addPass(new EffectPass(
+  camera,
+  new BloomEffect({
+    luminanceThreshold: 0.9,
+    luminanceSmoothing: 0.025,
+    intensity: 2.0,
+    radius: 0.7,
+  }),
+  new ToneMappingEffect({ mode: 4 }), // ACESFilmic = 4
+  new VignetteEffect({ offset: 0.35, darkness: 0.5 }),
+  new NoiseEffect({ premultiply: true }),
+  new SMAAEffect({ preset: SMAAPreset.HIGH }),
+));
+
+// Render loop
+function animate() {
+  requestAnimationFrame(animate);
+  composer.render();
+}
+animate();
+```
+
+:::tip[Use EffectPass to Batch Effects]
+In pmndrs/postprocessing, multiple `Effect` instances in one `EffectPass` are automatically merged into a single full-screen shader. This is **much faster** than stacking separate passes. Keep all compatible effects in one `EffectPass`.
+:::
+
+---
+
+## Performance Tips
+
+| Tip | Impact |
+|---|---|
+| Use pmndrs/postprocessing instead of built-in passes | Fewer render passes overall |
+| Batch effects into one `EffectPass` | 1 draw call vs N draw calls |
+| Render post at half resolution on mobile | 4× pixel reduction |
+| Disable bloom on mobile/low-end GPUs | Bloom is the most expensive single effect |
+| Use FXAA instead of MSAA when post-processing | MSAA doesn't work on post-processing targets |
+| Disable `generateMipmaps` on render targets | Saves GPU memory and time |
+| Use `HalfFloatType` render targets | 2× memory savings vs `FloatType` |
+| Selective bloom (only emissive objects) | 50%+ perf improvement over full bloom |
+| Profile with Chrome DevTools GPU tab | Identify specific bottleneck passes |
+
+```js
+// Detect mobile and reduce quality
+const isMobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
+bloomPass.strength = isMobile ? 0 : 1.5;   // disable bloom on mobile
+composer.setSize(
+  isMobile ? window.innerWidth / 2 : window.innerWidth,
+  isMobile ? window.innerHeight / 2 : window.innerHeight,
+);
+renderer.setPixelRatio(isMobile ? 1 : Math.min(window.devicePixelRatio, 2));
+```

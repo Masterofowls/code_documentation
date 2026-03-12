@@ -1,0 +1,782 @@
+---
+title: Django Deployment
+description: Deploy Django to production with gunicorn, nginx, Docker, PostgreSQL, environment variables, HTTPS, and cloud platforms like Railway and Heroku.
+sidebar:
+  order: 9
+tags: [python, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Deploying Django to production requires disabling debug mode, configuring a production-grade web server, securing environment variables, serving static files efficiently, and ensuring HTTPS. This guide covers every step.
+
+---
+
+## Pre-Deployment Checklist
+
+Run this command first — Django checks your settings for common security issues:
+
+```bash
+python manage.py check --deploy
+```
+
+Expected output (aim for zero issues):
+
+```
+System check identified no issues (0 silenced).
+```
+
+Common warnings and how to fix them:
+
+| Warning | Fix |
+|---------|-----|
+| `SECURITY WARNING: DEBUG = True` | Set `DEBUG = False` in production |
+| `ALLOWED_HOSTS not set` | Set `ALLOWED_HOSTS = ["myapp.com"]` |
+| `SECRET_KEY too simple/short` | Generate a new 50+ char random key |
+| `SECURE_SSL_REDIRECT not set` | Set `SECURE_SSL_REDIRECT = True` |
+| `SESSION_COOKIE_SECURE not set` | Set `SESSION_COOKIE_SECURE = True` |
+| `CSRF_COOKIE_SECURE not set` | Set `CSRF_COOKIE_SECURE = True` |
+| `SECURE_HSTS_SECONDS not set` | Set `SECURE_HSTS_SECONDS = 31536000` |
+
+---
+
+## Production Settings
+
+```python
+# mysite/settings/production.py
+from .base import *
+from decouple import config, Csv
+import dj_database_url
+
+# ─── Core Security ──────────────────────────────────────────────────────────
+DEBUG = False
+SECRET_KEY = config("SECRET_KEY")
+ALLOWED_HOSTS = config("ALLOWED_HOSTS", cast=Csv())
+
+# ─── Database ───────────────────────────────────────────────────────────────
+DATABASES = {
+    "default": dj_database_url.config(
+        default=config("DATABASE_URL"),
+        conn_max_age=600,
+        conn_health_checks=True,
+        ssl_require=True,
+    )
+}
+
+# ─── HTTPS / Security Headers ────────────────────────────────────────────────
+SECURE_SSL_REDIRECT = True
+SECURE_HSTS_SECONDS = 31536000          # 1 year
+SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+SECURE_HSTS_PRELOAD = True
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+SESSION_COOKIE_SECURE = True
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+
+CSRF_COOKIE_SECURE = True
+CSRF_COOKIE_HTTPONLY = True
+CSRF_COOKIE_SAMESITE = "Lax"
+
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_BROWSER_XSS_FILTER = True
+X_FRAME_OPTIONS = "DENY"
+REFERRER_POLICY = "strict-origin-when-cross-origin"
+
+# ─── Static Files ─────────────────────────────────────────────────────────────
+STATIC_URL = "/static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+
+# ─── Media Files ──────────────────────────────────────────────────────────────
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
+
+# For cloud storage (S3, GCS), use django-storages:
+# DEFAULT_FILE_STORAGE = "storages.backends.s3boto3.S3Boto3Storage"
+# AWS_STORAGE_BUCKET_NAME = config("AWS_STORAGE_BUCKET_NAME")
+# AWS_S3_REGION_NAME = config("AWS_S3_REGION_NAME", default="us-east-1")
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "{levelname} {asctime} {module} {process:d} {thread:d} {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "verbose",
+        },
+        "file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": BASE_DIR / "logs" / "django.log",
+            "maxBytes": 1024 * 1024 * 10,  # 10 MB
+            "backupCount": 5,
+            "formatter": "verbose",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "WARNING",
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["console", "file"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+        "django.request": {
+            "handlers": ["file"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+    },
+}
+
+# ─── Email ────────────────────────────────────────────────────────────────────
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST = config("EMAIL_HOST")
+EMAIL_PORT = config("EMAIL_PORT", default=587, cast=int)
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = config("EMAIL_HOST_USER")
+EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD")
+DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@myapp.com")
+ADMINS = [("Admin", config("ADMIN_EMAIL", default="admin@myapp.com"))]
+
+# ─── Caching ──────────────────────────────────────────────────────────────────
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": config("REDIS_URL", default="redis://localhost:6379/1"),
+    }
+}
+```
+
+---
+
+## Environment Variables
+
+```bash
+# .env (production — never commit this)
+SECRET_KEY=your-super-secret-50-char-random-key-here-12345678
+DEBUG=False
+ALLOWED_HOSTS=myapp.com,www.myapp.com
+DATABASE_URL=postgres://dbuser:dbpassword@localhost:5432/myappdb
+REDIS_URL=redis://localhost:6379/1
+EMAIL_HOST=smtp.sendgrid.net
+EMAIL_PORT=587
+EMAIL_HOST_USER=apikey
+EMAIL_HOST_PASSWORD=SG.xxxxxxxxxxxxx
+DEFAULT_FROM_EMAIL=noreply@myapp.com
+ADMIN_EMAIL=admin@myapp.com
+```
+
+Generate a secure `SECRET_KEY`:
+
+```bash
+python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"
+# django-insecure-example-output-only-do-not-use-this-value-ever
+```
+
+---
+
+## Static Files with WhiteNoise
+
+WhiteNoise lets Django serve static files efficiently without a separate web server (great for PaaS platforms).
+
+```bash
+pip install whitenoise
+```
+
+```python
+# settings.py
+MIDDLEWARE = [
+    "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",  # ← Must be second
+    ...
+]
+
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+# Compresses and fingerprints static files for optimal caching
+```
+
+```bash
+# Collect static files before deploying
+python manage.py collectstatic --no-input
+```
+
+WhiteNoise features:
+- **Compression**: serves gzip/brotli compressed static files
+- **Cache headers**: sets far-future `Cache-Control: max-age=31536000` on versioned files
+- **Content hashing**: filenames include content hash (e.g., `app.abc123.css`)
+
+---
+
+## Gunicorn — WSGI Server
+
+```bash
+pip install gunicorn
+```
+
+```bash
+# Basic usage
+gunicorn mysite.wsgi:application
+
+# With options (recommended for production)
+gunicorn mysite.wsgi:application \
+  --bind 0.0.0.0:8000 \
+  --workers 4 \
+  --worker-class gthread \
+  --threads 2 \
+  --timeout 120 \
+  --keepalive 5 \
+  --max-requests 1000 \
+  --max-requests-jitter 50 \
+  --access-logfile - \
+  --error-logfile - \
+  --log-level info
+```
+
+**Worker formula**: `(2 × CPU cores) + 1`
+
+```bash
+# 4-core machine: 2*4+1 = 9 workers
+gunicorn mysite.wsgi:application --workers 9
+```
+
+Create a `gunicorn.conf.py` for reusable config:
+
+```python
+# gunicorn.conf.py
+import multiprocessing
+
+bind = "0.0.0.0:8000"
+workers = multiprocessing.cpu_count() * 2 + 1
+worker_class = "gthread"
+threads = 2
+timeout = 120
+keepalive = 5
+max_requests = 1000
+max_requests_jitter = 50
+accesslog = "-"     # stdout
+errorlog = "-"      # stderr
+loglevel = "info"
+preload_app = True  # Load app code before forking workers (saves memory)
+```
+
+```bash
+gunicorn -c gunicorn.conf.py mysite.wsgi:application
+```
+
+---
+
+## Nginx Configuration
+
+Nginx sits in front of gunicorn, handles SSL termination, static files, and proxying.
+
+```nginx
+# /etc/nginx/sites-available/myapp
+upstream django {
+    server 127.0.0.1:8000;
+}
+
+server {
+    listen 80;
+    server_name myapp.com www.myapp.com;
+    
+    # Redirect all HTTP to HTTPS
+    return 301 https://$server_name$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name myapp.com www.myapp.com;
+
+    # SSL certificates (use Certbot/Let's Encrypt)
+    ssl_certificate /etc/letsencrypt/live/myapp.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/myapp.com/privkey.pem;
+    
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256';
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    # Security headers
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+    add_header X-Content-Type-Options nosniff;
+    add_header X-Frame-Options DENY;
+    add_header Referrer-Policy "strict-origin-when-cross-origin";
+
+    # Serve static files directly (bypasses Python entirely)
+    location /static/ {
+        alias /var/www/myapp/staticfiles/;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+    }
+
+    # Serve media files
+    location /media/ {
+        alias /var/www/myapp/media/;
+        expires 1d;
+        add_header Cache-Control "public";
+    }
+
+    # Pass all other requests to gunicorn
+    location / {
+        proxy_pass http://django;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_redirect off;
+        
+        # Timeouts
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+
+        # Buffer settings
+        proxy_buffer_size 128k;
+        proxy_buffers 4 256k;
+
+        # File upload size
+        client_max_body_size 25M;
+    }
+}
+```
+
+```bash
+# Enable the site and reload nginx
+sudo ln -s /etc/nginx/sites-available/myapp /etc/nginx/sites-enabled/
+sudo nginx -t        # Test config
+sudo systemctl reload nginx
+```
+
+---
+
+## Dockerfile
+
+```dockerfile
+# Dockerfile
+FROM python:3.12-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Create non-root user
+RUN groupadd --gid 1000 appuser && \
+    useradd --uid 1000 --gid appuser --shell /bin/bash --create-home appuser
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY --chown=appuser:appuser . .
+
+# Switch to non-root user
+USER appuser
+
+# Collect static files
+RUN python manage.py collectstatic --no-input --settings=mysite.settings.production
+
+EXPOSE 8000
+
+# Run gunicorn
+CMD ["gunicorn", "mysite.wsgi:application", \
+     "--bind", "0.0.0.0:8000", \
+     "--workers", "4", \
+     "--worker-class", "gthread", \
+     "--threads", "2", \
+     "--timeout", "120"]
+```
+
+:::tip[Multi-Stage Build]
+For even smaller images, use a multi-stage Dockerfile with a builder stage for compiling dependencies and a slim runtime stage.
+:::
+
+---
+
+## Docker Compose (with PostgreSQL and Redis)
+
+```yaml
+# docker-compose.yml
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16-alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: myappdb
+      POSTGRES_USER: myappuser
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U myappuser -d myappdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  web:
+    build: .
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py collectstatic --no-input &&
+             gunicorn mysite.wsgi:application --bind 0.0.0.0:8000 --workers 4"
+    volumes:
+      - static_files:/app/staticfiles
+      - media_files:/app/media
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://myappuser:${DB_PASSWORD}@db:5432/myappdb
+      REDIS_URL: redis://redis:6379/1
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - static_files:/app/staticfiles:ro
+      - media_files:/app/media:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - web
+    restart: unless-stopped
+
+  celery:
+    build: .
+    command: celery -A mysite worker -l info -c 4
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://myappuser:${DB_PASSWORD}@db:5432/myappdb
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  static_files:
+  media_files:
+```
+
+```bash
+# Start all services
+docker compose up -d
+
+# View logs
+docker compose logs -f web
+
+# Run management commands
+docker compose exec web python manage.py createsuperuser
+docker compose exec web python manage.py migrate
+
+# Stop everything
+docker compose down
+
+# Stop and remove volumes (destroys data)
+docker compose down -v
+```
+
+---
+
+## Cloud Deployment
+
+<Tabs>
+<TabItem label="Railway">
+```bash
+# Install Railway CLI
+npm install -g @railway/cli
+
+# Login
+railway login
+
+# Initialize project in your Django directory
+railway init
+
+# Add PostgreSQL plugin via dashboard or CLI
+railway add postgresql
+
+# Set environment variables
+railway variables set SECRET_KEY="your-secret-key"
+railway variables set DEBUG="False"
+railway variables set ALLOWED_HOSTS="your-app.up.railway.app"
+
+# Deploy
+railway up
+
+# Run migrations on Railway
+railway run python manage.py migrate
+railway run python manage.py createsuperuser
+
+# View logs
+railway logs
+```
+
+Create a `Procfile` for Railway/Heroku:
+
+```
+# Procfile
+web: gunicorn mysite.wsgi:application
+release: python manage.py migrate
+```
+</TabItem>
+<TabItem label="Heroku">
+```bash
+# Login
+heroku login
+
+# Create app
+heroku create my-django-app
+
+# Add PostgreSQL
+heroku addons:create heroku-postgresql:essential-0
+
+# Set config vars
+heroku config:set SECRET_KEY="your-secret-key"
+heroku config:set DEBUG="False"
+heroku config:set ALLOWED_HOSTS="my-django-app.herokuapp.com"
+heroku config:set DJANGO_SETTINGS_MODULE="mysite.settings.production"
+
+# Deploy
+git push heroku main
+
+# Run migrations
+heroku run python manage.py migrate
+heroku run python manage.py createsuperuser
+
+# View logs
+heroku logs --tail
+
+# Scale dynos
+heroku ps:scale web=2
+```
+
+```python
+# requirements.txt additions for Heroku
+gunicorn==23.0.0
+dj-database-url==2.3.0
+whitenoise==6.8.2
+psycopg[binary]==3.2.3
+```
+</TabItem>
+<TabItem label="VPS (Ubuntu)">
+```bash
+# System setup
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y python3.12 python3.12-venv python3-pip nginx postgresql postgresql-contrib git
+
+# PostgreSQL setup
+sudo -u postgres psql
+CREATE DATABASE myappdb;
+CREATE USER myappuser WITH PASSWORD 'strongpassword';
+GRANT ALL PRIVILEGES ON DATABASE myappdb TO myappuser;
+\q
+
+# App setup
+sudo mkdir -p /var/www/myapp
+sudo chown -R $USER:$USER /var/www/myapp
+cd /var/www/myapp
+git clone https://github.com/yourname/myapp.git .
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Environment
+cp .env.example .env
+nano .env  # Fill in production values
+
+# Prepare app
+python manage.py migrate
+python manage.py collectstatic --no-input
+python manage.py createsuperuser
+
+# Systemd service for gunicorn
+sudo nano /etc/systemd/system/myapp.service
+```
+
+```ini
+# /etc/systemd/system/myapp.service
+[Unit]
+Description=Gunicorn daemon for myapp
+After=network.target
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/myapp
+EnvironmentFile=/var/www/myapp/.env
+ExecStart=/var/www/myapp/.venv/bin/gunicorn \
+    --workers 4 \
+    --bind unix:/run/myapp.sock \
+    mysite.wsgi:application
+ExecReload=/bin/kill -s HUP $MAINPID
+KillMode=mixed
+TimeoutStopSec=5
+PrivateTmp=true
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable myapp
+sudo systemctl start myapp
+sudo systemctl status myapp
+```
+</TabItem>
+</Tabs>
+
+---
+
+## Database Migrations in Production
+
+:::caution[Always Back Up First]
+Before running migrations on production, take a database snapshot or pg_dump backup.
+:::
+
+```bash
+# 1. Backup (PostgreSQL)
+pg_dump -U myappuser myappdb > backup_$(date +%Y%m%d_%H%M%S).sql
+
+# 2. Check what migrations will run
+python manage.py showmigrations --list | grep '\[ \]'
+
+# 3. Preview the SQL
+python manage.py sqlmigrate blog 0005
+
+# 4. Run migrations
+python manage.py migrate
+
+# 5. Rollback if needed
+python manage.py migrate blog 0004
+```
+
+For zero-downtime migrations (additive only):
+1. **Expand**: Add new columns as nullable / with defaults
+2. **Deploy**: Deploy new code that works with both old and new schema
+3. **Migrate**: Run the migration (adding nullable columns is non-blocking)
+4. **Contract**: Deploy code that drops the old columns, then run that migration
+
+---
+
+## Systemd Service (Celery Worker)
+
+```ini
+# /etc/systemd/system/celery.service
+[Unit]
+Description=Celery Worker for myapp
+After=network.target redis.service
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/myapp
+EnvironmentFile=/var/www/myapp/.env
+ExecStart=/var/www/myapp/.venv/bin/celery \
+    -A mysite worker \
+    --loglevel=info \
+    --concurrency=4
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+---
+
+## Post-Deployment Verification
+
+```bash
+# 1. Check manage.py --deploy passes
+python manage.py check --deploy
+
+# 2. Verify the health endpoint
+curl https://myapp.com/health/
+# {"status": "ok", "db": "connected", "cache": "connected"}
+
+# 3. Check SSL grade
+# Visit: https://www.ssllabs.com/ssltest/analyze.html?d=myapp.com
+
+# 4. Security headers
+curl -I https://myapp.com/
+# HTTP/2 200
+# strict-transport-security: max-age=31536000; includeSubDomains; preload
+# x-content-type-options: nosniff
+# x-frame-options: DENY
+
+# 5. Static files are fingerprinted
+curl -I https://myapp.com/static/css/app.abc123.css
+# cache-control: public, max-age=31536000, immutable
+
+# 6. Admin accessible
+curl -L https://myapp.com/admin/
+# Should return the login page (not a 500 error)
+```
+
+:::tip[Monitoring]
+Set up error tracking (Sentry) and uptime monitoring (Uptime Robot, Better Uptime) before going live. Add `sentry-sdk[django]` to capture unhandled exceptions automatically.
+
+```bash
+pip install "sentry-sdk[django]"
+```
+
+```python
+# settings/production.py
+import sentry_sdk
+sentry_sdk.init(
+    dsn=config("SENTRY_DSN"),
+    traces_sample_rate=0.1,
+    profiles_sample_rate=0.1,
+)
+```
+:::

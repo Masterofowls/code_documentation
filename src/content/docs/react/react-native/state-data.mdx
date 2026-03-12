@@ -1,0 +1,603 @@
+---
+title: State & Data Management
+description: Local state, global state with Zustand, server state with TanStack Query, local storage with MMKV and SQLite, and offline-first patterns.
+sidebar:
+  order: 5
+tags: [react, mobile]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+State management in React Native follows the same patterns as React on the web, with additional considerations for device storage, offline-first design, and performance on mobile hardware.
+
+## Local State: useState and useReducer
+
+Use `useState` for simple, isolated component state and `useReducer` for complex state with multiple sub-values or actions.
+
+```tsx
+import { useState, useReducer } from 'react';
+import { View, Text, TextInput, Pressable, StyleSheet } from 'react-native';
+
+// useState — simple counter
+function Counter() {
+  const [count, setCount] = useState(0);
+  return (
+    <View style={styles.row}>
+      <Pressable style={styles.btn} onPress={() => setCount((c) => c - 1)}>
+        <Text style={styles.btnText}>−</Text>
+      </Pressable>
+      <Text style={styles.count}>{count}</Text>
+      <Pressable style={styles.btn} onPress={() => setCount((c) => c + 1)}>
+        <Text style={styles.btnText}>+</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+// useReducer — form with multiple fields
+type FormState = { name: string; email: string; submitting: boolean; error: string | null };
+type FormAction =
+  | { type: 'set_field'; field: keyof Pick<FormState, 'name' | 'email'>; value: string }
+  | { type: 'submit' }
+  | { type: 'success' }
+  | { type: 'error'; message: string };
+
+function formReducer(state: FormState, action: FormAction): FormState {
+  switch (action.type) {
+    case 'set_field': return { ...state, [action.field]: action.value };
+    case 'submit': return { ...state, submitting: true, error: null };
+    case 'success': return { ...state, submitting: false };
+    case 'error': return { ...state, submitting: false, error: action.message };
+    default: return state;
+  }
+}
+
+function RegistrationForm() {
+  const [state, dispatch] = useReducer(formReducer, {
+    name: '', email: '', submitting: false, error: null,
+  });
+
+  const handleSubmit = async () => {
+    dispatch({ type: 'submit' });
+    try {
+      await registerUser(state.name, state.email);
+      dispatch({ type: 'success' });
+    } catch (err) {
+      dispatch({ type: 'error', message: (err as Error).message });
+    }
+  };
+
+  return (
+    <View style={styles.form}>
+      <TextInput
+        value={state.name}
+        onChangeText={(v) => dispatch({ type: 'set_field', field: 'name', value: v })}
+        placeholder="Full name"
+        style={styles.input}
+      />
+      <TextInput
+        value={state.email}
+        onChangeText={(v) => dispatch({ type: 'set_field', field: 'email', value: v })}
+        placeholder="Email"
+        keyboardType="email-address"
+        style={styles.input}
+      />
+      {state.error && <Text style={styles.error}>{state.error}</Text>}
+      <Pressable style={styles.submitBtn} onPress={handleSubmit} disabled={state.submitting}>
+        <Text style={styles.submitText}>{state.submitting ? 'Saving…' : 'Register'}</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  row: { flexDirection: 'row', alignItems: 'center', gap: 16 },
+  btn: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#007AFF', justifyContent: 'center', alignItems: 'center' },
+  btnText: { color: '#fff', fontSize: 20 },
+  count: { fontSize: 24, fontWeight: 'bold', minWidth: 40, textAlign: 'center' },
+  form: { gap: 12 },
+  input: { borderWidth: 1, borderColor: '#ddd', borderRadius: 8, padding: 12, fontSize: 16 },
+  error: { color: '#FF3B30', fontSize: 14 },
+  submitBtn: { backgroundColor: '#007AFF', borderRadius: 8, padding: 14, alignItems: 'center' },
+  submitText: { color: '#fff', fontWeight: '600' },
+});
+```
+
+## Context API for Global State
+
+Context is built into React and works well for low-frequency global data like theme, locale, or current user.
+
+```tsx
+// src/context/ThemeContext.tsx
+import { createContext, useContext, useState, ReactNode } from 'react';
+
+type Theme = 'light' | 'dark';
+
+interface ThemeContextValue {
+  theme: Theme;
+  toggleTheme: () => void;
+  colors: typeof lightColors;
+}
+
+const lightColors = {
+  background: '#FFFFFF',
+  surface: '#F2F2F7',
+  text: '#000000',
+  textSecondary: '#8E8E93',
+  primary: '#007AFF',
+  border: '#E5E5EA',
+};
+
+const darkColors = {
+  background: '#000000',
+  surface: '#1C1C1E',
+  text: '#FFFFFF',
+  textSecondary: '#8E8E93',
+  primary: '#0A84FF',
+  border: '#38383A',
+};
+
+const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
+
+export function ThemeProvider({ children }: { children: ReactNode }) {
+  const [theme, setTheme] = useState<Theme>('light');
+  const colors = theme === 'light' ? lightColors : darkColors;
+
+  return (
+    <ThemeContext.Provider
+      value={{ theme, toggleTheme: () => setTheme((t) => (t === 'light' ? 'dark' : 'light')), colors }}
+    >
+      {children}
+    </ThemeContext.Provider>
+  );
+}
+
+export function useTheme() {
+  const ctx = useContext(ThemeContext);
+  if (!ctx) throw new Error('useTheme must be used inside ThemeProvider');
+  return ctx;
+}
+```
+
+:::caution[Context re-render performance]
+Every time a Context value changes, all consumers re-render. Split large contexts into smaller ones (e.g., separate `ThemeContext` and `UserContext`), or use `useMemo` on the value object. For high-frequency updates (e.g., every keystroke), use Zustand instead.
+:::
+
+## Zustand for Global State
+
+Zustand is the recommended global state solution for React Native. It's minimal, performant, and supports persistence.
+
+```bash
+npm install zustand
+```
+
+```typescript
+// src/stores/useCartStore.ts
+import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+// Or with MMKV: import { storage } from '../lib/mmkv';
+
+interface CartItem {
+  id: string;
+  name: string;
+  price: number;
+  quantity: number;
+}
+
+interface CartStore {
+  items: CartItem[];
+  addItem: (item: Omit<CartItem, 'quantity'>) => void;
+  removeItem: (id: string) => void;
+  updateQuantity: (id: string, quantity: number) => void;
+  clearCart: () => void;
+  total: () => number;
+}
+
+export const useCartStore = create<CartStore>()(
+  persist(
+    (set, get) => ({
+      items: [],
+
+      addItem: (item) =>
+        set((state) => {
+          const existing = state.items.find((i) => i.id === item.id);
+          if (existing) {
+            return {
+              items: state.items.map((i) =>
+                i.id === item.id ? { ...i, quantity: i.quantity + 1 } : i,
+              ),
+            };
+          }
+          return { items: [...state.items, { ...item, quantity: 1 }] };
+        }),
+
+      removeItem: (id) =>
+        set((state) => ({ items: state.items.filter((i) => i.id !== id) })),
+
+      updateQuantity: (id, quantity) =>
+        set((state) => ({
+          items: quantity <= 0
+            ? state.items.filter((i) => i.id !== id)
+            : state.items.map((i) => (i.id === id ? { ...i, quantity } : i)),
+        })),
+
+      clearCart: () => set({ items: [] }),
+
+      total: () =>
+        get().items.reduce((sum, item) => sum + item.price * item.quantity, 0),
+    }),
+    {
+      name: 'cart-storage',
+      storage: createJSONStorage(() => AsyncStorage),
+    },
+  ),
+);
+```
+
+Usage in a component:
+
+```tsx
+import { useCartStore } from '../stores/useCartStore';
+
+export function CartBadge() {
+  // Only re-renders when items array changes
+  const itemCount = useCartStore((s) => s.items.reduce((acc, i) => acc + i.quantity, 0));
+
+  if (itemCount === 0) return null;
+  return (
+    <View style={styles.badge}>
+      <Text style={styles.badgeText}>{itemCount}</Text>
+    </View>
+  );
+}
+```
+
+## TanStack Query (React Query)
+
+TanStack Query handles all server state: loading, caching, background refresh, pagination, and mutations.
+
+```bash
+npm install @tanstack/react-query
+```
+
+### Setup
+
+```tsx
+// App.tsx
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 5 * 60 * 1000, // 5 minutes
+      gcTime: 10 * 60 * 1000,   // 10 minutes (formerly cacheTime)
+      retry: 2,
+      refetchOnWindowFocus: false, // mobile: use refetchOnAppFocus instead
+    },
+  },
+});
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <NavigationContainer>
+        <RootNavigator />
+      </NavigationContainer>
+    </QueryClientProvider>
+  );
+}
+```
+
+### useQuery
+
+```typescript
+// src/hooks/useProducts.ts
+import { useQuery, useInfiniteQuery } from '@tanstack/react-query';
+import { fetchProducts, fetchProductById } from '../services/api';
+
+export function useProduct(id: string) {
+  return useQuery({
+    queryKey: ['product', id],
+    queryFn: () => fetchProductById(id),
+    enabled: !!id,
+    staleTime: 5 * 60 * 1000,
+  });
+}
+
+export function useInfiniteProducts(category?: string) {
+  return useInfiniteQuery({
+    queryKey: ['products', category],
+    queryFn: ({ pageParam = 1 }) =>
+      fetchProducts({ page: pageParam, category }),
+    initialPageParam: 1,
+    getNextPageParam: (lastPage) =>
+      lastPage.hasMore ? lastPage.nextPage : undefined,
+  });
+}
+```
+
+### useMutation
+
+```tsx
+// src/hooks/useCreateOrder.ts
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { createOrder } from '../services/api';
+
+export function useCreateOrder() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: createOrder,
+    onSuccess: (newOrder) => {
+      // Invalidate and refetch orders list
+      queryClient.invalidateQueries({ queryKey: ['orders'] });
+      // Optimistically update the cache
+      queryClient.setQueryData(['order', newOrder.id], newOrder);
+    },
+    onError: (error) => {
+      console.error('Order failed:', error.message);
+    },
+  });
+}
+
+// Usage:
+function CheckoutButton({ items }: { items: CartItem[] }) {
+  const { mutate: placeOrder, isPending, error } = useCreateOrder();
+
+  return (
+    <Pressable
+      style={styles.btn}
+      onPress={() => placeOrder({ items })}
+      disabled={isPending}
+    >
+      <Text>{isPending ? 'Placing Order…' : 'Place Order'}</Text>
+    </Pressable>
+  );
+}
+```
+
+## MMKV — Fast Local Storage
+
+MMKV is a C++ backed key-value store that is ~10x faster than AsyncStorage.
+
+```bash
+npx expo install react-native-mmkv
+```
+
+```typescript
+// src/lib/mmkv.ts
+import { MMKV } from 'react-native-mmkv';
+
+export const storage = new MMKV({
+  id: 'app-storage',
+  encryptionKey: 'my-encryption-key', // optional encryption
+});
+
+// Helper functions
+export const Storage = {
+  set: <T>(key: string, value: T) =>
+    storage.set(key, JSON.stringify(value)),
+
+  get: <T>(key: string): T | undefined => {
+    const raw = storage.getString(key);
+    if (raw === undefined) return undefined;
+    try { return JSON.parse(raw) as T; }
+    catch { return undefined; }
+  },
+
+  delete: (key: string) => storage.delete(key),
+
+  clear: () => storage.clearAll(),
+};
+
+// Usage
+Storage.set('user', { id: '123', name: 'Alice' });
+const user = Storage.get<{ id: string; name: string }>('user');
+```
+
+## AsyncStorage (Legacy)
+
+Still widely used — simpler than MMKV but slower. Good for occasional reads/writes.
+
+```bash
+npx expo install @react-native-async-storage/async-storage
+```
+
+```typescript
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+// Store
+await AsyncStorage.setItem('@user', JSON.stringify({ name: 'Alice' }));
+
+// Read
+const raw = await AsyncStorage.getItem('@user');
+const user = raw ? JSON.parse(raw) : null;
+
+// Delete
+await AsyncStorage.removeItem('@user');
+
+// Multi-key operations
+await AsyncStorage.multiSet([
+  ['@key1', 'value1'],
+  ['@key2', 'value2'],
+]);
+const values = await AsyncStorage.multiGet(['@key1', '@key2']);
+```
+
+## SQLite with expo-sqlite
+
+For structured relational data: user history, offline-first data, complex queries.
+
+```bash
+npx expo install expo-sqlite
+```
+
+```typescript
+// src/lib/database.ts
+import * as SQLite from 'expo-sqlite';
+
+export const db = SQLite.openDatabaseSync('app.db');
+
+// Initialize schema
+export function initDatabase() {
+  db.execSync(`
+    PRAGMA journal_mode=WAL;
+    PRAGMA foreign_keys=ON;
+
+    CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      completed INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at DESC);
+  `);
+}
+
+// Typed query helpers
+export const Tasks = {
+  getAll: () =>
+    db.getAllSync<{ id: string; title: string; completed: number; created_at: string }>(
+      'SELECT * FROM tasks ORDER BY created_at DESC',
+    ),
+
+  create: (id: string, title: string) =>
+    db.runSync('INSERT INTO tasks (id, title) VALUES (?, ?)', [id, title]),
+
+  toggleComplete: (id: string, completed: boolean) =>
+    db.runSync('UPDATE tasks SET completed = ? WHERE id = ?', [completed ? 1 : 0, id]),
+
+  delete: (id: string) =>
+    db.runSync('DELETE FROM tasks WHERE id = ?', [id]),
+};
+```
+
+## SecureStore for Sensitive Data
+
+Store tokens, credentials, and sensitive data in the secure enclave.
+
+```bash
+npx expo install expo-secure-store
+```
+
+```typescript
+import * as SecureStore from 'expo-secure-store';
+
+// Store a value
+await SecureStore.setItemAsync('auth_token', accessToken);
+
+// Retrieve a value
+const token = await SecureStore.getItemAsync('auth_token');
+
+// Delete
+await SecureStore.deleteItemAsync('auth_token');
+
+// Token management example
+export const TokenStore = {
+  saveTokens: async (access: string, refresh: string) => {
+    await Promise.all([
+      SecureStore.setItemAsync('access_token', access),
+      SecureStore.setItemAsync('refresh_token', refresh),
+    ]);
+  },
+
+  getAccessToken: () => SecureStore.getItemAsync('access_token'),
+  getRefreshToken: () => SecureStore.getItemAsync('refresh_token'),
+
+  clearTokens: async () => {
+    await Promise.all([
+      SecureStore.deleteItemAsync('access_token'),
+      SecureStore.deleteItemAsync('refresh_token'),
+    ]);
+  },
+};
+```
+
+:::tip[SecureStore vs MMKV encryption]
+Use **SecureStore** for auth tokens and passwords — it uses the iOS Keychain and Android Keystore. Use **MMKV** with an encryption key for large amounts of sensitive app data. Never store tokens in AsyncStorage.
+:::
+
+## HTTP: fetch and axios
+
+```bash
+npm install axios
+```
+
+```typescript
+// src/services/api.ts
+import axios from 'axios';
+import { TokenStore } from '../lib/tokenStore';
+
+const api = axios.create({
+  baseURL: process.env.EXPO_PUBLIC_API_URL ?? 'https://api.example.com',
+  timeout: 10_000,
+  headers: { 'Content-Type': 'application/json' },
+});
+
+// Request interceptor: attach token
+api.interceptors.request.use(async (config) => {
+  const token = await TokenStore.getAccessToken();
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
+
+// Response interceptor: handle 401 and refresh
+api.interceptors.response.use(
+  (res) => res,
+  async (error) => {
+    if (error.response?.status === 401) {
+      const refreshToken = await TokenStore.getRefreshToken();
+      if (refreshToken) {
+        const { data } = await axios.post('/auth/refresh', { refreshToken });
+        await TokenStore.saveTokens(data.accessToken, data.refreshToken);
+        error.config.headers.Authorization = `Bearer ${data.accessToken}`;
+        return api(error.config);
+      }
+    }
+    return Promise.reject(error);
+  },
+);
+
+export default api;
+```
+
+## Offline-First Patterns
+
+```typescript
+// src/hooks/useOfflineAware.ts
+import NetInfo, { useNetInfo } from '@react-native-community/netinfo';
+import { useEffect } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+
+export function useOfflineSync() {
+  const netInfo = useNetInfo();
+  const queryClient = useQueryClient();
+
+  useEffect(() => {
+    if (netInfo.isConnected && netInfo.isInternetReachable) {
+      // Back online: refetch all stale queries
+      queryClient.refetchQueries({ type: 'active', stale: true });
+    }
+  }, [netInfo.isConnected, netInfo.isInternetReachable, queryClient]);
+
+  return { isOnline: netInfo.isConnected && netInfo.isInternetReachable };
+}
+```
+
+```bash
+npx expo install @react-native-community/netinfo
+```
+
+## Storage Decision Guide
+
+| Scenario | Solution |
+|---|---|
+| Auth tokens, passwords | `expo-secure-store` |
+| App preferences, settings | `MMKV` |
+| Large structured data, complex queries | `expo-sqlite` |
+| Server data with caching | TanStack Query |
+| Global UI state | Zustand |
+| Screen-local state | `useState` / `useReducer` |
+| Simple async data (legacy) | `AsyncStorage` |

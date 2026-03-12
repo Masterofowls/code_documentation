@@ -1,0 +1,516 @@
+---
+title: Sprites in Pygame
+description: Use pygame.sprite.Sprite and Group classes, collision detection, pixel-perfect masks, and sprite animation to build structured game objects.
+sidebar:
+  order: 5
+tags: [python, gamedev]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Pygame's sprite module provides a clean object-oriented framework for managing game entities. Sprites are objects that combine a **visual surface** (`image`) with a **position rectangle** (`rect`), and Groups manage collections of sprites with built-in draw and collision capabilities.
+
+## `pygame.sprite.Sprite`
+
+Every game object should subclass `pygame.sprite.Sprite`:
+
+```python
+import pygame
+
+class Player(pygame.sprite.Sprite):
+    def __init__(self, x, y):
+        super().__init__()  # Must call this first
+
+        # Required attributes
+        self.image = pygame.Surface((40, 50))
+        self.image.fill((80, 180, 255))
+
+        self.rect  = self.image.get_rect(topleft=(x, y))
+
+        # Custom attributes
+        self.speed      = 5
+        self.health     = 100
+        self.vx         = 0
+        self.vy         = 0
+
+    def update(self, *args, **kwargs):
+        """Called once per frame by Group.update()."""
+        keys = pygame.key.get_pressed()
+        self.vx = 0
+        self.vy = 0
+        if keys[pygame.K_LEFT]:  self.vx = -self.speed
+        if keys[pygame.K_RIGHT]: self.vx =  self.speed
+        if keys[pygame.K_UP]:    self.vy = -self.speed
+        if keys[pygame.K_DOWN]:  self.vy =  self.speed
+
+        self.rect.x += self.vx
+        self.rect.y += self.vy
+
+        # Clamp to screen
+        self.rect.clamp_ip(pygame.display.get_surface().get_rect())
+
+    def take_damage(self, amount):
+        self.health -= amount
+        if self.health <= 0:
+            self.kill()  # Removes sprite from ALL groups
+```
+
+:::tip[The Two Required Attributes]
+Every `Sprite` subclass **must** set `self.image` (a `Surface`) and `self.rect` (a `Rect`) before being added to a group. `Group.draw()` uses these to blit the sprite onto the target surface.
+:::
+
+## Sprite Groups
+
+Groups are containers that batch-process sprites. There are several group types:
+
+<Tabs>
+  <TabItem label="Group (general)">
+```python
+# Create a group
+all_sprites   = pygame.sprite.Group()
+enemy_group   = pygame.sprite.Group()
+bullet_group  = pygame.sprite.Group()
+
+# Add sprites
+player = Player(100, 100)
+all_sprites.add(player)
+
+enemy = Enemy(400, 200)
+all_sprites.add(enemy)
+enemy_group.add(enemy)
+
+# Update all sprites (calls sprite.update())
+all_sprites.update()
+
+# Draw all sprites onto the screen
+all_sprites.draw(screen)
+
+# Remove a sprite from this group
+enemy_group.remove(enemy)
+
+# Remove sprite from ALL groups (built into Sprite class)
+enemy.kill()
+
+# Check membership
+if player in all_sprites:
+    print("Player is alive")
+
+# Iterate
+for sprite in enemy_group:
+    print(sprite.rect.center)
+
+# Count
+print(f"Enemies remaining: {len(enemy_group)}")
+
+# Empty a group (does not kill sprites)
+bullet_group.empty()
+```
+  </TabItem>
+  <TabItem label="GroupSingle">
+```python
+# GroupSingle holds exactly one sprite (replaces when a new one is added)
+player_group = pygame.sprite.GroupSingle()
+player_group.add(Player(100, 100))
+
+# Access the single sprite
+if player_group.sprite:
+    player_group.sprite.health = 100
+
+# Useful for: player, camera target, active menu cursor
+```
+  </TabItem>
+  <TabItem label="RenderUpdates (dirty rects)">
+```python
+# RenderUpdates.draw() returns a list of dirty Rects —
+# use with pygame.display.update() for partial-screen refresh
+dirty_group = pygame.sprite.RenderUpdates()
+dirty_group.add(player)
+
+dirty_rects = dirty_group.draw(screen)
+pygame.display.update(dirty_rects)  # Only re-draw changed regions
+```
+  </TabItem>
+</Tabs>
+
+## Loading Images for Sprites
+
+```python
+class AnimatedSprite(pygame.sprite.Sprite):
+    def __init__(self, image_path, x, y):
+        super().__init__()
+        raw = pygame.image.load(image_path).convert_alpha()
+        self.image = pygame.transform.scale(raw, (64, 64))
+        self.rect  = self.image.get_rect(topleft=(x, y))
+
+    def update(self):
+        pass
+```
+
+## Collision Detection
+
+Pygame provides several built-in collision functions.
+
+### Rect-Based Collision (Fast)
+
+```python
+# Single sprite vs single sprite
+if pygame.sprite.collide_rect(player, enemy):
+    player.take_damage(10)
+
+# Single sprite vs group — returns list of colliding sprites
+hits = pygame.sprite.spritecollide(player, enemy_group, dokill=False)
+for hit in hits:
+    player.take_damage(10)
+    hit.take_damage(25)
+
+# dokill=True removes the colliding sprites from their group immediately
+bullets_hit = pygame.sprite.spritecollide(enemy, bullet_group, dokill=True)
+
+# Group vs group — returns dict {sprite: [colliding_sprites]}
+collisions = pygame.sprite.groupcollide(
+    enemy_group, bullet_group,
+    dokilla=False,  # kill enemies on hit?
+    dokillb=True,   # kill bullets on hit?
+)
+for enemy, bullets in collisions.items():
+    enemy.take_damage(len(bullets) * 20)
+```
+
+### Circle-Based Collision
+
+```python
+# Use circle collision (better for round sprites)
+hits = pygame.sprite.spritecollide(
+    player, enemy_group,
+    dokill=False,
+    collided=pygame.sprite.collide_circle,
+)
+```
+
+### Pixel-Perfect Collision with Masks
+
+```python
+class Bullet(pygame.sprite.Sprite):
+    def __init__(self, x, y):
+        super().__init__()
+        self.image = pygame.image.load("bullet.png").convert_alpha()
+        self.rect  = self.image.get_rect(center=(x, y))
+        self.mask  = pygame.mask.from_surface(self.image)
+        self.speed = 10
+
+    def update(self):
+        self.rect.y -= self.speed
+        if self.rect.bottom < 0:
+            self.kill()
+
+class Enemy(pygame.sprite.Sprite):
+    def __init__(self, x, y):
+        super().__init__()
+        self.image = pygame.image.load("enemy.png").convert_alpha()
+        self.rect  = self.image.get_rect(center=(x, y))
+        self.mask  = pygame.mask.from_surface(self.image)
+        self.health = 3
+
+# Pixel-perfect collision check
+hits = pygame.sprite.spritecollide(
+    bullet, enemy_group,
+    dokill=True,
+    collided=pygame.sprite.collide_mask,
+)
+```
+
+:::caution[Mask Collision Performance]
+`collide_mask` is significantly slower than `collide_rect`. Use it only for sprites that genuinely need pixel-perfect accuracy (e.g., irregular shapes). Pre-generate masks once in `__init__`, never each frame.
+:::
+
+### Direct Rect Methods
+
+```python
+rect_a = pygame.Rect(100, 100, 50, 50)
+rect_b = pygame.Rect(130, 120, 50, 50)
+
+# Overlap check
+rect_a.colliderect(rect_b)       # True / False
+
+# Point containment
+rect_a.collidepoint(120, 115)    # True / False
+
+# Overlap area
+clip = rect_a.clip(rect_b)       # Returns intersection Rect (zero-size if no overlap)
+
+# Find any rect in a list that collides
+index = rect_a.collidelist([rect_b, pygame.Rect(200, 200, 10, 10)])  # Returns index or -1
+
+# Find ALL rects in a list that collide
+indices = rect_a.collidelistall([rect_b, pygame.Rect(200, 200, 10, 10)])
+```
+
+## Sprite Animation
+
+Cycle through a list of frames to animate a sprite:
+
+```python
+class AnimatedPlayer(pygame.sprite.Sprite):
+    """Player sprite with a walk animation."""
+
+    FRAME_DURATION = 120  # milliseconds per frame
+
+    def __init__(self, x, y):
+        super().__init__()
+
+        # Load spritesheet and slice into frames
+        sheet = pygame.image.load("player_walk.png").convert_alpha()
+        frame_width  = 64
+        frame_height = 64
+        num_frames   = 6
+
+        self.frames = []
+        for i in range(num_frames):
+            frame = sheet.subsurface(pygame.Rect(i * frame_width, 0,
+                                                 frame_width, frame_height))
+            self.frames.append(frame)
+
+        self.frame_index = 0
+        self.image       = self.frames[0]
+        self.rect        = self.image.get_rect(topleft=(x, y))
+
+        self._anim_timer = 0   # ms accumulated
+        self.facing_right = True
+
+    def update(self, dt):
+        """dt = milliseconds since last frame."""
+        # Move
+        keys = pygame.key.get_pressed()
+        moving = False
+        if keys[pygame.K_LEFT]:
+            self.rect.x   -= 3
+            self.facing_right = False
+            moving = True
+        if keys[pygame.K_RIGHT]:
+            self.rect.x   += 3
+            self.facing_right = True
+            moving = True
+
+        # Animate only while moving
+        if moving:
+            self._anim_timer += dt
+            if self._anim_timer >= self.FRAME_DURATION:
+                self._anim_timer  = 0
+                self.frame_index  = (self.frame_index + 1) % len(self.frames)
+        else:
+            self.frame_index = 0  # Idle frame
+            self._anim_timer = 0
+
+        # Flip for direction
+        frame = self.frames[self.frame_index]
+        if not self.facing_right:
+            frame = pygame.transform.flip(frame, True, False)
+        self.image = frame
+```
+
+:::tip[dt in Group.update()]
+Pass delta time to `Group.update()` and it forwards to each sprite's `update()`:
+```python
+dt = clock.tick(60)
+all_sprites.update(dt)
+```
+:::
+
+## Scrolling Background Sprite
+
+```python
+class ScrollingBackground(pygame.sprite.Sprite):
+    """Infinitely tiling vertical scroll."""
+
+    def __init__(self, image_path, scroll_speed=2):
+        super().__init__()
+        self.image_orig = pygame.image.load(image_path).convert()
+        w = pygame.display.get_surface().get_width()
+        h = pygame.display.get_surface().get_height()
+        self.image_orig = pygame.transform.scale(self.image_orig, (w, h))
+        self.image = self.image_orig.copy()
+        self.rect  = self.image.get_rect()
+        self.scroll_speed = scroll_speed
+        self.scroll_y     = 0.0
+
+    def update(self, dt=16):
+        self.scroll_y = (self.scroll_y + self.scroll_speed * dt / 16) % self.rect.height
+
+    def draw(self, surface):
+        y = int(self.scroll_y)
+        surface.blit(self.image_orig, (0, y - self.rect.height))
+        surface.blit(self.image_orig, (0, y))
+```
+
+## Complete Space Invaders–Style Enemy Wave
+
+```python
+import pygame
+import sys
+import random
+
+pygame.init()
+SCREEN = pygame.display.set_mode((600, 700))
+pygame.display.set_caption("Invaders Demo")
+clock  = pygame.time.Clock()
+font   = pygame.font.SysFont(None, 32)
+
+# ── Sprites ──────────────────────────────────────────────────
+
+class Bullet(pygame.sprite.Sprite):
+    def __init__(self, x, y, dy=-10, color=(255, 220, 50)):
+        super().__init__()
+        self.image = pygame.Surface((4, 14), pygame.SRCALPHA)
+        pygame.draw.rect(self.image, color, (0, 0, 4, 14), border_radius=2)
+        self.rect  = self.image.get_rect(centerx=x, y=y)
+        self.dy    = dy
+
+    def update(self, dt=16):
+        self.rect.y += self.dy
+        if self.rect.bottom < 0 or self.rect.top > 700:
+            self.kill()
+
+
+class Enemy(pygame.sprite.Sprite):
+    COLORS = [(220, 80, 80), (220, 140, 50), (80, 180, 220)]
+
+    def __init__(self, col, row):
+        super().__init__()
+        color = self.COLORS[row % len(self.COLORS)]
+        self.image = pygame.Surface((36, 28), pygame.SRCALPHA)
+        pygame.draw.rect(self.image, color, (0, 4, 36, 20), border_radius=6)
+        pygame.draw.rect(self.image, color, (8, 0, 8, 6))
+        pygame.draw.rect(self.image, color, (20, 0, 8, 6))
+        pygame.draw.rect(self.image, color, (0, 20, 10, 8))
+        pygame.draw.rect(self.image, color, (26, 20, 10, 8))
+        self.rect   = self.image.get_rect(topleft=(60 + col * 60, 60 + row * 56))
+        self.health = 1
+        self.mask   = pygame.mask.from_surface(self.image)
+
+
+class Player(pygame.sprite.Sprite):
+    def __init__(self):
+        super().__init__()
+        self.image = pygame.Surface((50, 30), pygame.SRCALPHA)
+        pygame.draw.polygon(self.image, (80, 200, 255), [
+            (25, 0), (0, 30), (50, 30)
+        ])
+        self.rect   = self.image.get_rect(midbottom=(300, 680))
+        self.mask   = pygame.mask.from_surface(self.image)
+        self.speed  = 5
+        self.health = 3
+        self.cooldown = 0
+
+    def update(self, dt=16):
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_LEFT]  and self.rect.left  > 0:   self.rect.x -= self.speed
+        if keys[pygame.K_RIGHT] and self.rect.right < 600:  self.rect.x += self.speed
+        if self.cooldown > 0:
+            self.cooldown -= dt
+
+    def shoot(self):
+        if self.cooldown <= 0:
+            self.cooldown = 300
+            return Bullet(self.rect.centerx, self.rect.top)
+        return None
+
+
+# ── Setup ─────────────────────────────────────────────────────
+all_sprites   = pygame.sprite.Group()
+enemy_group   = pygame.sprite.Group()
+bullet_group  = pygame.sprite.Group()
+p_bullet_group = pygame.sprite.Group()
+
+player = Player()
+all_sprites.add(player)
+
+for row in range(3):
+    for col in range(8):
+        e = Enemy(col, row)
+        all_sprites.add(e)
+        enemy_group.add(e)
+
+enemy_dir     = 1    # 1=right, -1=left
+enemy_speed   = 1.5
+enemy_drop    = 20
+enemy_move_timer = 0
+score         = 0
+
+# ── Game Loop ─────────────────────────────────────────────────
+running = True
+while running:
+    dt = clock.tick(60)
+
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                running = False
+            if event.key == pygame.K_SPACE:
+                b = player.shoot()
+                if b:
+                    all_sprites.add(b)
+                    p_bullet_group.add(b)
+
+    # Move enemies side-to-side
+    enemy_move_timer += dt
+    if enemy_move_timer >= 600:
+        enemy_move_timer = 0
+        for e in enemy_group:
+            e.rect.x += enemy_dir * enemy_speed * 20
+
+        # Check wall hit
+        hit_wall = any(
+            (e.rect.right >= 595 and enemy_dir == 1) or
+            (e.rect.left  <=   5 and enemy_dir == -1)
+            for e in enemy_group
+        )
+        if hit_wall:
+            enemy_dir *= -1
+            for e in enemy_group:
+                e.rect.y += enemy_drop
+
+    # Random enemy shooting
+    if enemy_group and random.random() < 0.01:
+        shooter = random.choice(list(enemy_group.sprites()))
+        eb = Bullet(shooter.rect.centerx, shooter.rect.bottom, dy=6, color=(255, 80, 80))
+        all_sprites.add(eb)
+        bullet_group.add(eb)
+
+    # Collisions: player bullets vs enemies
+    hits = pygame.sprite.groupcollide(
+        enemy_group, p_bullet_group,
+        dokilla=True, dokillb=True,
+        collided=pygame.sprite.collide_mask,
+    )
+    score += len(hits) * 100
+
+    # Collisions: enemy bullets vs player
+    if pygame.sprite.spritecollide(player, bullet_group, dokill=True,
+                                   collided=pygame.sprite.collide_mask):
+        player.health -= 1
+        if player.health <= 0:
+            running = False
+
+    all_sprites.update(dt)
+
+    # Draw
+    SCREEN.fill((10, 10, 25))
+
+    all_sprites.draw(SCREEN)
+
+    score_surf  = font.render(f"Score: {score}",           True, (255, 255, 255))
+    health_surf = font.render(f"Lives: {'♥ ' * player.health}", True, (220, 80, 80))
+    SCREEN.blit(score_surf,  (10, 10))
+    SCREEN.blit(health_surf, (10, 40))
+
+    if not enemy_group:
+        win = font.render("YOU WIN! — press ESC", True, (100, 255, 100))
+        SCREEN.blit(win, win.get_rect(center=(300, 350)))
+
+    pygame.display.flip()
+
+pygame.quit()
+sys.exit()
+```

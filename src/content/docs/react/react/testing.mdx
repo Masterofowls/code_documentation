@@ -1,0 +1,558 @@
+---
+title: Testing React Applications
+description: Test React components with confidence using Vitest, React Testing Library, renderHook, MSW for API mocking, jest-axe for accessibility, and snapshot testing strategies.
+sidebar:
+  order: 9
+tags: [react, javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Effective React testing focuses on **user behaviour**, not implementation details. This guide covers the full testing stack: Vitest for the test runner, React Testing Library (RTL) for component testing, MSW for API mocking, and jest-axe for accessibility.
+
+:::tip[Testing Library Philosophy]
+> "The more your tests resemble the way your software is used, the more confidence they can give you."
+> — Kent C. Dodds
+
+Test what the user sees and can do — not component internals like state values or method calls.
+:::
+
+## Setup
+
+```bash
+npm install --save-dev vitest @testing-library/react @testing-library/user-event
+npm install --save-dev @testing-library/jest-dom jsdom
+npm install --save-dev msw jest-axe @types/jest-axe
+```
+
+```tsx
+// vite.config.ts
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [react()],
+  test: {
+    globals:     true,
+    environment: 'jsdom',
+    setupFiles:  './src/test/setup.ts',
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html'],
+      thresholds: { lines: 80 },
+    },
+  },
+});
+```
+
+```tsx
+// src/test/setup.ts
+import '@testing-library/jest-dom';
+import { cleanup } from '@testing-library/react';
+import { afterEach, beforeAll, afterAll } from 'vitest';
+import { server } from './mswServer';
+
+// Start MSW before all tests, reset handlers between tests, close after all tests
+beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
+afterEach(() => { cleanup(); server.resetHandlers(); });
+afterAll(() => server.close());
+```
+
+## Core Concepts: render, screen, userEvent
+
+```tsx
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { describe, it, expect, vi } from 'vitest';
+import { Button } from './Button';
+
+describe('Button', () => {
+  it('should render with the provided label', () => {
+    render(<Button>Click me</Button>);
+    expect(screen.getByRole('button', { name: 'Click me' })).toBeInTheDocument();
+  });
+
+  it('should call onClick when clicked', async () => {
+    const handleClick = vi.fn();
+    const user = userEvent.setup();
+
+    render(<Button onClick={handleClick}>Submit</Button>);
+    await user.click(screen.getByRole('button', { name: 'Submit' }));
+
+    expect(handleClick).toHaveBeenCalledOnce();
+  });
+
+  it('should be disabled when disabled prop is true', () => {
+    render(<Button disabled>Submit</Button>);
+    expect(screen.getByRole('button', { name: 'Submit' })).toBeDisabled();
+  });
+
+  it('should show loading spinner when loading is true', () => {
+    render(<Button loading>Submit</Button>);
+    expect(screen.getByRole('button')).toBeDisabled();
+    expect(screen.getByLabelText('Loading')).toBeInTheDocument();
+  });
+});
+```
+
+## Queries
+
+RTL provides three query variants for each selector:
+
+| Variant | When element doesn't exist | Async? |
+|---|---|---|
+| `getBy*` | Throws immediately | No |
+| `queryBy*` | Returns `null` | No |
+| `findBy*` | Waits (returns Promise) | Yes |
+
+### Query Priority (highest to lowest)
+
+```tsx
+// 1. ✅ Role + accessible name (best — mirrors screen reader experience)
+screen.getByRole('button', { name: 'Submit form' });
+screen.getByRole('heading', { name: 'Dashboard', level: 1 });
+screen.getByRole('textbox', { name: 'Email address' });
+screen.getByRole('checkbox', { name: 'Remember me' });
+
+// 2. ✅ Label (accessible)
+screen.getByLabelText('Email address');
+
+// 3. ✅ Placeholder (for inputs without labels)
+screen.getByPlaceholderText('Search products…');
+
+// 4. ✅ Text content
+screen.getByText('Welcome back, Alice!');
+screen.getByText(/loading/i); // regex — case insensitive
+
+// 5. ✅ Display value (select, textarea current value)
+screen.getByDisplayValue('Option A');
+
+// 6. ⚠️ Alt text (images only)
+screen.getByAltText('Company logo');
+
+// 7. ⚠️ Title attribute
+screen.getByTitle('Close modal');
+
+// 8. ❌ Last resort — use data-testid
+screen.getByTestId('user-avatar');
+```
+
+:::caution[Avoid getByTestId]
+`data-testid` attributes are only for testing — they add noise to your HTML and don't reflect real user behaviour. Prefer role/label queries which also validate accessibility.
+:::
+
+## Testing User Interactions
+
+Always use `userEvent` over `fireEvent` for interactions — it simulates real browser behaviour including keyboard events, focus, and pointer events:
+
+```tsx
+import userEvent from '@testing-library/user-event';
+import { render, screen } from '@testing-library/react';
+import { SearchBox } from './SearchBox';
+
+describe('SearchBox', () => {
+  it('should filter results as user types', async () => {
+    const user = userEvent.setup();
+
+    render(
+      <SearchBox
+        items={['Apple', 'Banana', 'Cherry', 'Apricot']}
+      />
+    );
+
+    const input = screen.getByRole('searchbox', { name: 'Search items' });
+
+    // Type into the input
+    await user.type(input, 'ap');
+
+    // Should show only matching results
+    expect(screen.getByText('Apple')).toBeInTheDocument();
+    expect(screen.getByText('Apricot')).toBeInTheDocument();
+    expect(screen.queryByText('Banana')).not.toBeInTheDocument();
+    expect(screen.queryByText('Cherry')).not.toBeInTheDocument();
+  });
+
+  it('should clear the search when Escape is pressed', async () => {
+    const user = userEvent.setup();
+    render(<SearchBox items={['Apple', 'Banana']} />);
+
+    const input = screen.getByRole('searchbox');
+    await user.type(input, 'app');
+    await user.keyboard('{Escape}');
+
+    expect(input).toHaveValue('');
+    expect(screen.getByText('Apple')).toBeInTheDocument();
+    expect(screen.getByText('Banana')).toBeInTheDocument();
+  });
+
+  it('should submit on Enter', async () => {
+    const onSearch = vi.fn();
+    const user = userEvent.setup();
+    render(<SearchBox items={[]} onSearch={onSearch} />);
+
+    await user.type(screen.getByRole('searchbox'), 'react{Enter}');
+    expect(onSearch).toHaveBeenCalledWith('react');
+  });
+});
+```
+
+## Testing Async Components
+
+```tsx
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { UserProfile } from './UserProfile';
+
+describe('UserProfile', () => {
+  it('should display loading state initially', () => {
+    render(<UserProfile userId="1" />);
+    expect(screen.getByRole('status', { name: 'Loading' })).toBeInTheDocument();
+  });
+
+  it('should display user data after loading', async () => {
+    render(<UserProfile userId="1" />);
+
+    // findBy* waits up to 1000ms for element to appear
+    const name = await screen.findByRole('heading', { name: 'Alice Smith' });
+    expect(name).toBeInTheDocument();
+    expect(screen.getByText('alice@example.com')).toBeInTheDocument();
+  });
+
+  it('should display error message on fetch failure', async () => {
+    // Override MSW handler for this specific test
+    server.use(
+      http.get('/api/users/:id', () =>
+        HttpResponse.json({ error: 'Not found' }, { status: 404 })
+      )
+    );
+
+    render(<UserProfile userId="999" />);
+
+    await screen.findByRole('alert');
+    expect(screen.getByText(/not found/i)).toBeInTheDocument();
+  });
+
+  it('should use waitFor for complex assertions', async () => {
+    const user = userEvent.setup();
+    render(<UserProfile userId="1" />);
+
+    await screen.findByText('Alice Smith');
+
+    await user.click(screen.getByRole('button', { name: 'Edit profile' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('dialog', { name: 'Edit profile' })).toBeInTheDocument();
+    });
+  });
+});
+```
+
+## Testing Hooks
+
+Use `renderHook` to test custom hooks in isolation:
+
+```tsx
+import { renderHook, act } from '@testing-library/react';
+import { describe, it, expect } from 'vitest';
+import { useCounter } from './useCounter';
+import { useLocalStorage } from './useLocalStorage';
+
+describe('useCounter', () => {
+  it('should initialise with the provided value', () => {
+    const { result } = renderHook(() => useCounter(5));
+    expect(result.current.count).toBe(5);
+  });
+
+  it('should increment the count', () => {
+    const { result } = renderHook(() => useCounter(0));
+
+    act(() => {
+      result.current.increment();
+    });
+
+    expect(result.current.count).toBe(1);
+  });
+
+  it('should not go below min value', () => {
+    const { result } = renderHook(() => useCounter(0, { min: 0 }));
+
+    act(() => {
+      result.current.decrement();
+    });
+
+    expect(result.current.count).toBe(0); // clamped at min
+  });
+
+  it('should reset to initial value', () => {
+    const { result } = renderHook(() => useCounter(10));
+
+    act(() => { result.current.increment(); });
+    act(() => { result.current.increment(); });
+    act(() => { result.current.reset(); });
+
+    expect(result.current.count).toBe(10);
+  });
+});
+
+describe('useLocalStorage', () => {
+  it('should return initial value when key does not exist', () => {
+    const { result } = renderHook(() =>
+      useLocalStorage('test-key', 'default')
+    );
+    expect(result.current[0]).toBe('default');
+  });
+
+  it('should persist value to localStorage', () => {
+    const { result } = renderHook(() =>
+      useLocalStorage('test-key', '')
+    );
+
+    act(() => { result.current[1]('hello'); });
+
+    expect(result.current[0]).toBe('hello');
+    expect(localStorage.getItem('test-key')).toBe('"hello"');
+  });
+});
+```
+
+## Mocking Modules
+
+```tsx
+import { vi, describe, it, expect, beforeEach } from 'vitest';
+
+// Mock an entire module
+vi.mock('../services/authService', () => ({
+  login:  vi.fn(),
+  logout: vi.fn(),
+  getMe:  vi.fn(),
+}));
+
+// Mock with factory
+vi.mock('react-router-dom', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-router-dom')>();
+  return {
+    ...actual,
+    useNavigate: () => vi.fn(),
+    useParams:   () => ({ userId: 'test-user-id' }),
+  };
+});
+
+// Import the mocked module
+import { login } from '../services/authService';
+
+describe('LoginForm', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('should call login with credentials on submit', async () => {
+    vi.mocked(login).mockResolvedValue({ id: '1', name: 'Alice', role: 'user' });
+    const user = userEvent.setup();
+
+    render(<LoginForm />);
+    await user.type(screen.getByLabelText('Email'), 'alice@example.com');
+    await user.type(screen.getByLabelText('Password'), 'password123');
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+
+    expect(login).toHaveBeenCalledWith({
+      email:    'alice@example.com',
+      password: 'password123',
+    });
+  });
+});
+```
+
+## Testing Context
+
+```tsx
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { ThemeProvider } from '../context/ThemeContext';
+import { ThemeToggle } from './ThemeToggle';
+
+// Helper: render with providers
+function renderWithTheme(ui: React.ReactElement) {
+  return render(
+    <ThemeProvider>
+      {ui}
+    </ThemeProvider>
+  );
+}
+
+describe('ThemeToggle', () => {
+  it('should show current theme', () => {
+    renderWithTheme(<ThemeToggle />);
+    expect(screen.getByRole('button')).toHaveTextContent(/light/i);
+  });
+
+  it('should toggle to dark theme on click', async () => {
+    const user = userEvent.setup();
+    renderWithTheme(<ThemeToggle />);
+
+    await user.click(screen.getByRole('button'));
+    expect(screen.getByRole('button')).toHaveTextContent(/dark/i);
+  });
+});
+```
+
+## MSW for API Mocking
+
+Mock Service Worker intercepts real `fetch` calls — no need to mock `fetch` or `axios` directly:
+
+```bash
+npm install --save-dev msw
+```
+
+```tsx
+// src/test/handlers.ts
+import { http, HttpResponse } from 'msw';
+
+export const handlers = [
+  http.get('/api/users', () => {
+    return HttpResponse.json([
+      { id: '1', name: 'Alice Smith', email: 'alice@example.com', role: 'admin' },
+      { id: '2', name: 'Bob Jones',  email: 'bob@example.com',   role: 'user' },
+    ]);
+  }),
+
+  http.get('/api/users/:id', ({ params }) => {
+    const { id } = params as { id: string };
+    if (id === '999') {
+      return HttpResponse.json({ error: 'User not found' }, { status: 404 });
+    }
+    return HttpResponse.json({ id, name: 'Alice Smith', email: 'alice@example.com' });
+  }),
+
+  http.post('/api/users', async ({ request }) => {
+    const body = await request.json() as { name: string; email: string };
+    return HttpResponse.json({ id: '3', ...body }, { status: 201 });
+  }),
+
+  http.delete('/api/users/:id', () => {
+    return new HttpResponse(null, { status: 204 });
+  }),
+];
+```
+
+```tsx
+// src/test/mswServer.ts
+import { setupServer } from 'msw/node';
+import { handlers } from './handlers';
+
+export const server = setupServer(...handlers);
+```
+
+```tsx
+// Using MSW in tests
+describe('UserList', () => {
+  it('should render fetched users', async () => {
+    render(<UserList />);
+
+    expect(await screen.findByText('Alice Smith')).toBeInTheDocument();
+    expect(screen.getByText('Bob Jones')).toBeInTheDocument();
+  });
+
+  it('should show error on network failure', async () => {
+    server.use(
+      http.get('/api/users', () => HttpResponse.error())
+    );
+
+    render(<UserList />);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+  });
+});
+```
+
+## Accessibility Testing with jest-axe
+
+```tsx
+import { render } from '@testing-library/react';
+import { axe, toHaveNoViolations } from 'jest-axe';
+import { expect } from 'vitest';
+import { LoginForm } from './LoginForm';
+
+expect.extend(toHaveNoViolations);
+
+describe('LoginForm accessibility', () => {
+  it('should have no accessibility violations', async () => {
+    const { container } = render(<LoginForm />);
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
+  });
+});
+```
+
+## Snapshot Testing
+
+Use snapshots sparingly — only for stable, intentional output:
+
+```tsx
+import { render } from '@testing-library/react';
+import { describe, it, expect } from 'vitest';
+import { Badge } from './Badge';
+
+describe('Badge snapshot', () => {
+  it('should match snapshot for each variant', () => {
+    const { asFragment: primary }   = render(<Badge variant="primary">New</Badge>);
+    const { asFragment: secondary } = render(<Badge variant="secondary">Beta</Badge>);
+    const { asFragment: danger }    = render(<Badge variant="danger">Error</Badge>);
+
+    expect(primary()).toMatchSnapshot();
+    expect(secondary()).toMatchSnapshot();
+    expect(danger()).toMatchSnapshot();
+  });
+});
+```
+
+:::caution[Avoid Overusing Snapshots]
+Snapshots that cover large component trees become a maintenance burden — every UI change requires updating them. Use snapshots for small, stable components only. Prefer explicit assertions (`toHaveTextContent`, `toHaveClass`) for component behaviour.
+:::
+
+## Testing Forms
+
+```tsx
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { RegisterForm } from './RegisterForm';
+
+describe('RegisterForm', () => {
+  const validData = {
+    username:        'alice',
+    email:           'alice@example.com',
+    password:        'SecurePass1',
+    confirmPassword: 'SecurePass1',
+  };
+
+  async function fillAndSubmit(data: Partial<typeof validData>) {
+    const user = userEvent.setup();
+    const merged = { ...validData, ...data };
+
+    await user.type(screen.getByLabelText('Username'), merged.username);
+    await user.type(screen.getByLabelText('Email'),    merged.email);
+    await user.type(screen.getByLabelText('Password'), merged.password);
+    await user.type(screen.getByLabelText('Confirm Password'), merged.confirmPassword);
+    await user.click(screen.getByRole('checkbox', { name: /terms/i }));
+    await user.click(screen.getByRole('button', { name: /create account/i }));
+  }
+
+  it('should submit valid form data', async () => {
+    render(<RegisterForm />);
+    await fillAndSubmit({});
+    await waitFor(() =>
+      expect(screen.getByText(/account created/i)).toBeInTheDocument()
+    );
+  });
+
+  it('should show validation errors for invalid email', async () => {
+    render(<RegisterForm />);
+    await fillAndSubmit({ email: 'not-an-email' });
+    expect(await screen.findByText(/valid email/i)).toBeInTheDocument();
+  });
+
+  it('should show error when passwords do not match', async () => {
+    render(<RegisterForm />);
+    await fillAndSubmit({ confirmPassword: 'DifferentPass1' });
+    expect(await screen.findByText(/passwords do not match/i)).toBeInTheDocument();
+  });
+});
+```

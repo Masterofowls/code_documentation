@@ -1,0 +1,541 @@
+---
+title: Decorators
+description: TypeScript decorators — class, method, property, parameter, and accessor decorators. TC39 vs experimental decorators, reflect-metadata, and real-world patterns.
+sidebar:
+  order: 8
+tags: [typescript, javascript]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+## Decorator Proposal Stages
+
+TypeScript supports two flavours of decorators, reflecting the evolution of the TC39 proposal:
+
+| Feature | Experimental Decorators | TC39 Stage 3 (Modern) |
+|---|---|---|
+| **TS version** | ≥ 1.5 | ≥ 5.0 |
+| **tsconfig flag** | `experimentalDecorators: true` | Default (no flag needed) |
+| **Stage** | Pre-standard (legacy) | TC39 Stage 3 (2023) |
+| **reflect-metadata** | Supported | Not needed |
+| **Decorator context** | Limited | Rich `context` object |
+| **Used by** | Angular, NestJS (legacy) | New TC39-aligned frameworks |
+
+:::caution[Two Incompatible Systems]
+Experimental decorators and TC39 decorators are **not compatible**. NestJS and Angular still use `experimentalDecorators: true`. For new projects, prefer the TC39 standard decorators unless your framework requires the legacy version.
+:::
+
+---
+
+## Enabling Decorators
+
+<Tabs>
+  <TabItem label="TC39 Standard (TS 5+)">
+```ts
+// tsconfig.json — no extra flags needed for TC39 decorators
+{
+  "compilerOptions": {
+    "target": "ES2022"
+    // TC39 decorators work by default in TS 5+
+  }
+}
+```
+  </TabItem>
+  <TabItem label="Experimental (Legacy)">
+```ts
+// tsconfig.json
+{
+  "compilerOptions": {
+    "target": "ES2015",
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true  // required for reflect-metadata
+  }
+}
+```
+  </TabItem>
+</Tabs>
+
+---
+
+## TC39 Standard Decorators (TypeScript 5+)
+
+### Class Decorators
+
+A class decorator receives the class and a `context` object. It can return a new class to replace the original, or `undefined` to leave it unchanged:
+
+```ts
+// Decorator type signature (TC39 Stage 3)
+type ClassDecorator = (
+  target: Function,
+  context: ClassDecoratorContext
+) => Function | void;
+
+// Simple class decorator — adds metadata
+function sealed(target: Function, context: ClassDecoratorContext): void {
+  Object.seal(target);
+  Object.seal(target.prototype);
+}
+
+function singleton<T extends new (...args: unknown[]) => object>(
+  target: T,
+  context: ClassDecoratorContext
+): T {
+  let instance: InstanceType<T> | undefined;
+
+  const SingletonClass = function(...args: unknown[]) {
+    if (!instance) {
+      instance = new target(...args) as InstanceType<T>;
+    }
+    return instance;
+  } as unknown as T;
+
+  // Preserve prototype chain
+  Object.setPrototypeOf(SingletonClass, target);
+  SingletonClass.prototype = target.prototype;
+  return SingletonClass;
+}
+
+@singleton
+@sealed
+class DatabaseConnection {
+  constructor(private url: string) {
+    console.log(`Connecting to ${url}`);
+  }
+
+  query(sql: string): Promise<unknown[]> {
+    return Promise.resolve([]);
+  }
+}
+
+const db1 = new DatabaseConnection('postgres://localhost/mydb');
+const db2 = new DatabaseConnection('postgres://localhost/mydb');
+console.log(db1 === db2); // true — singleton
+```
+
+### Method Decorators
+
+```ts
+type MethodDecorator = (
+  target: Function,
+  context: ClassMethodDecoratorContext
+) => Function | void;
+
+// Memoize decorator — caches method results
+function memoize<This, Args extends unknown[], Return>(
+  target: (this: This, ...args: Args) => Return,
+  context: ClassMethodDecoratorContext<This, (this: This, ...args: Args) => Return>
+) {
+  const cache = new Map<string, Return>();
+
+  function memoized(this: This, ...args: Args): Return {
+    const key = JSON.stringify(args);
+    if (cache.has(key)) {
+      return cache.get(key) as Return;
+    }
+    const result = target.apply(this, args);
+    cache.set(key, result);
+    return result;
+  }
+
+  return memoized;
+}
+
+// Log decorator — logs entry/exit and timing
+function log<This, Args extends unknown[], Return>(
+  target: (this: This, ...args: Args) => Return,
+  context: ClassMethodDecoratorContext<This, (this: This, ...args: Args) => Return>
+) {
+  const methodName = String(context.name);
+
+  function logged(this: This, ...args: Args): Return {
+    const start = performance.now();
+    console.log(`→ ${methodName}(${args.map(a => JSON.stringify(a)).join(', ')})`);
+    try {
+      const result = target.apply(this, args);
+      const duration = (performance.now() - start).toFixed(2);
+      console.log(`← ${methodName} [${duration}ms]:`, result);
+      return result;
+    } catch (error) {
+      console.error(`✗ ${methodName} threw:`, error);
+      throw error;
+    }
+  }
+
+  return logged;
+}
+
+class Calculator {
+  @memoize
+  @log
+  fibonacci(n: number): number {
+    if (n <= 1) return n;
+    return this.fibonacci(n - 1) + this.fibonacci(n - 2);
+  }
+
+  @log
+  add(a: number, b: number): number {
+    return a + b;
+  }
+}
+
+const calc = new Calculator();
+console.log(calc.fibonacci(10)); // 55 (memoized subsequent calls)
+console.log(calc.add(3, 4));    // 7
+```
+
+### Accessor Decorators
+
+```ts
+function clamp(min: number, max: number) {
+  return function<This>(
+    target: ClassAccessorDecoratorTarget<This, number>,
+    context: ClassAccessorDecoratorContext<This, number>
+  ): ClassAccessorDecoratorResult<This, number> {
+    return {
+      get(this: This): number {
+        return target.get.call(this);
+      },
+      set(this: This, value: number): void {
+        const clamped = Math.min(Math.max(value, min), max);
+        target.set.call(this, clamped);
+      },
+    };
+  };
+}
+
+class Slider {
+  @clamp(0, 100)
+  accessor value: number = 50;
+}
+
+const slider = new Slider();
+slider.value = 150; // clamped to 100
+console.log(slider.value); // 100
+slider.value = -10;  // clamped to 0
+console.log(slider.value); // 0
+```
+
+### Field Decorators
+
+```ts
+function required<This, Value>(
+  target: undefined,
+  context: ClassFieldDecoratorContext<This, Value>
+) {
+  return function(this: This, value: Value): Value {
+    if (value === undefined || value === null || value === '') {
+      throw new TypeError(`Field "${String(context.name)}" is required`);
+    }
+    return value;
+  };
+}
+
+function defaultValue<This, Value>(fallback: Value) {
+  return function(target: undefined, context: ClassFieldDecoratorContext<This, Value>) {
+    return function(this: This, value: Value): Value {
+      return value === undefined ? fallback : value;
+    };
+  };
+}
+
+class UserProfile {
+  @required
+  name!: string;
+
+  @required
+  email!: string;
+
+  @defaultValue('user')
+  role!: string;
+
+  @defaultValue(0)
+  loginCount!: number;
+}
+```
+
+---
+
+## Experimental Decorators (Legacy — NestJS/Angular)
+
+:::tip[When to use Experimental Decorators]
+Use `experimentalDecorators: true` when working with **NestJS**, **Angular**, **TypeORM**, **class-validator**, or **inversify** — these frameworks were built before the TC39 standard and rely on `emitDecoratorMetadata` and `reflect-metadata`.
+:::
+
+### Class Decorator (Experimental)
+
+```ts
+// tsconfig: "experimentalDecorators": true, "emitDecoratorMetadata": true
+import 'reflect-metadata';
+
+// Decorator factory (returns the actual decorator)
+function Controller(path: string) {
+  return function (target: Function): void {
+    Reflect.defineMetadata('controller:path', path, target);
+  };
+}
+
+function Injectable() {
+  return function (target: Function): void {
+    Reflect.defineMetadata('injectable', true, target);
+  };
+}
+
+@Controller('/users')
+@Injectable()
+class UserController {
+  constructor(private userService: UserService) {}
+
+  async getUser(id: string) {
+    return this.userService.findById(id);
+  }
+}
+
+// Reading metadata at runtime
+const path = Reflect.getMetadata('controller:path', UserController);
+console.log(path); // '/users'
+```
+
+### Method Decorator (Experimental)
+
+```ts
+// Route decorator for method-level HTTP registration
+function Get(path: string = '') {
+  return function (
+    target: object,
+    propertyKey: string,
+    descriptor: PropertyDescriptor
+  ): PropertyDescriptor {
+    Reflect.defineMetadata('method', 'GET', target, propertyKey);
+    Reflect.defineMetadata('path', path, target, propertyKey);
+    return descriptor;
+  };
+}
+
+function Post(path: string = '') {
+  return function (
+    target: object,
+    propertyKey: string,
+    descriptor: PropertyDescriptor
+  ): PropertyDescriptor {
+    Reflect.defineMetadata('method', 'POST', target, propertyKey);
+    Reflect.defineMetadata('path', path, target, propertyKey);
+    return descriptor;
+  };
+}
+
+// Validation decorator
+function Validate(schema: { parse: (data: unknown) => unknown }) {
+  return function (
+    target: object,
+    propertyKey: string,
+    descriptor: PropertyDescriptor
+  ): PropertyDescriptor {
+    const originalMethod = descriptor.value as (...args: unknown[]) => unknown;
+
+    descriptor.value = function(...args: unknown[]) {
+      const parsed = schema.parse(args[0]); // validate first arg
+      return originalMethod.apply(this, [parsed, ...args.slice(1)]);
+    };
+
+    return descriptor;
+  };
+}
+
+@Controller('/users')
+class UserController {
+  @Get('/:id')
+  async findOne(id: string) {
+    return { id, name: 'Alice' };
+  }
+
+  @Post('/')
+  @Validate({ parse: (d) => d }) // simplified — use Zod in practice
+  async create(body: unknown) {
+    return body;
+  }
+}
+```
+
+### Property Decorator (Experimental)
+
+```ts
+// Column decorator for an ORM
+function Column(options: { type: string; nullable?: boolean } = { type: 'varchar' }) {
+  return function (target: object, propertyKey: string): void {
+    const columns: Record<string, unknown>[] =
+      Reflect.getMetadata('columns', target) ?? [];
+    columns.push({ name: propertyKey, ...options });
+    Reflect.defineMetadata('columns', columns, target);
+  };
+}
+
+function PrimaryKey() {
+  return function (target: object, propertyKey: string): void {
+    Reflect.defineMetadata('primaryKey', propertyKey, target);
+  };
+}
+
+class UserEntity {
+  @PrimaryKey()
+  @Column({ type: 'int' })
+  id!: number;
+
+  @Column({ type: 'varchar' })
+  name!: string;
+
+  @Column({ type: 'varchar', nullable: true })
+  bio?: string;
+}
+
+const columns = Reflect.getMetadata('columns', UserEntity.prototype);
+console.log(columns);
+// [{ name: 'id', type: 'int' }, { name: 'name', type: 'varchar' }, { name: 'bio', type: 'varchar', nullable: true }]
+```
+
+### Parameter Decorator (Experimental)
+
+```ts
+const INJECT_METADATA_KEY = 'design:paramtypes';
+
+function Inject(token: symbol | string) {
+  return function (
+    target: object,
+    propertyKey: string | symbol | undefined,
+    parameterIndex: number
+  ): void {
+    const existingInjections: Array<{ index: number; token: symbol | string }> =
+      Reflect.getMetadata('injections', target) ?? [];
+
+    existingInjections.push({ index: parameterIndex, token });
+    Reflect.defineMetadata('injections', existingInjections, target);
+  };
+}
+
+const DB_TOKEN = Symbol('Database');
+const LOGGER_TOKEN = Symbol('Logger');
+
+@Injectable()
+class OrderService {
+  constructor(
+    @Inject(DB_TOKEN) private db: DatabaseConnection,
+    @Inject(LOGGER_TOKEN) private logger: Logger
+  ) {}
+}
+```
+
+---
+
+## Decorator Factories and Composition
+
+```ts
+// Decorator factory: a function that returns a decorator
+function throttle(limitMs: number) {
+  return function <This, Args extends unknown[], Return>(
+    target: (this: This, ...args: Args) => Return,
+    context: ClassMethodDecoratorContext<This, (this: This, ...args: Args) => Return>
+  ) {
+    let lastCall = 0;
+
+    return function throttled(this: This, ...args: Args): Return | undefined {
+      const now = Date.now();
+      if (now - lastCall >= limitMs) {
+        lastCall = now;
+        return target.apply(this, args);
+      }
+      return undefined;
+    };
+  };
+}
+
+// Decorator composition — applied bottom-up, run outer-to-inner
+class SearchWidget {
+  @throttle(300)   // applied second (outer)
+  @log             // applied first (inner)
+  search(query: string): void {
+    console.log(`Searching: ${query}`);
+  }
+}
+
+// Execution order:
+// 1. @log decorator evaluates
+// 2. @throttle(300) decorator evaluates
+// At call time: throttle runs first, then log
+```
+
+---
+
+## Real-World Patterns: NestJS
+
+```ts
+// NestJS uses experimental decorators extensively
+import { Controller, Get, Post, Body, Param, Injectable } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+
+@Injectable()
+export class UsersService {
+  constructor(
+    @InjectRepository(User)
+    private readonly userRepository: Repository<User>
+  ) {}
+
+  async findAll(): Promise<User[]> {
+    return this.userRepository.find();
+  }
+
+  async findOne(id: number): Promise<User | null> {
+    return this.userRepository.findOneBy({ id });
+  }
+}
+
+@Controller('users')
+export class UsersController {
+  constructor(private readonly usersService: UsersService) {}
+
+  @Get()
+  findAll() {
+    return this.usersService.findAll();
+  }
+
+  @Get(':id')
+  findOne(@Param('id') id: string) {
+    return this.usersService.findOne(+id);
+  }
+
+  @Post()
+  create(@Body() createUserDto: CreateUserDto) {
+    // @Body() uses parameter decorators + reflect-metadata
+    // to deserialise and validate the request body
+  }
+}
+```
+
+### `reflect-metadata` Explained
+
+```ts
+// reflect-metadata polyfills the Reflect object with metadata API
+import 'reflect-metadata';
+
+class Service {}
+class Logger {}
+
+// emitDecoratorMetadata automatically emits type metadata:
+class MyClass {
+  constructor(
+    private service: Service,
+    private logger: Logger
+  ) {}
+}
+
+// TypeScript emits:
+// Reflect.defineMetadata("design:paramtypes", [Service, Logger], MyClass);
+
+// DI frameworks read this metadata to auto-resolve dependencies:
+const paramTypes = Reflect.getMetadata('design:paramtypes', MyClass);
+// [Service, Logger]
+// Framework then instantiates each and injects them
+```
+
+:::tip[Reflect Metadata in TS 5+]
+TypeScript 5.2 introduces native decorator metadata via the `Symbol.metadata` property — a standard way to attach metadata without the `reflect-metadata` polyfill. Framework support is rolling out gradually.
+:::

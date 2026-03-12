@@ -1,0 +1,507 @@
+---
+title: Training Neural Networks
+description: Complete PyTorch training loops — optimizers, loss functions, learning rate schedulers, mixed precision, checkpointing, and TensorBoard logging.
+sidebar:
+  order: 6
+tags: [python, ml]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+A well-structured training loop is the backbone of every PyTorch project. This guide covers the full stack: DataLoader integration, optimizers, loss functions, schedulers, mixed precision, and production-grade checkpointing.
+
+## The Training Loop Anatomy
+
+Every PyTorch training loop follows this structure:
+
+```python
+for epoch in range(num_epochs):
+    # ── Training phase ────────────────────────────────────────────────────────
+    model.train()
+    for batch_x, batch_y in train_loader:
+        optimizer.zero_grad()          # 1. clear stale gradients
+        predictions = model(batch_x)   # 2. forward pass
+        loss = criterion(predictions, batch_y)  # 3. compute loss
+        loss.backward()                # 4. backprop
+        optimizer.step()               # 5. update weights
+
+    # ── Validation phase ──────────────────────────────────────────────────────
+    model.eval()
+    with torch.no_grad():
+        for batch_x, batch_y in val_loader:
+            val_pred = model(batch_x)
+            val_loss = criterion(val_pred, batch_y)
+```
+
+## Loss Functions
+
+<Tabs>
+  <TabItem label="Classification">
+```python
+import torch
+import torch.nn as nn
+
+# ── CrossEntropyLoss: multi-class classification ──────────────────────────────
+# Expects raw logits (no softmax), integer class labels
+criterion = nn.CrossEntropyLoss()
+logits = torch.randn(32, 10)          # (batch, num_classes)
+labels = torch.randint(0, 10, (32,))  # (batch,) integer labels
+loss = criterion(logits, labels)
+print(loss.item())   # e.g., 2.3026  (≈ log(10) for random logits)
+
+# With class weights (for imbalanced datasets)
+weights = torch.tensor([1.0, 2.0, 1.5, 1.0, 3.0,
+                         1.0, 1.0, 2.0, 1.0, 1.5])
+criterion_w = nn.CrossEntropyLoss(weight=weights)
+
+# ── BCEWithLogitsLoss: binary or multi-label classification ───────────────────
+# More numerically stable than Sigmoid + BCELoss
+bce = nn.BCEWithLogitsLoss()
+logits2 = torch.randn(32, 5)           # (batch, num_binary_labels)
+targets  = torch.randint(0, 2, (32, 5)).float()
+loss2 = bce(logits2, targets)
+
+# ── NLLLoss: use with log_softmax output ──────────────────────────────────────
+nll = nn.NLLLoss()
+log_probs = torch.log_softmax(torch.randn(16, 10), dim=1)
+labels3   = torch.randint(0, 10, (16,))
+loss3 = nll(log_probs, labels3)        # equivalent to CrossEntropyLoss
+```
+  </TabItem>
+  <TabItem label="Regression">
+```python
+import torch
+import torch.nn as nn
+
+preds  = torch.randn(64, 1)
+targets = torch.randn(64, 1)
+
+# ── MSELoss: mean squared error ───────────────────────────────────────────────
+mse = nn.MSELoss()
+print(mse(preds, targets).item())    # e.g., 1.9874
+
+# ── L1Loss: mean absolute error (more robust to outliers) ────────────────────
+l1 = nn.L1Loss()
+print(l1(preds, targets).item())
+
+# ── SmoothL1Loss (Huber): combines MSE + L1 ───────────────────────────────────
+huber = nn.SmoothL1Loss(beta=1.0)    # L2 for |x|<beta, L1 beyond
+print(huber(preds, targets).item())
+
+# ── Custom loss: RMSE ─────────────────────────────────────────────────────────
+def rmse_loss(pred, target):
+    return torch.sqrt(nn.MSELoss()(pred, target))
+
+# ── Custom loss: log-cosh ─────────────────────────────────────────────────────
+def log_cosh_loss(pred, target):
+    diff = pred - target
+    return torch.log(torch.cosh(diff)).mean()
+```
+  </TabItem>
+</Tabs>
+
+## Optimizers
+
+| Optimizer | Best for | Key hyperparameters |
+|-----------|----------|---------------------|
+| `SGD` | Vision CNNs with momentum | `lr`, `momentum=0.9`, `weight_decay` |
+| `Adam` | Transformers, NLP, general | `lr=1e-3`, `betas=(0.9,0.999)`, `eps=1e-8` |
+| `AdamW` | Transformers (decoupled decay) | `lr`, `weight_decay=0.01` |
+| `RMSprop` | RNNs, non-stationary | `lr`, `alpha=0.99` |
+| `Adagrad` | Sparse gradients | `lr=0.01` |
+| `LBFGS` | Small models, full-batch | `lr=1`, `max_iter=20` |
+
+```python
+import torch
+import torch.optim as optim
+import torch.nn as nn
+
+model = nn.Linear(128, 10)
+
+# ── SGD with momentum and weight decay ────────────────────────────────────────
+sgd = optim.SGD(
+    model.parameters(),
+    lr=0.01,
+    momentum=0.9,
+    weight_decay=1e-4,
+    nesterov=True
+)
+
+# ── Adam ──────────────────────────────────────────────────────────────────────
+adam = optim.Adam(
+    model.parameters(),
+    lr=1e-3,
+    betas=(0.9, 0.999),
+    eps=1e-8,
+    weight_decay=0
+)
+
+# ── AdamW (decoupled weight decay — recommended for Transformers) ─────────────
+adamw = optim.AdamW(
+    model.parameters(),
+    lr=1e-4,
+    weight_decay=0.01
+)
+
+# ── Per-group learning rates (e.g., fine-tuning: lower lr for backbone) ────────
+import torchvision.models as tvm
+backbone = tvm.resnet18(weights='IMAGENET1K_V1')
+backbone.fc = nn.Linear(512, 10)
+
+optimizer = optim.AdamW([
+    {'params': backbone.layer4.parameters(), 'lr': 1e-5},
+    {'params': backbone.fc.parameters(),     'lr': 1e-3},
+], weight_decay=0.01)
+```
+
+## Learning Rate Schedulers
+
+```python
+import torch
+import torch.optim as optim
+import torch.optim.lr_scheduler as lr_sched
+
+optimizer = optim.SGD([torch.zeros(1, requires_grad=True)], lr=0.1)
+
+# ── StepLR: multiply lr by gamma every step_size epochs ──────────────────────
+step = lr_sched.StepLR(optimizer, step_size=30, gamma=0.1)
+# lr: 0.1 → 0.01 (epoch 30) → 0.001 (epoch 60)
+
+# ── MultiStepLR: drop at specific milestones ──────────────────────────────────
+multi = lr_sched.MultiStepLR(optimizer, milestones=[50, 80, 95], gamma=0.1)
+
+# ── CosineAnnealingLR: cosine decay to eta_min ────────────────────────────────
+cosine = lr_sched.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
+
+# ── ReduceLROnPlateau: reduce when metric stops improving ─────────────────────
+plateau = lr_sched.ReduceLROnPlateau(
+    optimizer,
+    mode='min',        # 'min' for loss, 'max' for accuracy
+    factor=0.5,        # multiply lr by 0.5
+    patience=10,       # wait 10 epochs before reducing
+    min_lr=1e-7
+)
+
+# ── LinearWarmup + CosineDecay (common for Transformers) ─────────────────────
+def warmup_cosine_schedule(optimizer, warmup_steps, total_steps):
+    from torch.optim.lr_scheduler import LambdaLR
+    import math
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return step / max(1, warmup_steps)
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+    return LambdaLR(optimizer, lr_lambda)
+
+# ── OneCycleLR: super-convergence (great for ResNets) ─────────────────────────
+one_cycle = lr_sched.OneCycleLR(
+    optimizer,
+    max_lr=0.1,
+    steps_per_epoch=100,
+    epochs=30,
+    pct_start=0.3
+)
+```
+
+:::tip[When to Call scheduler.step()]
+- Most schedulers: call **after** `optimizer.step()` — once per epoch (StepLR, CosineAnnealingLR, MultiStepLR)
+- `ReduceLROnPlateau`: call with the validation metric — `scheduler.step(val_loss)`
+- `OneCycleLR`: call **per batch** — `scheduler.step()` inside the inner loop
+:::
+
+## Complete Training + Validation Loop
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+def train_epoch(
+    model, loader, criterion, optimizer, device, scaler=None
+):
+    model.train()
+    total_loss, total_correct, total = 0.0, 0, 0
+
+    pbar = tqdm(loader, desc='Train', leave=False)
+    for X, y in pbar:
+        X, y = X.to(device, non_blocking=True), y.to(device, non_blocking=True)
+
+        optimizer.zero_grad(set_to_none=True)   # slightly faster than zero_grad()
+
+        # Mixed precision forward pass
+        if scaler is not None:
+            with torch.autocast(device_type=device, dtype=torch.float16):
+                logits = model(X)
+                loss   = criterion(logits, y)
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            logits = model(X)
+            loss   = criterion(logits, y)
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+        batch_size     = X.size(0)
+        total_loss    += loss.item() * batch_size
+        total_correct += (logits.argmax(1) == y).sum().item()
+        total         += batch_size
+
+        pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+
+    return total_loss / total, total_correct / total
+
+
+@torch.no_grad()
+def validate(model, loader, criterion, device):
+    model.eval()
+    total_loss, total_correct, total = 0.0, 0, 0
+
+    for X, y in loader:
+        X, y = X.to(device, non_blocking=True), y.to(device, non_blocking=True)
+        with torch.autocast(device_type=device, dtype=torch.float16):
+            logits = model(X)
+            loss   = criterion(logits, y)
+
+        batch_size     = X.size(0)
+        total_loss    += loss.item() * batch_size
+        total_correct += (logits.argmax(1) == y).sum().item()
+        total         += batch_size
+
+    return total_loss / total, total_correct / total
+```
+
+## Mixed Precision Training (AMP)
+
+Automatic Mixed Precision runs forward passes in float16 for speed while keeping master weights in float32:
+
+```python
+import torch
+import torch.nn as nn
+from torch.cuda.amp import GradScaler
+
+device = 'cuda'
+model  = nn.Linear(1024, 512).to(device)
+opt    = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+# GradScaler prevents float16 underflow by scaling loss before backward
+scaler = GradScaler()
+
+for epoch in range(100):
+    x = torch.randn(256, 1024, device=device)
+    y = torch.randn(256, 512,  device=device)
+
+    opt.zero_grad(set_to_none=True)
+
+    # torch.autocast uses float16 for matmuls/convs, float32 for reductions
+    with torch.autocast(device_type='cuda', dtype=torch.float16):
+        out  = model(x)                    # forward in float16
+        loss = nn.MSELoss()(out, y)        # loss in float32
+
+    scaler.scale(loss).backward()          # scales loss to avoid underflow
+    scaler.unscale_(opt)                   # unscale before clip
+    nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    scaler.step(opt)                       # optimizer.step() if no inf/nan
+    scaler.update()                        # adjust scale factor
+
+    if (epoch + 1) % 20 == 0:
+        print(f'Epoch {epoch+1}: loss={loss.item():.4f}, '
+              f'scale={scaler.get_scale():.0f}')
+```
+
+:::tip[AMP Speedup]
+Mixed precision typically provides 1.5–3× throughput improvement on modern NVIDIA GPUs (Volta/Ampere/Ada) with only 2 lines of code change. Memory usage also drops ~30–40%, allowing larger batch sizes.
+:::
+
+## Early Stopping
+
+```python
+class EarlyStopping:
+    """Stop training when validation loss stops improving."""
+
+    def __init__(self, patience: int = 10, min_delta: float = 1e-4,
+                 restore_best: bool = True):
+        self.patience     = patience
+        self.min_delta    = min_delta
+        self.restore_best = restore_best
+        self.best_loss    = float('inf')
+        self.best_weights = None
+        self.counter      = 0
+        self.stop         = False
+
+    def __call__(self, val_loss: float, model: 'nn.Module') -> bool:
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss    = val_loss
+            self.best_weights = {k: v.clone() for k, v in model.state_dict().items()}
+            self.counter      = 0
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.stop = True
+                if self.restore_best and self.best_weights:
+                    model.load_state_dict(self.best_weights)
+        return self.stop
+```
+
+## Full Training Script
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+from pathlib import Path
+from tqdm import tqdm
+
+def run_training(
+    model:        nn.Module,
+    train_loader: DataLoader,
+    val_loader:   DataLoader,
+    num_epochs:   int = 50,
+    lr:           float = 1e-3,
+    device:       str  = 'cuda',
+    log_dir:      str  = 'runs/experiment',
+    ckpt_dir:     str  = 'checkpoints',
+):
+    model = model.to(device)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+    scaler    = torch.cuda.amp.GradScaler()
+    writer    = SummaryWriter(log_dir)
+    stopper   = EarlyStopping(patience=10)
+    ckpt_dir  = Path(ckpt_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    best_val_acc = 0.0
+
+    for epoch in range(1, num_epochs + 1):
+        # ── Train ────────────────────────────────────────────────────────────
+        train_loss, train_acc = train_epoch(
+            model, train_loader, criterion, optimizer, device, scaler
+        )
+        scheduler.step()
+
+        # ── Validate ─────────────────────────────────────────────────────────
+        val_loss, val_acc = validate(model, val_loader, criterion, device)
+
+        # ── Log ───────────────────────────────────────────────────────────────
+        current_lr = optimizer.param_groups[0]['lr']
+        writer.add_scalars('Loss',     {'train': train_loss, 'val': val_loss}, epoch)
+        writer.add_scalars('Accuracy', {'train': train_acc,  'val': val_acc},  epoch)
+        writer.add_scalar('LR', current_lr, epoch)
+
+        print(f'Epoch {epoch:3d}/{num_epochs}  '
+              f'train_loss={train_loss:.4f}  train_acc={train_acc:.3f}  '
+              f'val_loss={val_loss:.4f}  val_acc={val_acc:.3f}  '
+              f'lr={current_lr:.2e}')
+
+        # ── Save best checkpoint ───────────────────────────────────────────────
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save({
+                'epoch'          : epoch,
+                'model_state'    : model.state_dict(),
+                'optimizer_state': optimizer.state_dict(),
+                'val_acc'        : val_acc,
+                'val_loss'       : val_loss,
+            }, ckpt_dir / 'best_model.pth')
+            print(f'  ✓ New best model saved (val_acc={val_acc:.4f})')
+
+        # ── Early stopping ────────────────────────────────────────────────────
+        if stopper(val_loss, model):
+            print(f'Early stopping at epoch {epoch} (patience={stopper.patience})')
+            break
+
+    writer.close()
+    print(f'\nTraining complete. Best val_acc: {best_val_acc:.4f}')
+    return model
+```
+
+## TensorBoard Logging
+
+```bash
+# Install TensorBoard
+pip install tensorboard
+
+# Launch (run in terminal while training)
+tensorboard --logdir runs/ --port 6006
+# Open http://localhost:6006 in your browser
+```
+
+```python
+from torch.utils.tensorboard import SummaryWriter
+import torch
+
+writer = SummaryWriter('runs/my_experiment')
+
+# ── Scalar metrics ────────────────────────────────────────────────────────────
+writer.add_scalar('Loss/train', 0.423, global_step=1)
+writer.add_scalar('Loss/val',   0.512, global_step=1)
+
+# ── Multiple scalars on one chart ─────────────────────────────────────────────
+writer.add_scalars('Accuracy', {'train': 0.85, 'val': 0.80}, global_step=100)
+
+# ── Histogram of weight distributions ────────────────────────────────────────
+import torch.nn as nn
+model = nn.Linear(32, 16)
+for name, p in model.named_parameters():
+    writer.add_histogram(f'params/{name}', p.data, global_step=0)
+    if p.grad is not None:
+        writer.add_histogram(f'grads/{name}', p.grad, global_step=0)
+
+# ── Learning rate ─────────────────────────────────────────────────────────────
+writer.add_scalar('LR', 0.001, global_step=0)
+
+# ── Sample images from a batch ───────────────────────────────────────────────
+import torchvision
+imgs = torch.rand(16, 3, 32, 32)
+grid = torchvision.utils.make_grid(imgs, nrow=4, normalize=True)
+writer.add_image('sample_batch', grid, global_step=0)
+
+# ── Model graph ───────────────────────────────────────────────────────────────
+dummy_input = torch.randn(1, 32)
+writer.add_graph(model, dummy_input)
+
+writer.flush()
+writer.close()
+```
+
+:::caution[TensorBoard Step Tracking]
+Always pass the same `global_step` value for metrics you want aligned on the x-axis. Many bugs come from accidentally passing `epoch` for some metrics and `batch_idx` for others, causing misaligned charts.
+:::
+
+## Metrics Tracking
+
+```python
+import torch
+from torchmetrics import Accuracy, F1Score, AUROC, ConfusionMatrix
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# ── Classification metrics ────────────────────────────────────────────────────
+acc   = Accuracy(task='multiclass', num_classes=10).to(device)
+f1    = F1Score(task='multiclass', num_classes=10, average='macro').to(device)
+
+# Update metrics batch-by-batch
+logits = torch.randn(32, 10, device=device)
+labels = torch.randint(0, 10, (32,), device=device)
+preds  = logits.argmax(1)
+
+acc.update(preds, labels)
+f1.update(preds, labels)
+
+# Compute at epoch end
+print(f'Accuracy: {acc.compute():.4f}')   # e.g., 0.0938 (random)
+print(f'F1:       {f1.compute():.4f}')
+
+# Reset for next epoch
+acc.reset()
+f1.reset()
+```

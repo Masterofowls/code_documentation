@@ -1,0 +1,626 @@
+---
+title: Django Forms
+description: Handle user input safely with Django's Form and ModelForm classes, including validation, widgets, rendering, CSRF protection, formsets, and file uploads.
+sidebar:
+  order: 6
+tags: [python, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Django forms provide a powerful, declarative way to define HTML forms, validate submitted data, and convert it to Python types — all in one place.
+
+---
+
+## Form vs ModelForm
+
+<CardGrid>
+  <Card title="Form" icon="pencil">
+    Use when your form doesn't map directly to a model. Useful for contact forms, search, login, settings, and any form with custom logic.
+  </Card>
+  <Card title="ModelForm" icon="document">
+    Use when your form maps directly to a database model. Automatically generates fields from model definitions and handles saving.
+  </Card>
+</CardGrid>
+
+| Aspect | `Form` | `ModelForm` |
+|--------|--------|-------------|
+| Fields | Defined manually | Auto-generated from model |
+| Saving | Manual `save()` logic | `.save()` method built-in |
+| Validation | Custom validators | Inherits model validators |
+| `Meta` class | Not used | Required for model + fields |
+| Use case | Contact, search, login | Create/Update model records |
+
+---
+
+## Basic Form
+
+```python
+# blog/forms.py
+from django import forms
+from django.core.validators import MinLengthValidator, RegexValidator
+
+
+class ContactForm(forms.Form):
+    # Text fields
+    name = forms.CharField(
+        max_length=100,
+        min_length=2,
+        label="Full Name",
+        help_text="Enter your full name.",
+        widget=forms.TextInput(attrs={"class": "form-control", "placeholder": "John Doe"}),
+    )
+    email = forms.EmailField(
+        label="Email Address",
+        widget=forms.EmailInput(attrs={"class": "form-control"}),
+    )
+    subject = forms.CharField(max_length=200)
+    message = forms.CharField(
+        min_length=10,
+        widget=forms.Textarea(attrs={"rows": 5, "class": "form-control"}),
+    )
+
+    # Choice fields
+    CATEGORY_CHOICES = [
+        ("", "-- Select a category --"),
+        ("support", "Technical Support"),
+        ("billing", "Billing"),
+        ("general", "General Inquiry"),
+    ]
+    category = forms.ChoiceField(choices=CATEGORY_CHOICES)
+    priority = forms.TypedChoiceField(
+        choices=[(1, "Low"), (2, "Medium"), (3, "High")],
+        coerce=int,  # Converts string to int automatically
+        initial=2,
+    )
+
+    # Boolean
+    subscribe = forms.BooleanField(required=False, label="Subscribe to newsletter")
+    agree_terms = forms.BooleanField(
+        required=True,
+        error_messages={"required": "You must agree to the terms."},
+    )
+
+    # Multiple choice
+    INTEREST_CHOICES = [
+        ("python", "Python"),
+        ("django", "Django"),
+        ("drf", "REST Framework"),
+        ("deployment", "Deployment"),
+    ]
+    interests = forms.MultipleChoiceField(
+        choices=INTEREST_CHOICES,
+        widget=forms.CheckboxSelectMultiple,
+        required=False,
+    )
+
+    # Date / time
+    birth_date = forms.DateField(
+        widget=forms.DateInput(attrs={"type": "date"}),
+        required=False,
+    )
+
+    # Number
+    age = forms.IntegerField(min_value=0, max_value=120, required=False)
+    price = forms.DecimalField(max_digits=8, decimal_places=2, required=False)
+```
+
+---
+
+## ModelForm
+
+```python
+# blog/forms.py
+from django import forms
+from django.utils.text import slugify
+from .models import Post, Comment
+
+
+class PostForm(forms.ModelForm):
+    class Meta:
+        model = Post
+        fields = ["title", "body", "excerpt", "category", "tags", "status", "cover_image"]
+        # Or use exclude to omit fields:
+        # exclude = ["author", "created_at", "updated_at", "views_count"]
+
+        labels = {
+            "body": "Post Content",
+        }
+        help_texts = {
+            "tags": "Hold Ctrl/Cmd to select multiple tags.",
+        }
+        error_messages = {
+            "title": {
+                "max_length": "Title must be 250 characters or fewer.",
+                "required": "Please provide a title.",
+            }
+        }
+        widgets = {
+            "title": forms.TextInput(attrs={"class": "form-control", "autofocus": True}),
+            "body": forms.Textarea(attrs={"class": "form-control", "rows": 15}),
+            "excerpt": forms.Textarea(attrs={"rows": 3}),
+            "status": forms.Select(attrs={"class": "form-select"}),
+            "tags": forms.CheckboxSelectMultiple,
+        }
+
+    def clean_title(self):
+        """Validate and transform the title field."""
+        title = self.cleaned_data.get("title", "").strip()
+        if len(title) < 5:
+            raise forms.ValidationError("Title must be at least 5 characters long.")
+        # Return the cleaned value (always return from clean_* methods)
+        return title.capitalize()
+
+    def clean(self):
+        """Cross-field validation — access multiple fields at once."""
+        cleaned_data = super().clean()
+        status = cleaned_data.get("status")
+        excerpt = cleaned_data.get("excerpt")
+
+        if status == Post.STATUS_PUBLISHED and not excerpt:
+            self.add_error("excerpt", "An excerpt is required for published posts.")
+
+        return cleaned_data
+
+    def save(self, commit=True):
+        """Override save to auto-generate the slug."""
+        post = super().save(commit=False)
+        if not post.slug:
+            post.slug = slugify(post.title)
+        if commit:
+            post.save()
+            self.save_m2m()  # Save M2M relationships (tags)
+        return post
+
+
+class CommentForm(forms.ModelForm):
+    class Meta:
+        model = Comment
+        fields = ["author_name", "author_email", "body"]
+        widgets = {
+            "body": forms.Textarea(attrs={"rows": 4}),
+        }
+```
+
+---
+
+## Validation Deep Dive
+
+Django runs validation in this order:
+
+1. Field's `to_python()` — converts raw value to Python type
+2. Field's `validate()` — runs field-level validators
+3. Field's `run_validators()` — runs `validators=` list
+4. `clean_<fieldname>()` — field-specific cleaning on the form
+5. `Form.clean()` — cross-field validation
+
+```python
+from django import forms
+from django.core.validators import URLValidator, validate_email
+from django.core.exceptions import ValidationError
+import re
+
+
+def validate_no_spam(value: str):
+    """Custom standalone validator."""
+    spam_words = ["buy now", "click here", "free money"]
+    lower = value.lower()
+    for word in spam_words:
+        if word in lower:
+            raise ValidationError(
+                f"Content contains prohibited phrase: '{word}'",
+                code="spam_detected",
+            )
+
+
+class FeedbackForm(forms.Form):
+    # Validators applied at the field level
+    website = forms.URLField(
+        required=False,
+        validators=[URLValidator(schemes=["https"])],  # HTTPS only
+    )
+    feedback = forms.CharField(
+        widget=forms.Textarea,
+        validators=[validate_no_spam],  # Custom validator
+    )
+    phone = forms.CharField(
+        required=False,
+        validators=[
+            RegexValidator(
+                regex=r"^\+?1?\d{9,15}$",
+                message="Enter a valid phone number (e.g. +12025551234).",
+            )
+        ],
+    )
+
+    def clean_feedback(self):
+        """Additional per-field cleaning."""
+        feedback = self.cleaned_data["feedback"].strip()
+        if len(feedback.split()) < 5:
+            raise forms.ValidationError("Please provide at least 5 words of feedback.")
+        return feedback
+
+    def clean_phone(self):
+        phone = self.cleaned_data.get("phone", "")
+        if phone:
+            # Strip spaces and dashes for storage
+            return re.sub(r"[\s\-\(\)]", "", phone)
+        return phone
+
+    def clean(self):
+        """Cross-field validation."""
+        cleaned = super().clean()
+        website = cleaned.get("website")
+        feedback = cleaned.get("feedback", "")
+
+        if website and "http://" in feedback:
+            raise forms.ValidationError(
+                "If providing a website, please use HTTPS links in your feedback too."
+            )
+        return cleaned
+```
+
+---
+
+## Handling Forms in Views
+
+```python
+# blog/views.py
+from django.shortcuts import render, redirect, get_object_or_404
+from django.contrib import messages
+from django.contrib.auth.decorators import login_required
+from .forms import PostForm, ContactForm
+from .models import Post
+
+
+@login_required
+def post_create(request):
+    """Handle both GET (render form) and POST (process form)."""
+    if request.method == "POST":
+        # Bind form to POST data and FILES
+        form = PostForm(request.POST, request.FILES)
+        if form.is_valid():
+            post = form.save(commit=False)
+            post.author = request.user
+            post.save()
+            form.save_m2m()  # Required after commit=False for M2M fields
+            messages.success(request, f'Post "{post.title}" created!')
+            return redirect("blog:post-detail", slug=post.slug)
+        # Form is invalid — fall through to render with errors
+    else:
+        # GET request — render empty form
+        form = PostForm()
+
+    return render(request, "blog/post_form.html", {"form": form, "action": "Create"})
+
+
+@login_required
+def post_update(request, slug):
+    """Edit an existing post."""
+    post = get_object_or_404(Post, slug=slug, author=request.user)
+
+    if request.method == "POST":
+        # Bind to existing instance
+        form = PostForm(request.POST, request.FILES, instance=post)
+        if form.is_valid():
+            form.save()
+            messages.success(request, "Post updated!")
+            return redirect("blog:post-detail", slug=post.slug)
+    else:
+        form = PostForm(instance=post)  # Pre-populate with existing data
+
+    return render(request, "blog/post_form.html", {"form": form, "action": "Edit"})
+
+
+def contact(request):
+    """Contact form — not tied to a model."""
+    if request.method == "POST":
+        form = ContactForm(request.POST)
+        if form.is_valid():
+            # Access cleaned data
+            name = form.cleaned_data["name"]
+            email = form.cleaned_data["email"]
+            message = form.cleaned_data["message"]
+
+            # Send email, save to DB, etc.
+            send_contact_email(name, email, message)
+            messages.success(request, "Message sent! We'll get back to you soon.")
+            return redirect("contact-success")
+        else:
+            messages.error(request, "Please fix the errors below.")
+    else:
+        form = ContactForm(
+            initial={"name": request.user.get_full_name()} if request.user.is_authenticated else {}
+        )
+
+    return render(request, "contact.html", {"form": form})
+```
+
+---
+
+## Rendering Forms in Templates
+
+<Tabs>
+<TabItem label="Automatic rendering">
+```html
+<!-- The simplest approach — Django handles everything -->
+<form method="post" enctype="multipart/form-data">
+  {% csrf_token %}
+  {{ form.as_p }}     {# Each field wrapped in <p> #}
+  <button type="submit">Submit</button>
+</form>
+
+{# Alternative renderers #}
+{{ form.as_ul }}      {# Each field wrapped in <li> #}
+{{ form.as_table }}   {# Each field as a <tr> #}
+{{ form.as_div }}     {# Each field in a <div> (Django 4.1+) #}
+```
+</TabItem>
+<TabItem label="Manual rendering">
+```html
+<!-- Full control over HTML structure -->
+<form method="post" enctype="multipart/form-data">
+  {% csrf_token %}
+
+  {# Non-field errors (from clean()) #}
+  {% if form.non_field_errors %}
+    <div class="alert alert-danger">
+      {% for error in form.non_field_errors %}
+        <p>{{ error }}</p>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {# Title field #}
+  <div class="mb-3 {% if form.title.errors %}has-error{% endif %}">
+    <label for="{{ form.title.id_for_label }}" class="form-label">
+      {{ form.title.label }}
+      {% if form.title.field.required %}<span class="text-danger">*</span>{% endif %}
+    </label>
+    {{ form.title }}
+    {% if form.title.help_text %}
+      <div class="form-text">{{ form.title.help_text }}</div>
+    {% endif %}
+    {% for error in form.title.errors %}
+      <div class="invalid-feedback d-block">{{ error }}</div>
+    {% endfor %}
+  </div>
+
+  {# Body field #}
+  <div class="mb-3">
+    <label for="{{ form.body.id_for_label }}">{{ form.body.label }}</label>
+    {{ form.body }}
+    {% for error in form.body.errors %}
+      <p class="text-danger">{{ error }}</p>
+    {% endfor %}
+  </div>
+
+  {# Checkbox #}
+  <div class="form-check">
+    {{ form.subscribe }}
+    <label class="form-check-label" for="{{ form.subscribe.id_for_label }}">
+      {{ form.subscribe.label }}
+    </label>
+  </div>
+
+  <button type="submit" class="btn btn-primary">Submit</button>
+</form>
+```
+</TabItem>
+<TabItem label="Loop over fields">
+```html
+<!-- Iterate over all fields with uniform rendering -->
+<form method="post">
+  {% csrf_token %}
+
+  {% for field in form %}
+    <div class="field-wrapper {% if field.errors %}field-error{% endif %}">
+      {{ field.label_tag }}
+      {{ field }}
+      {% if field.help_text %}
+        <span class="helptext">{{ field.help_text }}</span>
+      {% endif %}
+      {% for error in field.errors %}
+        <span class="error">{{ error }}</span>
+      {% endfor %}
+    </div>
+  {% endfor %}
+
+  <button type="submit">Save</button>
+</form>
+```
+</TabItem>
+</Tabs>
+
+---
+
+## CSRF Protection
+
+Django's Cross-Site Request Forgery protection is enabled by default via `CsrfViewMiddleware`. Every form that uses POST must include the `{% csrf_token %}` tag:
+
+```html
+<form method="post" action="{% url 'contact' %}">
+  {% csrf_token %}
+  <!-- renders as:
+  <input type="hidden" name="csrfmiddlewaretoken" value="abc123...">
+  -->
+  ...
+</form>
+```
+
+For AJAX requests, include the CSRF token in the header:
+
+```javascript
+// Get the CSRF token from the cookie
+function getCookie(name) {
+  let cookieValue = null;
+  if (document.cookie && document.cookie !== '') {
+    const cookies = document.cookie.split(';');
+    for (let cookie of cookies) {
+      cookie = cookie.trim();
+      if (cookie.startsWith(name + '=')) {
+        cookieValue = decodeURIComponent(cookie.slice(name.length + 1));
+        break;
+      }
+    }
+  }
+  return cookieValue;
+}
+
+// Include in fetch requests
+fetch('/api/posts/', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-CSRFToken': getCookie('csrftoken'),
+  },
+  body: JSON.stringify({ title: 'New Post' }),
+});
+```
+
+:::caution[CSRF on APIs]
+If you're building a REST API with DRF and using `SessionAuthentication`, CSRF is enforced. With `TokenAuthentication` or JWT, CSRF is not required. See the DRF documentation for details.
+:::
+
+---
+
+## File and Image Uploads
+
+```python
+# models.py
+from django.db import models
+
+
+class Document(models.Model):
+    title = models.CharField(max_length=200)
+    file = models.FileField(upload_to="documents/%Y/%m/")
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+
+# forms.py
+class DocumentUploadForm(forms.ModelForm):
+    class Meta:
+        model = Document
+        fields = ["title", "file"]
+
+    def clean_file(self):
+        file = self.cleaned_data.get("file")
+        if file:
+            # Validate file size (max 10 MB)
+            if file.size > 10 * 1024 * 1024:
+                raise forms.ValidationError("File size must not exceed 10 MB.")
+
+            # Validate file extension
+            allowed_extensions = [".pdf", ".doc", ".docx", ".txt"]
+            ext = os.path.splitext(file.name)[1].lower()
+            if ext not in allowed_extensions:
+                raise forms.ValidationError(
+                    f"Unsupported file type. Allowed: {', '.join(allowed_extensions)}"
+                )
+        return file
+```
+
+```html
+<!-- Template — MUST use enctype="multipart/form-data" for file uploads -->
+<form method="post" enctype="multipart/form-data">
+  {% csrf_token %}
+  {{ form.as_p }}
+  <button type="submit">Upload</button>
+</form>
+```
+
+```python
+# views.py — pass request.FILES when binding a form with files
+def upload_document(request):
+    if request.method == "POST":
+        form = DocumentUploadForm(request.POST, request.FILES)  # ← request.FILES
+        if form.is_valid():
+            form.save()
+            return redirect("documents-list")
+    else:
+        form = DocumentUploadForm()
+    return render(request, "upload.html", {"form": form})
+```
+
+---
+
+## Formsets
+
+Formsets let you handle multiple forms of the same type on one page.
+
+```python
+from django import forms
+from django.forms import formset_factory, modelformset_factory, inlineformset_factory
+from .models import Post, Image
+
+
+# Standard formset from a plain Form
+class ImageURLForm(forms.Form):
+    url = forms.URLField()
+    caption = forms.CharField(max_length=200, required=False)
+
+ImageURLFormSet = formset_factory(
+    ImageURLForm,
+    extra=3,         # 3 empty extra forms
+    max_num=10,      # Maximum total forms
+    can_delete=True, # Add a delete checkbox to each form
+)
+
+# Model formset
+PostFormSet = modelformset_factory(
+    Post,
+    fields=["title", "status"],
+    extra=0,
+    can_delete=True,
+)
+
+# Inline formset — Post has many Images
+ImageInlineFormSet = inlineformset_factory(
+    Post,
+    Image,
+    fields=["file", "caption"],
+    extra=3,
+    can_delete=True,
+)
+
+
+# View using a formset
+def manage_images(request, post_pk):
+    post = get_object_or_404(Post, pk=post_pk, author=request.user)
+
+    if request.method == "POST":
+        formset = ImageInlineFormSet(request.POST, request.FILES, instance=post)
+        if formset.is_valid():
+            formset.save()
+            messages.success(request, "Images saved!")
+            return redirect("post-detail", slug=post.slug)
+    else:
+        formset = ImageInlineFormSet(instance=post)
+
+    return render(request, "blog/manage_images.html", {"formset": formset, "post": post})
+```
+
+```html
+<!-- Template for formsets -->
+<form method="post" enctype="multipart/form-data">
+  {% csrf_token %}
+  {{ formset.management_form }}   {# ← REQUIRED: hidden fields for formset metadata #}
+
+  {% for form in formset %}
+    <fieldset>
+      {{ form.as_p }}
+      {% if formset.can_delete %}
+        <label>
+          {{ form.DELETE }} Delete this image
+        </label>
+      {% endif %}
+    </fieldset>
+  {% endfor %}
+
+  <button type="submit">Save All</button>
+</form>
+```
+
+:::tip[management_form]
+Always include `{{ formset.management_form }}` in formset templates. Without it, Django raises `ManagementForm data is missing or has been tampered with`.
+:::

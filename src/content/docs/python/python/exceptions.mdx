@@ -1,0 +1,740 @@
+---
+title: Error Handling & Exceptions
+description: try/except/else/finally, raising exceptions, custom exception classes, and context managers in Python.
+sidebar:
+  order: 7
+tags: [python]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Exceptions are Python's mechanism for signalling and handling errors at runtime. Understanding the exception model—and using it idiomatically—separates robust production code from fragile scripts.
+
+## Exception Hierarchy
+
+Every exception in Python is an object. The class hierarchy is:
+
+```
+BaseException
+├── SystemExit
+├── KeyboardInterrupt
+├── GeneratorExit
+└── Exception
+    ├── ArithmeticError
+    │   ├── ZeroDivisionError
+    │   └── OverflowError
+    ├── AttributeError
+    ├── ImportError
+    │   └── ModuleNotFoundError
+    ├── LookupError
+    │   ├── IndexError
+    │   └── KeyError
+    ├── NameError
+    ├── OSError
+    │   └── FileNotFoundError
+    ├── RuntimeError
+    │   └── RecursionError
+    ├── StopIteration
+    ├── TypeError
+    └── ValueError
+```
+
+`BaseException` is the root. You should almost never catch it directly—it would swallow `KeyboardInterrupt` (Ctrl+C) and `SystemExit`, preventing the program from shutting down cleanly.
+
+Catch `Exception` when you need a catch-all for unexpected errors. For everything else, be as specific as possible.
+
+### Common Built-in Exceptions
+
+| Exception | Raised when |
+|---|---|
+| `ValueError` | Correct type, wrong value — `int("abc")` |
+| `TypeError` | Wrong type — `"2" + 2` |
+| `KeyError` | Dict key not found — `d["missing"]` |
+| `IndexError` | Sequence index out of range — `lst[99]` |
+| `FileNotFoundError` | File or directory doesn't exist |
+| `ZeroDivisionError` | Division or modulo by zero |
+| `AttributeError` | Attribute doesn't exist — `None.strip()` |
+| `ImportError` | Module can't be imported |
+| `RuntimeError` | Generic runtime problem |
+| `StopIteration` | Iterator exhausted |
+
+```python
+# Triggering common exceptions
+try:
+    int("not a number")
+except ValueError as e:
+    print(f"ValueError: {e}")
+# ValueError: invalid literal for int() with base 10: 'not a number'
+
+try:
+    result = 10 / 0
+except ZeroDivisionError as e:
+    print(f"ZeroDivisionError: {e}")
+# ZeroDivisionError: division by zero
+
+try:
+    data = {"name": "Alice"}
+    print(data["age"])
+except KeyError as e:
+    print(f"KeyError: {e}")
+# KeyError: 'age'
+
+try:
+    items = [1, 2, 3]
+    print(items[10])
+except IndexError as e:
+    print(f"IndexError: {e}")
+# IndexError: list index out of range
+```
+
+---
+
+## try / except
+
+The `try` block wraps code that might raise an exception. The `except` clause handles it.
+
+```python
+# Basic syntax
+try:
+    value = int(input("Enter a number: "))
+    print(f"You entered: {value}")
+except ValueError:
+    print("That wasn't a valid number.")
+```
+
+### Catching Multiple Exceptions
+
+You can handle different exceptions differently, or group them into a single handler.
+
+```python
+def read_config(path: str) -> dict:
+    try:
+        with open(path) as f:
+            import json
+            return json.load(f)
+    except FileNotFoundError:
+        print(f"Config file not found: {path}")
+        return {}
+    except json.JSONDecodeError as e:
+        print(f"Invalid JSON in {path}: {e}")
+        return {}
+
+# Group exceptions that share the same handler
+def parse_index(value: str, collection: list):
+    try:
+        index = int(value)
+        return collection[index]
+    except (ValueError, IndexError) as e:
+        print(f"Cannot retrieve item: {e}")
+        return None
+```
+
+### Catching Exception as `e`
+
+The `as e` binding gives you the exception object. Use it for the message, type, or chained cause.
+
+```python
+try:
+    result = 100 / int("0")
+except ZeroDivisionError as e:
+    print(type(e).__name__)   # ZeroDivisionError
+    print(str(e))              # division by zero
+    print(e.args)              # ('division by zero',)
+```
+
+### Bare `except` — Avoid It
+
+A bare `except:` catches *everything*, including `KeyboardInterrupt` and `SystemExit`. This makes programs impossible to stop cleanly.
+
+```python
+# ❌ Don't do this
+try:
+    risky_operation()
+except:
+    pass  # silently swallows Ctrl+C, SystemExit, and every real bug
+
+# ✅ Catch Exception if you need a wide net
+try:
+    risky_operation()
+except Exception as e:
+    print(f"Something went wrong: {e}")
+```
+
+<Aside type="caution">
+`except Exception` still catches `SystemExit` subclasses indirectly in some frameworks. If you're writing library code, prefer catching the most specific exception type you expect.
+</Aside>
+
+---
+
+## else Clause
+
+The `else` block runs only when the `try` block completes **without raising any exception**. It separates "the code that might fail" from "the code that runs on success."
+
+```python
+def load_user(user_id: int) -> dict | None:
+    try:
+        data = fetch_from_database(user_id)   # might raise DatabaseError
+    except DatabaseError as e:
+        print(f"DB error: {e}")
+        return None
+    else:
+        # Only runs if fetch_from_database succeeded
+        print(f"Loaded user {user_id} successfully")
+        return data
+
+# Practical example: file parsing
+def count_lines(path: str) -> int | None:
+    try:
+        f = open(path)
+    except FileNotFoundError:
+        print(f"File not found: {path}")
+        return None
+    else:
+        # f is open and valid here
+        count = sum(1 for _ in f)
+        f.close()
+        return count
+```
+
+**Why use `else`?** Without it, you'd have to put success-path code inside the `try`, which means it's also guarded by the `except`—potentially masking unrelated exceptions.
+
+```python
+# ❌ Success code inside try — hides bugs
+try:
+    result = parse(data)
+    process(result)          # bug here would be caught by the except below
+    save(result)
+except ParseError:
+    handle_parse_failure()
+
+# ✅ Success code in else — only parse errors are caught
+try:
+    result = parse(data)
+except ParseError:
+    handle_parse_failure()
+else:
+    process(result)          # exceptions here propagate normally
+    save(result)
+```
+
+---
+
+## finally Clause
+
+The `finally` block **always runs**, whether an exception was raised, caught, or not. It's for cleanup that must happen regardless of outcome.
+
+```python
+import sqlite3
+
+def query_db(sql: str):
+    conn = sqlite3.connect("app.db")
+    try:
+        cursor = conn.cursor()
+        cursor.execute(sql)
+        return cursor.fetchall()
+    except sqlite3.Error as e:
+        print(f"Query failed: {e}")
+        return []
+    finally:
+        conn.close()   # always closes, even if an exception propagates
+        print("Connection closed.")
+```
+
+`finally` runs even when a `return` is hit inside `try` or `except`:
+
+```python
+def tricky() -> str:
+    try:
+        return "from try"
+    finally:
+        print("finally runs!")
+        # Note: a return here would override "from try"
+
+result = tricky()
+# finally runs!
+print(result)
+# from try
+```
+
+### Full try/except/else/finally
+
+```python
+def divide(a: float, b: float) -> float | None:
+    try:
+        result = a / b
+    except ZeroDivisionError:
+        print("Cannot divide by zero.")
+        return None
+    else:
+        print(f"Division succeeded: {result}")
+        return result
+    finally:
+        print("divide() called — cleanup if any.")
+
+divide(10, 2)
+# Division succeeded: 5.0
+# divide() called — cleanup if any.
+
+divide(10, 0)
+# Cannot divide by zero.
+# divide() called — cleanup if any.
+```
+
+---
+
+## Raising Exceptions
+
+Use `raise` to signal that something is wrong. Pass a descriptive message.
+
+```python
+def set_age(age: int) -> None:
+    if not isinstance(age, int):
+        raise TypeError(f"age must be int, got {type(age).__name__}")
+    if age < 0 or age > 150:
+        raise ValueError(f"age must be 0–150, got {age}")
+    print(f"Age set to {age}")
+
+set_age(25)      # Age set to 25
+set_age(-1)      # ValueError: age must be 0–150, got -1
+set_age("old")   # TypeError: age must be int, got str
+```
+
+### Re-raising with Bare `raise`
+
+Inside an `except` block, a bare `raise` re-raises the current exception with its original traceback intact.
+
+```python
+import logging
+
+def process(data):
+    try:
+        return transform(data)
+    except ValueError as e:
+        logging.error("Bad data in process(): %s", e)
+        raise   # re-raises the original ValueError, traceback preserved
+```
+
+### Exception Chaining with `raise from`
+
+`raise X from Y` explicitly chains two exceptions, making the cause clear in the traceback.
+
+```python
+class ConfigError(Exception):
+    pass
+
+def load_config(path: str) -> dict:
+    try:
+        with open(path) as f:
+            import json
+            return json.load(f)
+    except FileNotFoundError as e:
+        raise ConfigError(f"Missing config file: {path}") from e
+    except json.JSONDecodeError as e:
+        raise ConfigError(f"Malformed config file: {path}") from e
+
+# Traceback shows both exceptions:
+# FileNotFoundError: [Errno 2] No such file or directory: 'config.json'
+# The above exception was the direct cause of the following exception:
+# ConfigError: Missing config file: config.json
+```
+
+Use `raise X from None` to suppress the original exception from the traceback when it would be confusing.
+
+---
+
+## Custom Exceptions
+
+Defining your own exception classes makes your API self-documenting and lets callers catch only the errors they care about.
+
+### Basic Custom Exception
+
+```python
+class AppError(Exception):
+    """Base class for all application exceptions."""
+
+class ValidationError(AppError):
+    """Raised when user input fails validation."""
+
+class NotFoundError(AppError):
+    """Raised when a requested resource doesn't exist."""
+
+class PermissionError(AppError):
+    """Raised when an operation is not allowed."""
+```
+
+### Exceptions with Attributes
+
+```python
+class APIError(Exception):
+    """Raised when an external API call fails."""
+
+    def __init__(self, message: str, status_code: int, endpoint: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.endpoint = endpoint
+
+    def __str__(self) -> str:
+        return f"[{self.status_code}] {self.args[0]} (endpoint: {self.endpoint})"
+
+
+class RateLimitError(APIError):
+    """Raised when the API rate limit is exceeded."""
+
+    def __init__(self, endpoint: str, retry_after: int) -> None:
+        super().__init__("Rate limit exceeded", 429, endpoint)
+        self.retry_after = retry_after
+
+    def __str__(self) -> str:
+        return f"{super().__str__()} — retry after {self.retry_after}s"
+
+
+# Usage
+try:
+    raise RateLimitError("/api/users", retry_after=30)
+except RateLimitError as e:
+    print(e)
+    print(f"Wait {e.retry_after} seconds before retrying.")
+# [429] Rate limit exceeded (endpoint: /api/users) — retry after 30s
+# Wait 30 seconds before retrying.
+except APIError as e:
+    print(f"Generic API error: {e}")
+```
+
+### Designing an Exception Hierarchy
+
+```python
+# exceptions.py — centralise all app exceptions
+
+class AppError(Exception):
+    """Root exception for this application."""
+
+# --- Domain errors ---
+class UserError(AppError):
+    """User-related errors."""
+
+class UserNotFoundError(UserError):
+    def __init__(self, user_id: int) -> None:
+        super().__init__(f"User {user_id} not found")
+        self.user_id = user_id
+
+class UserAlreadyExistsError(UserError):
+    def __init__(self, email: str) -> None:
+        super().__init__(f"User with email '{email}' already exists")
+        self.email = email
+
+# --- Infrastructure errors ---
+class DatabaseError(AppError):
+    """Database-related errors."""
+
+class ConnectionError(DatabaseError):
+    """Cannot connect to the database."""
+
+class QueryError(DatabaseError):
+    """Query execution failed."""
+    def __init__(self, query: str, cause: Exception) -> None:
+        super().__init__(f"Query failed: {cause}") from cause
+        self.query = query
+```
+
+<Aside type="tip">
+Always inherit from `Exception` (not `BaseException`) for your custom exceptions. Inherit from a domain-specific base (like `AppError`) to let callers catch your entire error family with one `except` clause.
+</Aside>
+
+---
+
+## Context Managers
+
+A context manager handles setup and teardown automatically using the `with` statement. The canonical example is file I/O.
+
+```python
+# Without context manager — easy to forget close()
+f = open("data.txt")
+try:
+    content = f.read()
+finally:
+    f.close()
+
+# With context manager — clean and safe
+with open("data.txt") as f:
+    content = f.read()
+# f.close() is called automatically, even if read() raises
+```
+
+You can bind multiple context managers in one `with`:
+
+```python
+with open("input.txt") as src, open("output.txt", "w") as dst:
+    dst.write(src.read())
+```
+
+### `__enter__` and `__exit__`
+
+Any object with `__enter__` and `__exit__` methods can be used as a context manager.
+
+```python
+import time
+
+class Timer:
+    """Context manager that measures elapsed time."""
+
+    def __enter__(self) -> "Timer":
+        self._start = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+        self.elapsed = time.perf_counter() - self._start
+        print(f"Elapsed: {self.elapsed:.4f}s")
+        return False   # False = don't suppress exceptions
+
+with Timer() as t:
+    total = sum(range(1_000_000))
+
+# Elapsed: 0.0312s
+print(f"Sum: {total}, Time: {t.elapsed:.4f}s")
+```
+
+`__exit__` receives `(exc_type, exc_val, exc_tb)`. Return `True` to suppress the exception; `False` (or `None`) to let it propagate.
+
+```python
+class SuppressOSError:
+    """Suppress OSError inside the block."""
+
+    def __enter__(self) -> "SuppressOSError":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+        return exc_type is not None and issubclass(exc_type, OSError)
+
+with SuppressOSError():
+    open("/nonexistent/path")   # OSError suppressed silently
+print("Continued after suppressed error.")
+# Continued after suppressed error.
+```
+
+### `contextlib.contextmanager`
+
+Use the `@contextmanager` decorator to write a context manager as a generator function — much less boilerplate.
+
+```python
+from contextlib import contextmanager
+import sqlite3
+
+@contextmanager
+def db_transaction(path: str):
+    """Context manager that commits on success, rolls back on error."""
+    conn = sqlite3.connect(path)
+    try:
+        yield conn          # code inside 'with' block runs here
+        conn.commit()
+        print("Transaction committed.")
+    except Exception:
+        conn.rollback()
+        print("Transaction rolled back.")
+        raise
+    finally:
+        conn.close()
+
+with db_transaction("app.db") as conn:
+    conn.execute("INSERT INTO users (name) VALUES (?)", ("Alice",))
+# Transaction committed.
+```
+
+### `contextlib.suppress`
+
+Suppress specific exceptions without a try/except block.
+
+```python
+from contextlib import suppress
+import os
+
+# Instead of:
+try:
+    os.remove("temp.txt")
+except FileNotFoundError:
+    pass
+
+# Write:
+with suppress(FileNotFoundError):
+    os.remove("temp.txt")
+```
+
+---
+
+## Best Practices
+
+### Be Specific
+
+Catch the most specific exception type that makes sense. Broad catches hide bugs.
+
+```python
+# ❌ Too broad — catches bugs you didn't intend to handle
+try:
+    user = db.get_user(user_id)
+    send_email(user.email)
+except Exception:
+    print("Something failed")
+
+# ✅ Specific — each error handled appropriately
+try:
+    user = db.get_user(user_id)
+except UserNotFoundError:
+    return {"error": "User not found"}, 404
+try:
+    send_email(user.email)
+except EmailDeliveryError as e:
+    logging.warning("Email failed: %s", e)
+```
+
+### Don't Swallow Exceptions Silently
+
+```python
+# ❌ Silent failure — impossible to debug
+try:
+    result = compute()
+except Exception:
+    pass
+
+# ✅ At minimum, log it
+import logging
+
+try:
+    result = compute()
+except Exception:
+    logging.exception("compute() failed")   # logs full traceback
+    result = default_value
+```
+
+### Logging Exceptions
+
+`logging.exception()` automatically includes the full traceback.
+
+```python
+import logging
+
+logging.basicConfig(level=logging.ERROR)
+
+def safe_parse(raw: str) -> int | None:
+    try:
+        return int(raw)
+    except ValueError:
+        logging.exception("Failed to parse %r as int", raw)
+        return None
+
+safe_parse("oops")
+# ERROR:root:Failed to parse 'oops' as int
+# Traceback (most recent call last):
+#   File "...", line 7, in safe_parse
+#     return int(raw)
+# ValueError: invalid literal for int() with base 10: 'oops'
+```
+
+### `assert` vs Exception
+
+`assert` is for **developer invariants** during development. It can be disabled with `python -O`. Use `raise` for **runtime validation** that must always run.
+
+```python
+# ✅ assert — internal invariant, only for debugging
+def process(items: list) -> None:
+    assert isinstance(items, list), "items must be a list"
+    ...
+
+# ✅ raise — user-facing validation, always enforced
+def create_user(name: str) -> None:
+    if not name.strip():
+        raise ValueError("name cannot be empty")
+    ...
+```
+
+---
+
+## Common Patterns
+
+### LBYL vs EAFP
+
+Python favours **EAFP** (Easier to Ask Forgiveness than Permission) over **LBYL** (Look Before You Leap).
+
+```python
+# LBYL — check before acting
+if "key" in data and isinstance(data["key"], int):
+    value = data["key"]
+else:
+    value = 0
+
+# EAFP — try it, handle failure
+try:
+    value = data["key"]
+    if not isinstance(value, int):
+        raise TypeError
+except (KeyError, TypeError):
+    value = 0
+```
+
+EAFP is often faster (no double lookup), more readable, and avoids race conditions in concurrent code.
+
+### Graceful Degradation
+
+Structure exception handling so that failures in non-critical paths don't crash the whole application.
+
+```python
+def build_report(user_id: int) -> dict:
+    report: dict = {"user_id": user_id}
+
+    try:
+        report["profile"] = load_profile(user_id)
+    except UserNotFoundError:
+        report["profile"] = None
+
+    try:
+        report["stats"] = load_stats(user_id)
+    except DatabaseError as e:
+        logging.warning("Stats unavailable: %s", e)
+        report["stats"] = {}
+
+    try:
+        report["recommendations"] = load_recommendations(user_id)
+    except Exception as e:
+        logging.exception("Recommendations failed: %s", e)
+        report["recommendations"] = []
+
+    return report
+```
+
+### Retry Pattern
+
+```python
+import time
+from typing import Callable, TypeVar
+
+T = TypeVar("T")
+
+def retry(
+    func: Callable[[], T],
+    *,
+    attempts: int = 3,
+    delay: float = 1.0,
+    exceptions: tuple[type[Exception], ...] = (Exception,),
+) -> T:
+    """Retry a callable up to `attempts` times on specified exceptions."""
+    last_error: Exception
+    for attempt in range(1, attempts + 1):
+        try:
+            return func()
+        except exceptions as e:
+            last_error = e
+            if attempt < attempts:
+                print(f"Attempt {attempt} failed: {e}. Retrying in {delay}s…")
+                time.sleep(delay)
+    raise last_error
+
+# Usage
+result = retry(
+    lambda: fetch_from_api("/users"),
+    attempts=3,
+    delay=2.0,
+    exceptions=(ConnectionError, TimeoutError),
+)
+```
+
+<Aside type="note">
+For production retry logic, consider libraries like `tenacity` which support exponential backoff, jitter, and per-exception retry conditions out of the box.
+</Aside>

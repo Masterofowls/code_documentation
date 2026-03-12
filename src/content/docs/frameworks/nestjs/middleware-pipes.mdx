@@ -1,0 +1,620 @@
+---
+title: Middleware, Pipes, Guards & Interceptors
+description: Master the NestJS request lifecycle with middleware, exception filters, validation pipes, interceptors, and guards.
+sidebar:
+  order: 6
+tags: [typescript, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Middleware, Pipes, Guards & Interceptors
+
+NestJS provides a rich set of request lifecycle tools. Understanding the correct tool for each job is key to
+building clean, maintainable applications.
+
+## Middleware
+
+Middleware functions have access to the request and response objects and the `next()` function.
+They execute **before** guards, interceptors, and route handlers.
+
+### NestMiddleware Interface
+
+```typescript
+import { Injectable, NestMiddleware } from '@nestjs/common';
+import { Request, Response, NextFunction } from 'express';
+
+@Injectable()
+export class LoggerMiddleware implements NestMiddleware {
+  use(req: Request, res: Response, next: NextFunction): void {
+    const { method, originalUrl, ip } = req;
+    const start = Date.now();
+
+    res.on('finish', () => {
+      const { statusCode } = res;
+      const duration = Date.now() - start;
+      console.log(`${method} ${originalUrl} ${statusCode} ${duration}ms - ${ip}`);
+    });
+
+    next();
+  }
+}
+```
+
+### Applying Middleware via configure()
+
+```typescript
+import { Module, NestModule, MiddlewareConsumer, RequestMethod } from '@nestjs/common';
+import { LoggerMiddleware } from './common/middleware/logger.middleware';
+
+@Module({})
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer): void {
+    consumer
+      .apply(LoggerMiddleware)
+      // Apply to all routes in UsersController
+      .forRoutes('users');
+
+    consumer
+      .apply(AuthMiddleware)
+      // Apply only to specific HTTP methods
+      .forRoutes({ path: 'users', method: RequestMethod.POST });
+
+    consumer
+      .apply(CorsMiddleware)
+      // Apply globally, exclude a route
+      .exclude({ path: 'health', method: RequestMethod.GET })
+      .forRoutes('*');
+  }
+}
+```
+
+### Functional Middleware
+
+For simple cases, use a function instead of a class:
+
+```typescript
+import { Request, Response, NextFunction } from 'express';
+
+export function correlationIdMiddleware(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): void {
+  const correlationId = req.headers['x-correlation-id'] ?? crypto.randomUUID();
+  req.headers['x-correlation-id'] = correlationId as string;
+  res.setHeader('X-Correlation-Id', correlationId);
+  next();
+}
+```
+
+### Global Middleware
+
+Apply Express middleware globally in `main.ts`:
+
+```typescript
+import * as helmet from 'helmet';
+import * as compression from 'compression';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  app.use(helmet());
+  app.use(compression());
+  app.use(correlationIdMiddleware);
+  await app.listen(3000);
+}
+```
+
+:::tip[Middleware Execution Order]
+Middleware executes in the order it is applied. Apply security middleware (helmet, CORS) before logging middleware
+so you're always logging sanitized request data.
+:::
+
+## Exception Filters
+
+Exception filters catch exceptions thrown anywhere in the application and transform them into HTTP responses.
+
+### @Catch() and ExceptionFilter
+
+```typescript
+import {
+  ExceptionFilter,
+  Catch,
+  ArgumentsHost,
+  HttpException,
+  HttpStatus,
+} from '@nestjs/common';
+import { Request, Response } from 'express';
+
+@Catch(HttpException)
+export class HttpExceptionFilter implements ExceptionFilter {
+  catch(exception: HttpException, host: ArgumentsHost): void {
+    const ctx = host.switchToHttp();
+    const response = ctx.getResponse<Response>();
+    const request = ctx.getRequest<Request>();
+    const status = exception.getStatus();
+    const exceptionResponse = exception.getResponse();
+
+    const errorBody = {
+      statusCode: status,
+      timestamp: new Date().toISOString(),
+      path: request.url,
+      method: request.method,
+      message:
+        typeof exceptionResponse === 'object'
+          ? (exceptionResponse as any).message ?? exception.message
+          : exceptionResponse,
+    };
+
+    response.status(status).json(errorBody);
+  }
+}
+```
+
+### Custom Exceptions
+
+```typescript
+import { HttpException, HttpStatus } from '@nestjs/common';
+
+export class UserNotFoundException extends HttpException {
+  constructor(userId: number) {
+    super(
+      {
+        statusCode: HttpStatus.NOT_FOUND,
+        error: 'Not Found',
+        message: `User #${userId} does not exist`,
+      },
+      HttpStatus.NOT_FOUND,
+    );
+  }
+}
+
+export class InsufficientPermissionsException extends HttpException {
+  constructor(action: string) {
+    super(
+      {
+        statusCode: HttpStatus.FORBIDDEN,
+        error: 'Forbidden',
+        message: `You are not authorized to ${action}`,
+      },
+      HttpStatus.FORBIDDEN,
+    );
+  }
+}
+```
+
+### Catch-All Filter
+
+```typescript
+// Catch everything (all exceptions, not just HttpException)
+@Catch()
+export class AllExceptionsFilter implements ExceptionFilter {
+  private readonly logger = new Logger(AllExceptionsFilter.name);
+
+  catch(exception: unknown, host: ArgumentsHost): void {
+    const ctx = host.switchToHttp();
+    const response = ctx.getResponse<Response>();
+    const request = ctx.getRequest<Request>();
+
+    const status =
+      exception instanceof HttpException
+        ? exception.getStatus()
+        : HttpStatus.INTERNAL_SERVER_ERROR;
+
+    this.logger.error(
+      `Unhandled exception on ${request.method} ${request.url}`,
+      exception instanceof Error ? exception.stack : String(exception),
+    );
+
+    response.status(status).json({
+      statusCode: status,
+      timestamp: new Date().toISOString(),
+      path: request.url,
+    });
+  }
+}
+```
+
+### Registering Exception Filters
+
+<Tabs>
+  <TabItem label="Route Level">
+    ```typescript
+    @Post()
+    @UseFilters(HttpExceptionFilter)
+    create(@Body() dto: CreateUserDto) { ... }
+    ```
+  </TabItem>
+  <TabItem label="Controller Level">
+    ```typescript
+    @Controller('users')
+    @UseFilters(HttpExceptionFilter)
+    export class UsersController { ... }
+    ```
+  </TabItem>
+  <TabItem label="Global">
+    ```typescript
+    // main.ts
+    app.useGlobalFilters(new AllExceptionsFilter());
+
+    // Or via module (preferred — enables DI in the filter)
+    @Module({
+      providers: [
+        { provide: APP_FILTER, useClass: AllExceptionsFilter },
+      ],
+    })
+    export class AppModule {}
+    ```
+  </TabItem>
+</Tabs>
+
+## Pipes
+
+Pipes operate on route handler arguments. They can **transform** input data or **validate** it,
+throwing an exception before the handler runs if validation fails.
+
+### Built-in Pipes
+
+```typescript
+import {
+  ParseIntPipe,
+  ParseUUIDPipe,
+  ParseEnumPipe,
+  ParseBoolPipe,
+  ParseArrayPipe,
+  DefaultValuePipe,
+  ValidationPipe,
+} from '@nestjs/common';
+
+enum Direction { North = 'NORTH', South = 'SOUTH' }
+
+@Controller('examples')
+export class ExamplesController {
+  @Get(':id')
+  findOne(@Param('id', ParseIntPipe) id: number) {}
+
+  @Get('uuid/:id')
+  findByUuid(@Param('id', ParseUUIDPipe) id: string) {}
+
+  @Get('direction/:dir')
+  findByDirection(
+    @Param('dir', new ParseEnumPipe(Direction)) dir: Direction,
+  ) {}
+
+  @Get()
+  list(
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
+    @Query('active', new DefaultValuePipe(true), ParseBoolPipe) active: boolean,
+  ) {}
+}
+```
+
+### ValidationPipe with class-validator
+
+Install the required packages:
+
+```bash
+npm install class-validator class-transformer
+```
+
+```typescript
+// main.ts — Enable globally
+app.useGlobalPipes(
+  new ValidationPipe({
+    whitelist: true,            // Strip unknown properties
+    forbidNonWhitelisted: true, // Throw on unknown properties
+    transform: true,            // Transform to DTO class instances
+    transformOptions: {
+      enableImplicitConversion: true,
+    },
+  }),
+);
+```
+
+### DTO Validation with class-validator
+
+```typescript
+import {
+  IsString,
+  IsEmail,
+  IsNumber,
+  IsOptional,
+  IsEnum,
+  MinLength,
+  MaxLength,
+  Min,
+  Max,
+  IsPositive,
+  ValidateNested,
+  IsArray,
+  ArrayMinSize,
+} from 'class-validator';
+import { Type } from 'class-transformer';
+
+enum UserRole { Admin = 'admin', User = 'user', Moderator = 'moderator' }
+
+export class AddressDto {
+  @IsString()
+  street: string;
+
+  @IsString()
+  city: string;
+
+  @IsString()
+  @MinLength(2)
+  @MaxLength(2)
+  countryCode: string;
+}
+
+export class CreateUserDto {
+  @IsString()
+  @MinLength(2)
+  @MaxLength(50)
+  name: string;
+
+  @IsEmail()
+  email: string;
+
+  @IsString()
+  @MinLength(8)
+  password: string;
+
+  @IsNumber()
+  @Min(18)
+  @Max(120)
+  age: number;
+
+  @IsOptional()
+  @IsEnum(UserRole)
+  role?: UserRole = UserRole.User;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => AddressDto)
+  address?: AddressDto;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1)
+  @IsString({ each: true })
+  tags?: string[];
+}
+```
+
+:::tip[Transform DTOs]
+With `transform: true` in `ValidationPipe`, NestJS converts query parameters and route params from strings to
+their proper types (numbers, booleans) before your handler receives them. Enable `enableImplicitConversion`
+to avoid decorating every property with `@Type()`.
+:::
+
+## Interceptors
+
+Interceptors execute code **before and after** the route handler using RxJS Observables.
+They can transform results, add caching, handle errors, or measure performance.
+
+### Logging Interceptor
+
+```typescript
+import {
+  Injectable,
+  NestInterceptor,
+  ExecutionContext,
+  CallHandler,
+  Logger,
+} from '@nestjs/common';
+import { Observable } from 'rxjs';
+import { tap } from 'rxjs/operators';
+
+@Injectable()
+export class LoggingInterceptor implements NestInterceptor {
+  private readonly logger = new Logger('HTTP');
+
+  intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
+    const req = context.switchToHttp().getRequest();
+    const { method, url } = req;
+    const now = Date.now();
+
+    return next.handle().pipe(
+      tap({
+        next: () => this.logger.log(`${method} ${url} — ${Date.now() - now}ms`),
+        error: (err) => this.logger.error(`${method} ${url} — ${err.message}`),
+      }),
+    );
+  }
+}
+```
+
+### Transform Interceptor
+
+```typescript
+import { map } from 'rxjs/operators';
+
+export interface Response<T> {
+  data: T;
+  timestamp: string;
+}
+
+@Injectable()
+export class TransformInterceptor<T>
+  implements NestInterceptor<T, Response<T>>
+{
+  intercept(
+    context: ExecutionContext,
+    next: CallHandler,
+  ): Observable<Response<T>> {
+    return next.handle().pipe(
+      map((data) => ({
+        data,
+        timestamp: new Date().toISOString(),
+      })),
+    );
+  }
+}
+```
+
+### Timeout Interceptor
+
+```typescript
+import { timeout, catchError } from 'rxjs/operators';
+import { TimeoutError, throwError } from 'rxjs';
+import { RequestTimeoutException } from '@nestjs/common';
+
+@Injectable()
+export class TimeoutInterceptor implements NestInterceptor {
+  intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
+    return next.handle().pipe(
+      timeout(5000),
+      catchError((err) => {
+        if (err instanceof TimeoutError) {
+          return throwError(() => new RequestTimeoutException());
+        }
+        return throwError(() => err);
+      }),
+    );
+  }
+}
+```
+
+### Caching Interceptor
+
+```typescript
+import { of } from 'rxjs';
+
+@Injectable()
+export class CacheInterceptor implements NestInterceptor {
+  private readonly cache = new Map<string, any>();
+
+  intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
+    const req = context.switchToHttp().getRequest();
+    const key = req.url;
+
+    if (this.cache.has(key)) {
+      return of(this.cache.get(key));
+    }
+
+    return next.handle().pipe(
+      tap((data) => this.cache.set(key, data)),
+    );
+  }
+}
+```
+
+## Guards
+
+Guards determine whether a request should be handled by a route handler based on runtime conditions.
+They implement the `CanActivate` interface and return a boolean or a Promise/Observable of boolean.
+
+### CanActivate Interface
+
+```typescript
+import {
+  Injectable,
+  CanActivate,
+  ExecutionContext,
+  UnauthorizedException,
+} from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import { Request } from 'express';
+
+@Injectable()
+export class JwtAuthGuard implements CanActivate {
+  constructor(private jwtService: JwtService) {}
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const request = context.switchToHttp().getRequest<Request>();
+    const token = this.extractTokenFromHeader(request);
+
+    if (!token) {
+      throw new UnauthorizedException('No token provided');
+    }
+
+    try {
+      const payload = await this.jwtService.verifyAsync(token);
+      request['user'] = payload;
+      return true;
+    } catch {
+      throw new UnauthorizedException('Invalid or expired token');
+    }
+  }
+
+  private extractTokenFromHeader(request: Request): string | undefined {
+    const [type, token] = request.headers.authorization?.split(' ') ?? [];
+    return type === 'Bearer' ? token : undefined;
+  }
+}
+```
+
+### Role Guard with Execution Context
+
+```typescript
+import { Reflector } from '@nestjs/core';
+import { ROLES_KEY } from '../decorators/roles.decorator';
+
+export enum Role { Admin = 'admin', User = 'user' }
+
+@Injectable()
+export class RolesGuard implements CanActivate {
+  constructor(private reflector: Reflector) {}
+
+  canActivate(context: ExecutionContext): boolean {
+    // Read metadata set by @Roles() decorator
+    const requiredRoles = this.reflector.getAllAndOverride<Role[]>(ROLES_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+
+    if (!requiredRoles) {
+      return true; // No role restriction
+    }
+
+    const { user } = context.switchToHttp().getRequest();
+    return requiredRoles.some((role) => user.roles?.includes(role));
+  }
+}
+```
+
+### ExecutionContext
+
+The `ExecutionContext` provides details about the current execution. It extends `ArgumentsHost` and
+adds methods to introspect the handler and class:
+
+```typescript
+context.getHandler();         // The route handler method reference
+context.getClass();           // The controller class reference
+context.switchToHttp();       // Switch to HTTP context
+context.switchToRpc();        // Switch to microservices RPC context
+context.switchToWs();         // Switch to WebSocket context
+context.getType<string>();    // Current context type: 'http' | 'rpc' | 'graphql'
+```
+
+### @UseGuards() Application
+
+```typescript
+// Route level
+@Get('admin')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(Role.Admin)
+getAdminData() { ... }
+
+// Controller level
+@Controller('admin')
+@UseGuards(JwtAuthGuard)
+export class AdminController { ... }
+
+// Global (main.ts)
+app.useGlobalGuards(new JwtAuthGuard(jwtService));
+
+// Global via module (preferred — supports DI)
+@Module({
+  providers: [
+    { provide: APP_GUARD, useClass: JwtAuthGuard },
+  ],
+})
+export class AppModule {}
+```
+
+:::caution[Guard vs Middleware for Auth]
+Use guards (not middleware) for authentication and authorization in NestJS. Guards have access to the
+`ExecutionContext`, which allows them to read decorator metadata, determine the current handler, and
+work correctly across HTTP, WebSocket, and microservice contexts.
+:::

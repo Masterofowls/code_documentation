@@ -1,0 +1,422 @@
+---
+title: Animation
+description: Drive Three.js animations with AnimationMixer and clips, GSAP tweens, morph targets, and skinned mesh bone animation.
+sidebar:
+  order: 6
+tags: [javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Three.js offers multiple animation systems. You can use the built-in **AnimationMixer** (perfect for GLTF character animations), **GSAP** or **Tween.js** (for UI-style smooth transitions), or **manual delta-time** math for procedural motion.
+
+---
+
+## Manual Delta-Time Animation
+
+The simplest approach — update properties directly each frame:
+
+```js
+import * as THREE from 'three';
+
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  const elapsed = clock.getElapsedTime(); // total seconds
+  const delta   = clock.getDelta();       // seconds since last frame
+
+  // Rotation — independent of frame rate
+  cube.rotation.y += delta * Math.PI;     // half turn per second
+
+  // Oscillation
+  cube.position.y = Math.sin(elapsed * 2) * 0.5;
+
+  // Follow a circular path
+  cube.position.x = Math.cos(elapsed) * 3;
+  cube.position.z = Math.sin(elapsed) * 3;
+
+  // Smooth follow (lerp)
+  const target = new THREE.Vector3(mouse.x * 5, mouse.y * 5, 0);
+  cube.position.lerp(target, delta * 3); // 3 = responsiveness
+
+  renderer.render(scene, camera);
+}
+animate();
+```
+
+---
+
+## AnimationClip and AnimationMixer
+
+The `AnimationMixer` system is Three.js's built-in keyframe animation engine. It plays `AnimationClip` objects — sequences of `KeyframeTrack`s that each animate one property over time.
+
+### KeyframeTrack Types
+
+| Class | Property Type | Used For |
+|---|---|---|
+| `VectorKeyframeTrack` | `THREE.Vector3` | position, scale |
+| `QuaternionKeyframeTrack` | `THREE.Quaternion` | rotation (gimbal-lock safe) |
+| `NumberKeyframeTrack` | `number` | opacity, intensity, morphInfluence |
+| `ColorKeyframeTrack` | `THREE.Color` | color, emissive |
+| `BooleanKeyframeTrack` | `boolean` | visible |
+| `StringKeyframeTrack` | `string` | rarely used |
+
+### Creating a Clip Manually
+
+```js
+import * as THREE from 'three';
+
+// Target object
+const box = new THREE.Mesh(
+  new THREE.BoxGeometry(1, 1, 1),
+  new THREE.MeshStandardMaterial({ color: '#4f46e5' }),
+);
+scene.add(box);
+
+// Times (seconds) and values arrays must be same length
+const times  = [0, 1, 2, 3];
+
+// Position track: y bounces from 0 → 2 → 0 → 2
+const positionKF = new THREE.VectorKeyframeTrack(
+  '.position',                                   // property path
+  times,
+  [0,0,0,  0,2,0,  0,0,0,  0,2,0],             // xyz for each keyframe
+  THREE.InterpolateSmooth,                        // interpolation mode
+);
+
+// Rotation track (using Quaternion)
+const rot = new THREE.Quaternion();
+const rotValues = [];
+[0, Math.PI / 2, Math.PI, Math.PI * 1.5].forEach(y => {
+  rot.setFromEuler(new THREE.Euler(0, y, 0));
+  rotValues.push(...rot.toArray());
+});
+const rotationKF = new THREE.QuaternionKeyframeTrack(
+  '.quaternion',
+  times,
+  rotValues,
+);
+
+// Scale track
+const scaleKF = new THREE.VectorKeyframeTrack(
+  '.scale',
+  [0, 1, 2],
+  [1,1,1,  2,2,2,  1,1,1],
+  THREE.InterpolateLinear,
+);
+
+// Build the clip (name, duration, tracks)
+const clip = new THREE.AnimationClip('BounceAndSpin', 3, [
+  positionKF,
+  rotationKF,
+  scaleKF,
+]);
+
+// Create a mixer bound to the animated object
+const mixer = new THREE.AnimationMixer(box);
+const action = mixer.clipAction(clip);
+
+action.play();
+action.setLoop(THREE.LoopRepeat, Infinity); // or LoopOnce, LoopPingPong
+action.clampWhenFinished = true;            // freeze on last frame for LoopOnce
+
+// Update in render loop
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  mixer.update(clock.getDelta()); // advance the mixer
+  renderer.render(scene, camera);
+}
+animate();
+```
+
+### AnimationAction Controls
+
+```js
+const action = mixer.clipAction(clip);
+
+// Playback control
+action.play();
+action.pause();
+action.stop();
+action.reset();  // go back to frame 0
+action.paused = true; // toggle
+
+// Speed
+action.timeScale = 2.0;   // play at 2× speed
+action.timeScale = -1.0;  // play backwards
+
+// Weight (for blending)
+action.setEffectiveWeight(0.5);  // blend 50% with other actions
+
+// Looping
+action.setLoop(THREE.LoopOnce,     1);
+action.setLoop(THREE.LoopRepeat,   Infinity);
+action.setLoop(THREE.LoopPingPong, Infinity);
+
+// Cross-fade between two actions
+action1.crossFadeTo(action2, 0.5, true); // (to, duration, warp)
+
+// Listen for completion
+mixer.addEventListener('finished', (e) => {
+  console.log('Clip finished:', e.action._clip.name);
+});
+```
+
+---
+
+## GLTF Animations
+
+GLTF files from Blender, Cinema 4D, or Mixamo include animation data automatically:
+
+```js
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const loader = new GLTFLoader();
+let mixer;
+const actions = {};
+
+loader.load('/models/character.glb', (gltf) => {
+  const model = gltf.scene;
+  scene.add(model);
+
+  // Create a mixer for the model
+  mixer = new THREE.AnimationMixer(model);
+
+  // Map clips by name for easy access
+  gltf.animations.forEach((clip) => {
+    const action = mixer.clipAction(clip);
+    actions[clip.name] = action;
+    console.log('Loaded clip:', clip.name, `(${clip.duration.toFixed(2)}s)`);
+  });
+
+  // Play idle animation
+  if (actions['Idle']) {
+    actions['Idle'].play();
+  }
+});
+
+// Switch animation on keypress
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft' && actions['Walk']) {
+    actions['Idle'].crossFadeTo(actions['Walk'], 0.3, false);
+  }
+  if (e.key === ' ' && actions['Jump']) {
+    actions['Jump'].reset().setLoop(THREE.LoopOnce, 1).play();
+    actions['Jump'].clampWhenFinished = true;
+  }
+});
+
+// In render loop
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  if (mixer) mixer.update(clock.getDelta());
+  renderer.render(scene, camera);
+}
+```
+
+---
+
+## GSAP with Three.js
+
+GSAP (GreenSock Animation Platform) provides a timeline-based API excellent for camera moves, UI reveals, and narrative sequences:
+
+```bash
+npm install gsap
+```
+
+```js
+import gsap from 'gsap';
+
+// Simple tween
+gsap.to(cube.position, {
+  y: 3,
+  duration: 1.5,
+  ease: 'power2.inOut',
+});
+
+// Chain with a timeline
+const tl = gsap.timeline({ repeat: -1, yoyo: true });
+
+tl.to(cube.position, { y: 2, duration: 1, ease: 'sine.inOut' })
+  .to(cube.rotation, { y: Math.PI * 2, duration: 2, ease: 'none' }, '<')
+  .to(cube.scale, { x: 2, y: 2, z: 2, duration: 0.5, ease: 'back.out(2)' })
+  .to(cube.scale, { x: 1, y: 1, z: 1, duration: 0.5, ease: 'back.in(2)' });
+
+// Animate material colour
+gsap.to(material.color, {
+  r: 1, g: 0.2, b: 0.5,
+  duration: 2,
+  ease: 'power1.inOut',
+});
+
+// Camera fly-in on load
+gsap.from(camera.position, {
+  z: 20,
+  duration: 2.5,
+  ease: 'expo.out',
+  onUpdate: () => {
+    camera.lookAt(0, 0, 0);
+  },
+});
+
+// Scroll-driven animation (with ScrollTrigger)
+import ScrollTrigger from 'gsap/ScrollTrigger';
+gsap.registerPlugin(ScrollTrigger);
+
+gsap.to(cube.rotation, {
+  y: Math.PI * 4,
+  ease: 'none',
+  scrollTrigger: {
+    trigger: document.body,
+    start: 'top top',
+    end: 'bottom bottom',
+    scrub: true,
+  },
+});
+```
+
+---
+
+## Tween.js Integration
+
+```bash
+npm install @tweenjs/tween.js
+```
+
+```js
+import * as TWEEN from '@tweenjs/tween.js';
+
+const startPos = { x: 0, y: 0 };
+const endPos   = { x: 5, y: 3 };
+
+const tween = new TWEEN.Tween(startPos)
+  .to(endPos, 2000)
+  .easing(TWEEN.Easing.Quadratic.InOut)
+  .onUpdate(() => {
+    cube.position.x = startPos.x;
+    cube.position.y = startPos.y;
+  })
+  .onComplete(() => console.log('Tween done!'))
+  .repeat(Infinity)
+  .yoyo(true)
+  .start();
+
+// Must call TWEEN.update() in the render loop
+function animate() {
+  requestAnimationFrame(animate);
+  TWEEN.update();   // pass Date.now() if not using default time
+  renderer.render(scene, camera);
+}
+```
+
+---
+
+## Morph Targets
+
+Morph targets animate geometry by interpolating between pre-baked vertex positions (used for facial animation, shape keys):
+
+```js
+// Create base geometry
+const baseGeo = new THREE.SphereGeometry(1, 32, 32);
+
+// Create morph target (a squashed sphere)
+const morphGeo = new THREE.SphereGeometry(1.5, 32, 32);
+
+// Morph target must have same vertex count as base
+const morphAttribute = new THREE.BufferAttribute(
+  morphGeo.attributes.position.array.slice(),
+  3
+);
+
+baseGeo.morphAttributes.position = [morphAttribute];
+
+const mat = new THREE.MeshStandardMaterial({ morphTargets: true });
+const mesh = new THREE.Mesh(baseGeo, mat);
+scene.add(mesh);
+
+// morphTargetInfluences[i] controls 0–1 blend of target i
+mesh.morphTargetInfluences[0] = 0;  // 0 = original, 1 = full morph
+
+// Animate the morph
+function animate() {
+  requestAnimationFrame(animate);
+  const t = (Math.sin(clock.getElapsedTime() * 2) + 1) / 2;
+  mesh.morphTargetInfluences[0] = t;
+  renderer.render(scene, camera);
+}
+```
+
+GLTF models with Blender shape keys load morph targets automatically:
+
+```js
+loader.load('/models/face.glb', (gltf) => {
+  const head = gltf.scene.getObjectByName('Head');
+  console.log(head.morphTargetDictionary);
+  // { "smile": 0, "blink_l": 1, "blink_r": 2, ... }
+
+  // Activate a smile
+  head.morphTargetInfluences[head.morphTargetDictionary['smile']] = 0.8;
+});
+```
+
+---
+
+## SkinnedMesh and Bone Animation
+
+Skinned meshes deform geometry based on a skeleton of bones — used for character animation:
+
+```js
+// Most skinned mesh animation comes from GLTF files.
+// Access bones after loading:
+loader.load('/models/character.glb', (gltf) => {
+  const skinnedMesh = gltf.scene.getObjectByProperty('isSkinnedMesh', true);
+  const skeleton    = skinnedMesh.skeleton;
+
+  console.log('Bone count:', skeleton.bones.length);
+  skeleton.bones.forEach(b => console.log(b.name));
+
+  // Rotate a bone manually (overrides animation for that bone)
+  const spine = skeleton.getBoneByName('spine');
+  if (spine) {
+    spine.rotation.z = Math.PI / 8; // lean left
+  }
+
+  // Use AnimationMixer for authored GLTF clips
+  const mixer = new THREE.AnimationMixer(gltf.scene);
+  gltf.animations.forEach(clip => mixer.clipAction(clip).play());
+});
+```
+
+---
+
+## AnimationObjectGroup
+
+Animate multiple objects with a single mixer — great for synchronised crowd animations:
+
+```js
+// Create many clones
+const group = new THREE.AnimationObjectGroup();
+for (let i = 0; i < 50; i++) {
+  const clone = mesh.clone();
+  clone.position.set(
+    (Math.random() - 0.5) * 20,
+    0,
+    (Math.random() - 0.5) * 20,
+  );
+  scene.add(clone);
+  group.add(clone);
+}
+
+// One mixer drives all 50 objects
+const mixer = new THREE.AnimationMixer(group);
+const action = mixer.clipAction(clip);
+action.play();
+```
+
+:::tip[Performance: Use AnimationObjectGroup for Crowds]
+Each `AnimationMixer` has overhead. Using `AnimationObjectGroup` means 50 objects share a single mixer, reducing CPU cost substantially compared to 50 individual mixers.
+:::

@@ -1,0 +1,577 @@
+---
+title: Filters & Effects
+description: Apply blur, sharpen, edge detection, and convolution filters with ImageFilter. Adjust color, contrast, brightness, and sharpness with ImageEnhance. Use ImageOps for high-level operations. Create sepia, vignette, and color effects.
+sidebar:
+  order: 5
+tags: [python, imaging]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Pillow provides three complementary systems for modifying image appearance: **ImageFilter** (convolution-based filters), **ImageEnhance** (perceptual adjustments), and **ImageOps** (high-level transformations). Together they cover everything from sharpening photos to building creative effects.
+
+---
+
+## ImageFilter — Convolution Filters
+
+`Image.filter()` applies a convolution kernel to the image and returns a new filtered image. Import the pre-built kernels from `PIL.ImageFilter`:
+
+```python
+from PIL import Image, ImageFilter
+
+img = Image.open("photo.jpg")
+
+# Apply a filter — always returns a NEW image (original is unmodified)
+blurred = img.filter(ImageFilter.BLUR)
+blurred.save("blurred.jpg")
+# Output: softened version of the original — edges lose definition, fine details disappear
+```
+
+### Built-in Filter Reference
+
+<Tabs>
+  <TabItem label="Blur Filters">
+```python
+from PIL import Image, ImageFilter
+
+img = Image.open("photo.jpg")
+
+# Simple 3×3 averaging blur
+blur = img.filter(ImageFilter.BLUR)
+# Output: mild uniform softening
+
+# Gaussian blur — radius controls the blur radius in pixels
+gaussian_soft   = img.filter(ImageFilter.GaussianBlur(radius=2))
+gaussian_medium = img.filter(ImageFilter.GaussianBlur(radius=8))
+gaussian_heavy  = img.filter(ImageFilter.GaussianBlur(radius=20))
+# Output: higher radius = more extreme blurring and bokeh-like soft focus
+
+# Box blur — fast averaging blur; radius controls the box half-size
+box_blur = img.filter(ImageFilter.BoxBlur(radius=5))
+# Output: similar to GaussianBlur but with sharper falloff — slightly blockier
+
+gaussian_soft.save("blur_soft.jpg")
+gaussian_heavy.save("blur_heavy.jpg")
+# blur_soft: gentle softening, photo details still visible
+# blur_heavy: heavily blurred, subjects barely recognizable
+```
+  </TabItem>
+  <TabItem label="Sharpen Filters">
+```python
+from PIL import Image, ImageFilter
+
+img = Image.open("photo.jpg")
+
+# Simple sharpening kernel
+sharp = img.filter(ImageFilter.SHARPEN)
+# Output: slightly crisper edges — subtle, one pass is often enough
+
+# Edge enhancement — stronger than SHARPEN, emphasizes boundaries
+edge_enhance       = img.filter(ImageFilter.EDGE_ENHANCE)
+edge_enhance_more  = img.filter(ImageFilter.EDGE_ENHANCE_MORE)   # stronger variant
+# Output: edges become vivid and defined; can look oversharpened on portraits
+
+# Smooth — mild averaging to reduce noise and grain
+smooth      = img.filter(ImageFilter.SMOOTH)
+smooth_more = img.filter(ImageFilter.SMOOTH_MORE)
+# Output: slightly softened — useful for reducing JPEG artifacts before sharpening
+
+# Unsharp Mask — the industry standard for photographic sharpening
+unsharp = img.filter(ImageFilter.UnsharpMask(
+    radius=2,       # blur radius for the mask (how wide the sharpening halo is)
+    percent=150,    # strength: how much to add back (100=100%, 200=200%)
+    threshold=3,    # minimum pixel difference to sharpen (prevents noise amplification)
+))
+# Output: natural-looking sharper image — edges pop without artificial halos
+
+sharp.save("sharpen_basic.jpg")
+unsharp.save("sharpen_unsharp.jpg")
+# unsharp_mask produces clearly superior results to simple SHARPEN
+```
+  </TabItem>
+  <TabItem label="Edge & Texture Filters">
+```python
+from PIL import Image, ImageFilter
+
+img = Image.open("photo.jpg").convert("L")   # grayscale for clarity
+
+# Find edges — highlights transitions between regions, result mostly black
+edges = img.filter(ImageFilter.FIND_EDGES)
+edges.save("edges.png")
+# Output: black background with thin white lines tracing every edge in the image
+
+# Contour — similar to FIND_EDGES but draws on the original pixel values
+contour = img.filter(ImageFilter.CONTOUR)
+contour.save("contour.png")
+# Output: lighter image with dark outlines at edges — like a pencil sketch effect
+
+# Emboss — simulates a 3D embossed relief effect
+emboss = img.filter(ImageFilter.EMBOSS)
+emboss.save("emboss.png")
+# Output: gray background with light/dark areas where edges were — looks metallic/stamped
+
+# Detail — enhances local contrast in fine details
+detail = img.filter(ImageFilter.DETAIL)
+detail.save("detail.png")
+# Output: slightly more detailed and textured than the original — subtle improvement
+```
+  </TabItem>
+  <TabItem label="Median & Rank Filters">
+```python
+from PIL import Image, ImageFilter
+
+img = Image.open("photo.jpg")
+
+# Median filter — removes salt-and-pepper noise while preserving edges
+# size parameter must be odd (3, 5, 7, ...)
+median3 = img.filter(ImageFilter.MedianFilter(size=3))
+median7 = img.filter(ImageFilter.MedianFilter(size=7))
+# Output: cleaner image with noise removed; median3 is subtle, median7 is more blurry
+
+# Min filter — replaces each pixel with the minimum in its neighborhood
+# Creates a "darker" eroded look
+min_filter = img.filter(ImageFilter.MinFilter(size=3))
+# Output: image is slightly darker overall; bright spots shrink
+
+# Max filter — replaces each pixel with the maximum in its neighborhood
+# Creates a "lighter" dilated look
+max_filter = img.filter(ImageFilter.MaxFilter(size=3))
+# Output: image is slightly brighter; dark spots shrink, shadows reduce
+
+# Mode filter — replaces each pixel with the most common value in neighborhood
+mode_filter = img.filter(ImageFilter.ModeFilter(size=5))
+# Output: posterized/segmented appearance — regions become more uniform
+
+median3.save("median_denoise.jpg")
+```
+  </TabItem>
+</Tabs>
+
+---
+
+## Custom Convolution Kernels
+
+```python
+from PIL import Image, ImageFilter
+
+img = Image.open("photo.jpg").convert("RGB")
+
+# Kernel(size, kernel, scale=1, offset=0)
+# size: (width, height) of the kernel — must be 3×3 or 5×5
+# kernel: flat list of coefficients, left-to-right, top-to-bottom
+# scale: divisor applied to the sum (normalizes the result)
+# offset: value added after scaling
+
+# Sharpen kernel (standard 3x3 unsharp emphasizer)
+sharpen_kernel = ImageFilter.Kernel(
+    size=(3, 3),
+    kernel=[0, -1, 0,
+           -1,  5,-1,
+            0, -1, 0],
+    scale=1,
+    offset=0,
+)
+sharpened = img.filter(sharpen_kernel)
+sharpened.save("custom_sharpen.jpg")
+# Output: image with strongly emphasized edges — more aggressive than ImageFilter.SHARPEN
+
+# Edge detection kernel (Laplacian)
+laplacian = ImageFilter.Kernel(
+    size=(3, 3),
+    kernel=[-1, -1, -1,
+            -1,  8, -1,
+            -1, -1, -1],
+    scale=1,
+    offset=128,   # offset by 128 so zero-edges appear mid-gray
+)
+edges = img.filter(laplacian)
+edges.save("laplacian_edges.jpg")
+# Output: mid-gray image with bright highlights exactly where edges are
+
+# Emboss kernel
+emboss_custom = ImageFilter.Kernel(
+    size=(3, 3),
+    kernel=[-2, -1, 0,
+            -1,  1, 1,
+             0,  1, 2],
+    scale=1,
+    offset=128,
+)
+embossed = img.filter(emboss_custom)
+embossed.save("custom_emboss.jpg")
+# Output: gray-toned image with 3D relief appearance — northwest light source
+```
+
+---
+
+## Filter Chaining
+
+Filters can be chained — apply them sequentially for compound effects:
+
+```python
+from PIL import Image, ImageFilter
+
+img = Image.open("photo.jpg")
+
+# Denoise first, then sharpen — a common photography post-processing sequence
+result = (
+    img
+    .filter(ImageFilter.MedianFilter(size=3))          # remove noise
+    .filter(ImageFilter.UnsharpMask(radius=1, percent=120, threshold=2))  # sharpen
+)
+result.save("denoise_then_sharpen.jpg")
+# Output: cleaner and crisper than either operation alone
+
+# Soft glow effect: blur + blend with original
+glow_layer = img.filter(ImageFilter.GaussianBlur(radius=10))
+import numpy as np
+base_arr = np.array(img, dtype=float)
+glow_arr = np.array(glow_layer, dtype=float)
+glow_result = np.clip(base_arr + glow_arr * 0.3, 0, 255).astype("uint8")
+glow_img = Image.fromarray(glow_result)
+glow_img.save("soft_glow.jpg")
+# Output: dreamy soft-glow photograph — bright areas bloom outward
+```
+
+:::caution[Filter Order Matters]
+Always denoise **before** sharpening. Sharpening amplifies noise — applying `MedianFilter` or `GaussianBlur` first removes the noise that would otherwise be made worse by subsequent sharpening. Also note that `FIND_EDGES` should generally be applied to grayscale images to get clean edge maps.
+:::
+
+---
+
+## ImageEnhance — Perceptual Adjustments
+
+`ImageEnhance` provides four enhancement classes. Each wraps an image and exposes a single `enhance(factor)` method. A factor of `1.0` always returns a copy identical to the original.
+
+```python
+from PIL import Image, ImageEnhance
+
+img = Image.open("photo.jpg")
+
+# Color — 0.0 = grayscale, 1.0 = original, 2.0 = double saturation
+color_flat    = ImageEnhance.Color(img).enhance(0.0)    # grayscale
+color_muted   = ImageEnhance.Color(img).enhance(0.5)    # desaturated
+color_vivid   = ImageEnhance.Color(img).enhance(2.5)    # supersaturated
+
+# Contrast — 0.0 = solid gray, 1.0 = original, 2.0 = high contrast
+contrast_flat = ImageEnhance.Contrast(img).enhance(0.2) # washed out
+contrast_high = ImageEnhance.Contrast(img).enhance(2.0) # punchy
+
+# Brightness — 0.0 = black, 1.0 = original, 2.0 = double brightness
+dark   = ImageEnhance.Brightness(img).enhance(0.5)
+bright = ImageEnhance.Brightness(img).enhance(1.5)
+
+# Sharpness — 0.0 = blurred, 1.0 = original, 2.0 = sharpened
+blurred  = ImageEnhance.Sharpness(img).enhance(0.0)
+sharper  = ImageEnhance.Sharpness(img).enhance(3.0)
+
+color_vivid.save("enhance_vivid.jpg")
+contrast_high.save("enhance_contrast.jpg")
+```
+
+### Stacking Enhancements
+
+```python
+from PIL import Image, ImageEnhance
+
+img = Image.open("photo.jpg")
+
+def cinematic_grade(img: "Image.Image") -> "Image.Image":
+    """Apply a cinematic color grade: slightly desaturated, punchy contrast, warm."""
+    img = ImageEnhance.Color(img).enhance(0.8)         # slight desaturation
+    img = ImageEnhance.Contrast(img).enhance(1.3)       # lifted contrast
+    img = ImageEnhance.Brightness(img).enhance(0.95)    # just a touch darker
+    img = ImageEnhance.Sharpness(img).enhance(1.2)      # subtle sharpening
+    return img
+
+graded = cinematic_grade(img)
+graded.save("cinematic.jpg")
+# Output: photo with a muted, high-contrast cinematic look — like a movie still
+```
+
+:::tip[Enhancement Factor Reference]
+| Class | 0.0 | 0.5 | 1.0 | 2.0 |
+|---|---|---|---|---|
+| Color | Grayscale | Desaturated | Original | Vivid |
+| Contrast | Flat gray | Low contrast | Original | High contrast |
+| Brightness | Black | Dark | Original | Bright |
+| Sharpness | Blurred | Soft | Original | Sharp |
+:::
+
+---
+
+## ImageOps — High-Level Operations
+
+`ImageOps` provides convenient one-line transformations. These functions typically return new images.
+
+```python
+from PIL import Image, ImageOps
+
+img = Image.open("photo.jpg").convert("RGB")
+
+# Grayscale — same as img.convert("L")
+gray = ImageOps.grayscale(img)
+
+# Invert all channel values (255 - pixel)
+inverted = ImageOps.invert(img)
+inverted.save("inverted.jpg")
+# Output: negative of the original — light areas become dark, colors complemented
+
+# Autocontrast — stretches the histogram to fill 0–255, per channel
+auto = ImageOps.autocontrast(img, cutoff=0)     # cutoff=0 uses min/max
+auto_cut = ImageOps.autocontrast(img, cutoff=2) # ignore bottom/top 2% of pixels
+auto.save("autocontrast.jpg")
+# Output: image with improved local contrast — often dramatically better for scans
+
+# Equalize — histogram equalization (flattens the histogram)
+equalized = ImageOps.equalize(img)
+equalized.save("equalized.jpg")
+# Output: increased local contrast — details in shadows and highlights both visible
+
+# Flip / Mirror
+flipped  = ImageOps.flip(img)    # vertical flip (top ↔ bottom)
+mirrored = ImageOps.mirror(img)  # horizontal mirror (left ↔ right)
+
+# Colorize — tint a grayscale image with two colors
+gray_img = img.convert("L")
+colorized = ImageOps.colorize(gray_img, black="navy", white="lightyellow")
+colorized.save("colorized.jpg")
+# Output: duotone image — dark areas navy blue, light areas pale yellow
+
+# Posterize — reduce each channel to N bits (2=4 colors, 4=16 colors per channel)
+posterized = ImageOps.posterize(img, bits=3)
+posterized.save("posterized.jpg")
+# Output: flat graphic look with reduced color palette — cartoon/poster aesthetic
+
+# Solarize — invert pixels above a threshold
+solarized = ImageOps.solarize(img, threshold=128)
+solarized.save("solarized.jpg")
+# Output: surreal effect — pixels above 128 are inverted, below 128 stay the same
+```
+
+### Fit and Pad
+
+```python
+from PIL import Image, ImageOps
+
+img = Image.open("portrait.jpg")   # tall portrait photo
+
+# fit() — crops and resizes to fill the exact size (preserves aspect, may crop)
+fitted = ImageOps.fit(img, (400, 400), method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
+fitted.save("square_fit.jpg")
+# Output: 400×400 center-cropped square — no black bars, no distortion
+
+# pad() — adds letterbox/pillarbox padding to preserve full image (Pillow ≥ 8.2)
+padded = ImageOps.pad(img, (400, 400), color=(0, 0, 0), centering=(0.5, 0.5))
+padded.save("square_padded.jpg")
+# Output: 400×400 image with full portrait visible, black bars on left and right
+
+# expand() — add a border around the image
+bordered = ImageOps.expand(img, border=20, fill=(255, 255, 255))
+bordered.save("bordered.jpg")
+# Output: original image with a 20-pixel white border on all sides
+```
+
+---
+
+## Point Transforms with `point()`
+
+`point()` applies a per-pixel lookup table or function, independently to each channel:
+
+```python
+from PIL import Image
+
+img = Image.open("photo.jpg")
+
+# Increase brightness using a lambda (applied to each pixel value 0–255)
+brighter = img.point(lambda p: min(p + 50, 255))
+brighter.save("brighter.jpg")
+# Output: each pixel +50 brighter — shadows lift, highlights clip at white
+
+# Increase gamma (brighten midtones while preserving shadows/highlights)
+import math
+gamma = 1.5
+gamma_corrected = img.point(lambda p: int(pow(p / 255.0, 1 / gamma) * 255))
+gamma_corrected.save("gamma_corrected.jpg")
+# Output: midtones noticeably brighter without blowing highlights
+
+# Threshold — convert to binary black/white
+bw = img.convert("L").point(lambda p: 255 if p > 128 else 0)
+bw.save("threshold.png")
+# Output: pure black and white image — no grays, hard edges
+
+# S-curve for contrast boost (darkens shadows, brightens highlights)
+def scurve(p):
+    """Map 0–255 through an S-shaped curve for contrast boost."""
+    t = p / 255.0
+    if t < 0.5:
+        t = 2 * t * t
+    else:
+        t = -1 + (4 - 2 * t) * t
+    return int(t * 255)
+
+lut = [scurve(i) for i in range(256)]
+contrasted = img.point(lut * 3)   # multiply by 3 to apply to all 3 RGB channels
+contrasted.save("s_curve_contrast.jpg")
+# Output: punchy contrasty image — shadows drop, highlights brighten, midtones shift
+```
+
+:::tip[Fast LUT With 256-Entry Lists]
+When using `point()` with a lookup table (list), pre-compute it **once** before the loop instead of using a lambda. A pre-built list is significantly faster than a function call for each pixel, especially on large images.
+:::
+
+---
+
+## Recipe: Sepia Tone
+
+Classic sepia applies a warm brownish tint reminiscent of antique photographs:
+
+```python
+from PIL import Image, ImageEnhance, ImageOps
+
+def sepia(img: "Image.Image") -> "Image.Image":
+    """
+    Apply a sepia tone effect.
+
+    Steps:
+    1. Convert to grayscale to remove color information.
+    2. Apply slight contrast boost for an aged look.
+    3. Colorize with dark brown shadows and cream/tan highlights.
+    """
+    # Step 1: Desaturate
+    gray = ImageOps.grayscale(img)
+
+    # Step 2: Mild contrast boost — old photos often have reduced dynamic range
+    gray = ImageEnhance.Contrast(gray).enhance(0.9)
+
+    # Step 3: Colorize — (black color, white color) maps shadow/highlight hues
+    # Classic sepia: dark reddish-brown shadows, cream highlights
+    sepia_image = ImageOps.colorize(
+        gray,
+        black=(112, 66, 20),      # dark sepia brown
+        white=(253, 236, 200),    # aged paper cream
+        mid=(200, 150, 100),      # optional mid-point color
+        blackpoint=10,            # shadows start slightly above 0
+        whitepoint=240,           # highlights end slightly below 255
+    )
+
+    return sepia_image
+
+with Image.open("portrait.jpg") as img:
+    result = sepia(img.convert("RGB"))
+    result.save("sepia_portrait.jpg", quality=90)
+    # Output: warm brown-toned portrait with cream highlights and dark brown shadows
+    #         — looks like a photograph from the 1890s
+```
+
+---
+
+## Recipe: Vignette Effect
+
+A vignette darkens the edges of an image, drawing attention toward the center:
+
+```python
+from PIL import Image
+import numpy as np
+
+def vignette(img: "Image.Image", strength: float = 0.7, radius: float = 0.75) -> "Image.Image":
+    """
+    Apply a radial vignette (darkened edges) to an image.
+
+    Args:
+        strength: How dark the edges get (0.0 = no effect, 1.0 = fully black edges).
+        radius: Fractional radius of the bright center (0.5 = fills half, 0.75 = default).
+
+    Returns:
+        New image with vignette applied.
+    """
+    img_rgb = img.convert("RGB")
+    arr = np.array(img_rgb, dtype=float)
+    h, w = arr.shape[:2]
+
+    # Build a 2D vignette mask — Gaussian-shaped, centered at the image center
+    cx, cy = w / 2, h / 2
+    y_coords, x_coords = np.mgrid[0:h, 0:w]
+
+    # Normalize coordinates so the image fits in [-1, 1]
+    nx = (x_coords - cx) / (cx * radius)
+    ny = (y_coords - cy) / (cy * radius)
+
+    # Radial distance from center
+    dist = np.sqrt(nx ** 2 + ny ** 2)
+
+    # Gaussian falloff: 1.0 at center, decreases toward edges
+    mask = np.exp(-(dist ** 2) / (2 * 0.5 ** 2))
+    mask = np.clip(mask, 0, 1)
+
+    # Invert to get darkness (1 at edges, 0 at center), scale by strength
+    darkness = (1 - mask) * strength
+
+    # Darken the image (multiply by (1 - darkness))
+    factor = 1 - darkness
+    vignetted = arr * factor[:, :, np.newaxis]
+    vignetted = np.clip(vignetted, 0, 255).astype(np.uint8)
+
+    return Image.fromarray(vignetted)
+
+with Image.open("landscape.jpg") as img:
+    result = vignette(img, strength=0.6, radius=0.7)
+    result.save("vignette.jpg", quality=90)
+    # Output: landscape with naturally darkened corners and edges,
+    #         center brightness preserved — classic portrait/landscape photography look
+```
+
+---
+
+## Complete Effects Pipeline
+
+Here is a single script that builds a film-photography-inspired effect by stacking multiple techniques:
+
+```python
+from PIL import Image, ImageFilter, ImageEnhance, ImageOps
+import numpy as np
+
+def film_look(input_path: str, output_path: str) -> None:
+    """
+    Apply a stylized 'film photograph' look:
+    1. Mild Gaussian blur to reduce digital sharpness
+    2. Contrast boost to add punch
+    3. Slight desaturation for muted film colors
+    4. Warm color cast (boost reds, reduce blues slightly)
+    5. Vignette at edges
+    """
+    with Image.open(input_path) as img:
+        img = img.convert("RGB")
+
+    # 1. Soften slightly (film grain softens details)
+    img = img.filter(ImageFilter.GaussianBlur(radius=0.6))
+
+    # 2. Contrast
+    img = ImageEnhance.Contrast(img).enhance(1.15)
+
+    # 3. Desaturate slightly
+    img = ImageEnhance.Color(img).enhance(0.85)
+
+    # 4. Warm color cast via channel point adjustment
+    r, g, b = img.split()
+    r = r.point(lambda p: min(p + 12, 255))    # +12 red warmth
+    b = b.point(lambda p: max(p - 8, 0))        # -8 blue coolness
+    img = Image.merge("RGB", (r, g, b))
+
+    # 5. Vignette (reuse function from above, inline for brevity)
+    arr = np.array(img, dtype=float)
+    h, w = arr.shape[:2]
+    cx, cy = w / 2, h / 2
+    y_c, x_c = np.mgrid[0:h, 0:w]
+    dist = np.sqrt(((x_c - cx) / (cx * 0.8)) ** 2 + ((y_c - cy) / (cy * 0.8)) ** 2)
+    mask = np.clip(1 - np.exp(-(dist ** 2) / (2 * 0.5 ** 2)) * 0.55, 0, 1)
+    arr = np.clip(arr * mask[:, :, np.newaxis], 0, 255).astype(np.uint8)
+    img = Image.fromarray(arr)
+
+    img.save(output_path, quality=90)
+    print(f"Film look applied → {output_path}")
+    # Output: warm, softly contrasted, slightly desaturated photo with darkened edges
+    #         — reminiscent of a 35mm film scan from the 1970s
+
+film_look("street_photo.jpg", "film_look.jpg")
+```

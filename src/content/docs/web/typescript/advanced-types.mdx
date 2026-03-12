@@ -1,0 +1,614 @@
+---
+title: Advanced Types
+description: Type narrowing, type guards, assertion functions, unknown vs any vs never, function overloads, variance, and declaration merging in TypeScript.
+sidebar:
+  order: 5
+tags: [typescript, javascript]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+## Type Narrowing
+
+**Type narrowing** is the process of refining a union type to a more specific type within a code branch. TypeScript analyses control flow and updates what it knows about a variable's type at each point.
+
+### `typeof` Narrowing
+
+```ts
+function process(input: string | number | boolean): string {
+  if (typeof input === 'string') {
+    // input is string here
+    return input.toUpperCase();
+  } else if (typeof input === 'number') {
+    // input is number here
+    return input.toFixed(2);
+  } else {
+    // input is boolean here
+    return input ? 'yes' : 'no';
+  }
+}
+
+// typeof values: "string" | "number" | "bigint" | "boolean"
+//                "symbol" | "undefined" | "object" | "function"
+// Note: typeof null === "object" — a historic JavaScript quirk
+```
+
+### `instanceof` Narrowing
+
+```ts
+class NetworkError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode: number
+  ) {
+    super(message);
+    this.name = 'NetworkError';
+  }
+}
+
+class ValidationError extends Error {
+  constructor(
+    message: string,
+    public readonly field: string
+  ) {
+    super(message);
+    this.name = 'ValidationError';
+  }
+}
+
+function handleError(error: NetworkError | ValidationError | Error): string {
+  if (error instanceof NetworkError) {
+    // error is NetworkError — statusCode is accessible
+    return `HTTP ${error.statusCode}: ${error.message}`;
+  }
+  if (error instanceof ValidationError) {
+    // error is ValidationError — field is accessible
+    return `Invalid field "${error.field}": ${error.message}`;
+  }
+  // error is Error
+  return `Unknown error: ${error.message}`;
+}
+```
+
+### `in` Narrowing
+
+The `in` operator checks if a property exists on an object, narrowing the type:
+
+```ts
+interface Cat {
+  meow(): void;
+  purr(): void;
+}
+
+interface Dog {
+  bark(): void;
+  fetch(item: string): void;
+}
+
+type Pet = Cat | Dog;
+
+function interactWithPet(pet: Pet): void {
+  if ('meow' in pet) {
+    // pet is Cat — meow and purr are accessible
+    pet.meow();
+    pet.purr();
+  } else {
+    // pet is Dog — bark and fetch are accessible
+    pet.bark();
+    pet.fetch('ball');
+  }
+}
+```
+
+### Equality Narrowing
+
+```ts
+type Shape =
+  | { kind: 'circle'; radius: number }
+  | { kind: 'square'; side: number }
+  | { kind: 'rectangle'; width: number; height: number };
+
+function describe(shape: Shape): string {
+  // Discriminant property narrows the type
+  if (shape.kind === 'circle') {
+    return `Circle with radius ${shape.radius}`; // shape: Circle
+  }
+  if (shape.kind === 'square') {
+    return `Square with side ${shape.side}`;     // shape: Square
+  }
+  // shape: Rectangle
+  return `${shape.width}×${shape.height} rectangle`;
+}
+
+// Equality with null/undefined
+function processName(name: string | null | undefined): string {
+  if (name === null) {
+    return '(null)';
+  }
+  if (name === undefined) {
+    return '(undefined)';
+  }
+  // name is string here
+  return name.trim();
+}
+```
+
+### Truthiness Narrowing
+
+```ts
+// Falsy values: false, 0, -0, 0n, "", null, undefined, NaN
+function getLength(value: string | null | undefined): number {
+  if (value) {
+    // value is string (null and undefined are falsy)
+    return value.length;
+  }
+  return 0;
+}
+
+// Careful: empty string is also falsy
+function nonEmptyLength(value: string | null): number | null {
+  if (value) {
+    return value.length; // value is string — but excludes ""
+  }
+  return null;
+}
+
+// Better: explicit null check
+function nonEmptyLengthBetter(value: string | null): number | null {
+  if (value !== null) {
+    return value.length; // value is string — includes ""
+  }
+  return null;
+}
+```
+
+---
+
+## Type Guards (User-Defined)
+
+A **type guard** is a function that returns `value is Type` — a type predicate — telling TypeScript how to narrow after the call.
+
+```ts
+// Basic type guard
+function isString(value: unknown): value is string {
+  return typeof value === 'string';
+}
+
+function isNumber(value: unknown): value is number {
+  return typeof value === 'number' && !isNaN(value);
+}
+
+// Object type guard
+interface User {
+  id: number;
+  name: string;
+  email: string;
+}
+
+function isUser(value: unknown): value is User {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'id' in value &&
+    'name' in value &&
+    'email' in value &&
+    typeof (value as Record<string, unknown>).id === 'number' &&
+    typeof (value as Record<string, unknown>).name === 'string' &&
+    typeof (value as Record<string, unknown>).email === 'string'
+  );
+}
+
+// Usage
+const raw: unknown = JSON.parse('{"id":1,"name":"Alice","email":"a@b.com"}');
+
+if (isUser(raw)) {
+  // raw is User inside this block
+  console.log(raw.name.toUpperCase()); // OK
+  console.log(raw.id + 1);            // OK
+}
+
+// Array type guard
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(isString);
+}
+```
+
+### Generic Type Guards
+
+```ts
+// Generic type guard with a schema-like approach
+function hasProperty<T extends object, K extends PropertyKey>(
+  obj: T,
+  key: K
+): obj is T & Record<K, unknown> {
+  return key in obj;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+// Discriminant-based type guard
+type Circle = { kind: 'circle'; radius: number };
+type Square = { kind: 'square'; side: number };
+
+function isCircle(shape: Circle | Square): shape is Circle {
+  return shape.kind === 'circle';
+}
+```
+
+---
+
+## Assertion Functions
+
+**Assertion functions** throw if a condition is false and narrow the type for all code that follows — not just a conditional block:
+
+```ts
+// Assert a value is not null/undefined
+function assertDefined<T>(
+  value: T | null | undefined,
+  message: string
+): asserts value is T {
+  if (value == null) {
+    throw new Error(message);
+  }
+}
+
+// Assert a condition is true
+function assert(
+  condition: boolean,
+  message: string
+): asserts condition {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
+
+// Usage — narrows for all subsequent code in the scope
+const user: User | null = getUser();
+assertDefined(user, 'User must be defined');
+// From here, user is narrowed to User (not User | null)
+console.log(user.name.toUpperCase()); // OK — no null check needed
+
+// Assert a specific type
+function assertIsString(val: unknown): asserts val is string {
+  if (typeof val !== 'string') {
+    throw new TypeError(`Expected string, got ${typeof val}`);
+  }
+}
+
+function processInput(val: unknown): void {
+  assertIsString(val);
+  // val is string here — no if block required
+  console.log(val.toUpperCase());
+  console.log(val.split('').reverse().join(''));
+}
+```
+
+:::tip[Assertion Functions vs Type Guards]
+Type guards (`value is T`) only narrow within the `if` block. Assertion functions (`asserts value is T`) narrow for all code that follows in the same scope — they "throw their way" to a narrowed type. Use assertion functions in validation logic at function entry points.
+:::
+
+---
+
+## `unknown` vs `any` vs `never` Deep Dive
+
+```ts
+// ── any ─────────────────────────────────────────────────────────
+// The escape hatch. Disables type-checking entirely.
+let a: any = 42;
+a.toString();          // OK
+a.nonExistent.deep();  // OK (no error — dangerous!)
+a();                   // OK
+const b: string = a;   // OK (any assigns to everything)
+
+// ── unknown ──────────────────────────────────────────────────────
+// The type-safe alternative to any. Must narrow before use.
+let u: unknown = 42;
+// u.toString();       // Error: Object is of type 'unknown'.
+// const s: string = u; // Error: Type 'unknown' is not assignable to type 'string'.
+
+// Narrow with type guard
+if (typeof u === 'number') {
+  u.toFixed(2); // OK inside this branch
+}
+
+// Narrow with assertion
+const uStr = u as string; // Type assertion (no runtime check)
+
+// ── never ────────────────────────────────────────────────────────
+// Represents values that never occur.
+
+// Function that never returns (infinite loop or always throws)
+function infiniteLoop(): never {
+  while (true) {}
+}
+
+function throwError(msg: string): never {
+  throw new Error(msg);
+}
+
+// never is the identity element for union types
+type A = string | never; // string
+type B = never | number; // number
+type C = never;          // never
+
+// never in exhaustive checks
+type Weekday = 'Mon' | 'Tue' | 'Wed' | 'Thu' | 'Fri';
+function getDayName(day: Weekday): string {
+  switch (day) {
+    case 'Mon': return 'Monday';
+    case 'Tue': return 'Tuesday';
+    case 'Wed': return 'Wednesday';
+    case 'Thu': return 'Thursday';
+    case 'Fri': return 'Friday';
+    default: {
+      const _exhaustive: never = day;
+      // If a new day is added to Weekday, this line errors:
+      // Type '"Sat"' is not assignable to type 'never'.
+      throw new Error(`Unknown day: ${_exhaustive}`);
+    }
+  }
+}
+```
+
+---
+
+## Function Overloads
+
+Function overloads let you provide multiple call signatures for a single function, each with different parameter and return types:
+
+```ts
+// Overload signatures (no implementation)
+function createElement(tag: 'div'): HTMLDivElement;
+function createElement(tag: 'canvas'): HTMLCanvasElement;
+function createElement(tag: 'table'): HTMLTableElement;
+function createElement(tag: 'input'): HTMLInputElement;
+// Implementation signature (not directly callable)
+function createElement(tag: string): HTMLElement {
+  return document.createElement(tag);
+}
+
+const div = createElement('div');       // type: HTMLDivElement
+const canvas = createElement('canvas'); // type: HTMLCanvasElement
+const input = createElement('input');   // type: HTMLInputElement
+
+// Overloads with different argument counts
+function formatDate(timestamp: number): string;
+function formatDate(year: number, month: number, day: number): string;
+function formatDate(yearOrTimestamp: number, month?: number, day?: number): string {
+  if (month !== undefined && day !== undefined) {
+    return new Date(yearOrTimestamp, month - 1, day).toLocaleDateString();
+  }
+  return new Date(yearOrTimestamp).toLocaleDateString();
+}
+
+formatDate(Date.now());        // one-argument overload
+formatDate(2024, 6, 15);       // three-argument overload
+// formatDate(2024, 6);        // Error: No overload matches this call.
+
+// Method overloads in a class
+class EventEmitter<Events extends Record<string, unknown>> {
+  on<K extends keyof Events>(event: K, listener: (data: Events[K]) => void): this;
+  on(event: string, listener: (data: unknown) => void): this;
+  on(event: string, listener: (data: unknown) => void): this {
+    // implementation
+    return this;
+  }
+}
+```
+
+---
+
+## Variadic Tuple Types
+
+```ts
+// Variadic tuples use ...T[] spread in tuple positions
+type Concat<T extends unknown[], U extends unknown[]> = [...T, ...U];
+
+type AB = Concat<[string, number], [boolean, bigint]>;
+// type: [string, number, boolean, bigint]
+
+// Prepend to a tuple
+type Prepend<T, Tuple extends unknown[]> = [T, ...Tuple];
+type P = Prepend<string, [number, boolean]>; // [string, number, boolean]
+
+// Function composition types
+type Tail<T extends unknown[]> =
+  T extends [unknown, ...infer Rest] ? Rest : never;
+
+// Typed middleware pipeline
+type Middleware<State, NewState> = (state: State) => NewState;
+type Pipeline<T extends unknown[]> =
+  T extends [Middleware<infer In, infer Out>, ...infer Rest]
+    ? Rest extends []
+      ? Middleware<In, Out>
+      : Middleware<In, Pipeline<Rest> extends Middleware<Out, infer Final> ? Final : never>
+    : never;
+```
+
+### Labeled Tuple Elements
+
+```ts
+// Labeled tuples — better error messages and documentation
+type Range = [start: number, end: number];
+type RGB = [red: number, green: number, blue: number];
+type NamedArgs = [name: string, age?: number, ...tags: string[]];
+
+function createRange(...[start, end]: Range): Range {
+  return [start, end];
+}
+
+const r: Range = [0, 100];
+const color: RGB = [255, 128, 0];
+```
+
+---
+
+## Covariance and Contravariance
+
+**Variance** describes how generic types relate when their type arguments are in a subtype relationship.
+
+```ts
+// Covariance: if Dog extends Animal, then Dog[] is assignable to Animal[]
+// (Output positions are covariant)
+type Animal = { name: string };
+type Dog = { name: string; breed: string };
+
+const dogs: Dog[] = [{ name: 'Rex', breed: 'Labrador' }];
+const animals: Animal[] = dogs; // OK — covariant
+// (Reading from an Animal[] is safe — you only get Animal-compatible values)
+
+// Contravariance: if Dog extends Animal, then
+// (Animal → void) is assignable to (Dog → void)
+// (Input/callback positions are contravariant)
+type AnimalCallback = (a: Animal) => void;
+type DogCallback = (d: Dog) => void;
+
+const handleAnimal: AnimalCallback = (a) => console.log(a.name);
+// DogCallback expects a Dog, but AnimalCallback accepts any Animal:
+// This is UNSAFE — a DogCallback caller might pass a Dog with .breed
+// that AnimalCallback doesn't know about:
+// const handleDog: DogCallback = handleAnimal; // Error (strictFunctionTypes)
+```
+
+### Variance Annotations (`in` / `out`)
+
+TypeScript 4.7 introduced explicit variance annotations:
+
+```ts
+// 'out' marks a covariant type parameter (producer)
+interface Producer<out T> {
+  produce(): T; // T only appears in output positions
+}
+
+// 'in' marks a contravariant type parameter (consumer)
+interface Consumer<in T> {
+  consume(value: T): void; // T only appears in input positions
+}
+
+// 'in out' marks an invariant type parameter
+interface ReadWrite<in out T> {
+  get(): T;
+  set(value: T): void;
+}
+
+// Example — covariant works like subtyping:
+type Animal2 = { name: string };
+type Cat = { name: string; meow(): void };
+
+const catProducer: Producer<Cat> = { produce: () => ({ name: 'Whiskers', meow() {} }) };
+const animalProducer: Producer<Animal2> = catProducer; // OK — covariant
+```
+
+---
+
+## Declaration Merging
+
+TypeScript allows multiple declarations of the same name in specific cases, and **merges** them into a single definition.
+
+### Interface Merging
+
+```ts
+// Both declarations are merged into one
+interface Window {
+  analyticsId: string;
+}
+interface Window {
+  featureFlags: Record<string, boolean>;
+}
+
+// Merged result:
+// interface Window {
+//   analyticsId: string;
+//   featureFlags: Record<string, boolean>;
+//   // ...plus all original Window properties
+// }
+
+declare const window: Window;
+window.analyticsId = 'UA-12345';
+window.featureFlags = { darkMode: true };
+```
+
+### Namespace + Class/Function/Enum Merging
+
+```ts
+// Add static members to a class via namespace
+class Validator {
+  isValid(input: string): boolean {
+    return input.length > 0;
+  }
+}
+namespace Validator {
+  export const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  export function isEmail(input: string): boolean {
+    return EMAIL_REGEX.test(input);
+  }
+}
+
+const v = new Validator();
+v.isValid('hello');          // instance method
+Validator.isEmail('a@b.com'); // namespace function
+Validator.EMAIL_REGEX;        // namespace constant
+
+// Add properties to a function via namespace
+function createLogger(prefix: string) {
+  return (msg: string) => console.log(`[${prefix}] ${msg}`);
+}
+namespace createLogger {
+  export const defaultPrefix = '[LOG]';
+  export function silent() {
+    return () => {};
+  }
+}
+
+createLogger('INFO')('Server started');
+createLogger.silent()('suppressed');
+```
+
+### Enum Merging
+
+```ts
+enum Direction {
+  Up = 'UP',
+  Down = 'DOWN',
+}
+enum Direction {
+  Left = 'LEFT',
+  Right = 'RIGHT',
+}
+// Merged: Up | Down | Left | Right all available
+```
+
+---
+
+## Ambient Declarations
+
+Ambient declarations describe the types of entities that exist outside TypeScript's compile graph — usually global variables injected by the runtime or build tools:
+
+```ts
+// globals.d.ts — augment the global scope
+declare const __DEV__: boolean;
+declare const __VERSION__: string;
+declare const __BUILD_TIME__: number;
+
+// Usage anywhere in the project (no import needed):
+if (__DEV__) {
+  console.debug(`v${__VERSION__} built at ${new Date(__BUILD_TIME__)}`);
+}
+
+// Declare a global function (e.g., injected by a browser extension)
+declare function gtag(command: string, ...args: unknown[]): void;
+
+// Augment an existing global interface
+declare global {
+  interface Window {
+    dataLayer: unknown[];
+    onAppReady: () => void;
+  }
+}
+```
+
+:::caution[Ambient Declarations]
+Ambient declarations are promises to the compiler that something exists. If you lie about a global (`declare const DB_URL: string`) but it isn't actually available at runtime, TypeScript won't catch the bug — you get a runtime `ReferenceError`. Always ensure ambient declarations accurately reflect what the runtime provides.
+:::

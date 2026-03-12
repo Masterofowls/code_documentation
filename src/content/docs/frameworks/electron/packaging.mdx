@@ -1,0 +1,510 @@
+---
+title: Packaging & Distribution
+description: Package and distribute your Electron app — code signing, multi-platform CI/CD, ASAR, auto-updates, and app store submission.
+sidebar:
+  order: 7
+tags: [javascript, desktop]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Packaging transforms your source code into native distributable installers for Windows, macOS, and Linux. This guide covers Electron Forge (recommended), electron-builder, code signing, and CI/CD automation.
+
+## Electron Forge Packaging
+
+Electron Forge uses **makers** to produce platform-specific distributable formats. The `npm run make` command packages and creates installers in one step.
+
+### Building a Package
+
+```bash
+# Package only (no installer)
+npm run package
+
+# Package + create installers
+npm run make
+
+# Package for a specific platform (cross-compilation is limited)
+npm run make -- --platform=linux
+```
+
+Output is placed in `out/make/`.
+
+### `forge.config.ts` — Full Maker Configuration
+
+```typescript
+import type { ForgeConfig } from '@electron-forge/shared-types';
+import { MakerSquirrel } from '@electron-forge/maker-squirrel';
+import { MakerDMG } from '@electron-forge/maker-dmg';
+import { MakerZIP } from '@electron-forge/maker-zip';
+import { MakerDeb } from '@electron-forge/maker-deb';
+import { MakerRpm } from '@electron-forge/maker-rpm';
+import { MakerAppX } from '@electron-forge/maker-appx';
+import { VitePlugin } from '@electron-forge/plugin-vite';
+
+const config: ForgeConfig = {
+  packagerConfig: {
+    appId: 'com.yourcompany.yourapp',
+    name: 'MyApp',
+    executableName: 'my-app',
+    icon: './assets/icon',          // No extension — Forge picks .ico/.icns/.png
+    asar: {
+      unpack: '**/*.node',          // Unpack native modules from ASAR
+    },
+    // Code signing
+    osxSign: {
+      identity: 'Developer ID Application: Your Name (TEAM_ID)',
+    },
+    osxNotarize: {
+      tool: 'notarytool',
+      appleId: process.env.APPLE_ID!,
+      appleIdPassword: process.env.APPLE_ID_PASSWORD!,
+      teamId: process.env.APPLE_TEAM_ID!,
+    },
+    win32metadata: {
+      CompanyName: 'Your Company',
+      FileDescription: 'My Application',
+      ProductName: 'MyApp',
+    },
+    extraResource: ['./assets/extra-data'],
+    ignore: [/^\/src/, /^\/\.github/, /^\/tests/],
+  },
+  makers: [
+    // Windows: Squirrel installer (simple, supports auto-update)
+    new MakerSquirrel({
+      name: 'MyApp',
+      setupIcon: './assets/icon.ico',
+      loadingGif: './assets/installer.gif',
+      certificateFile: process.env.WINDOWS_CERT_FILE,
+      certificatePassword: process.env.WINDOWS_CERT_PASSWORD,
+    }),
+
+    // macOS: DMG disk image
+    new MakerDMG({
+      name: 'MyApp',
+      icon: './assets/icon.icns',
+      background: './assets/dmg-background.png',
+      format: 'UDZO',               // Compressed DMG
+      contents: [
+        { x: 448, y: 344, type: 'link', path: '/Applications' },
+        { x: 192, y: 344, type: 'file' },
+      ],
+    }),
+
+    // macOS (and others): ZIP archive
+    new MakerZIP({}, ['darwin']),
+
+    // Linux: Debian/Ubuntu package
+    new MakerDeb({
+      options: {
+        maintainer: 'Your Name <you@example.com>',
+        homepage: 'https://your-site.com',
+        icon: './assets/icon.png',
+        categories: ['Utility'],
+        section: 'utils',
+        priority: 'optional',
+      },
+    }),
+
+    // Linux: RPM package (Fedora/RHEL)
+    new MakerRpm({
+      options: {
+        license: 'MIT',
+        homepage: 'https://your-site.com',
+        icon: './assets/icon.png',
+      },
+    }),
+
+    // Windows: MSIX/AppX for Microsoft Store
+    new MakerAppX({
+      publisher: 'CN=Your Company',
+      devCert: process.env.WINDOWS_APPX_CERT,
+    }),
+  ],
+  plugins: [
+    new VitePlugin({
+      build: [
+        { entry: 'src/main.ts', config: 'vite.main.config.ts', target: 'main' },
+        { entry: 'src/preload.ts', config: 'vite.preload.config.ts', target: 'preload' },
+      ],
+      renderer: [{ name: 'main_window', config: 'vite.renderer.config.ts' }],
+    }),
+  ],
+};
+
+export default config;
+```
+
+## electron-builder (Alternative)
+
+electron-builder provides more granular control and is preferred by many enterprise teams:
+
+```bash
+npm install --save-dev electron-builder
+```
+
+### `electron-builder.yml`
+
+```yaml
+appId: com.yourcompany.yourapp
+productName: MyApp
+copyright: Copyright © 2024 Your Company
+
+directories:
+  output: dist
+  buildResources: assets
+
+files:
+  - "!**/.vscode/*"
+  - "!src/*"
+  - "!electron.vite.config.{js,ts,mjs,cjs}"
+  - "!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}"
+  - "!{.env,.env.*,.npmrc,pnpm-lock.yaml}"
+
+asarUnpack:
+  - "resources/**"
+  - "**/*.node"
+
+win:
+  executableName: my-app
+  icon: assets/icon.ico
+  target:
+    - target: nsis
+      arch: [x64, arm64]
+    - target: msi
+      arch: [x64]
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: MyApp
+  installerIcon: assets/installer-icon.ico
+  installerHeaderIcon: assets/installer-header-icon.ico
+  installerSidebar: assets/installer-sidebar.bmp
+
+mac:
+  entitlementsInherit: assets/entitlements.mac.inherit.plist
+  extendInfo:
+    NSCameraUsageDescription: App requires camera access.
+    NSMicrophoneUsageDescription: App requires microphone access.
+  notarize: true
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+    - target: zip
+      arch: [x64, arm64]
+
+dmg:
+  background: assets/dmg-background.png
+  icon: assets/icon.icns
+  iconSize: 80
+  contents:
+    - x: 240
+      y: 380
+    - x: 480
+      y: 380
+      type: link
+      path: /Applications
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64, arm64]
+    - target: deb
+    - target: rpm
+  category: Utility
+  icon: assets/icon.png
+
+publish:
+  provider: github
+  owner: your-username
+  repo: your-repo
+  private: false
+```
+
+```json
+// package.json scripts
+{
+  "scripts": {
+    "build": "electron-vite build",
+    "dist": "npm run build && electron-builder",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:linux": "npm run build && electron-builder --linux"
+  }
+}
+```
+
+## ASAR Packaging
+
+ASAR (Atom Shell Archive) bundles all app files into a single archive for faster file I/O and to prevent casual inspection of source code.
+
+```typescript
+// forge.config.ts
+packagerConfig: {
+  asar: true,       // Enable ASAR
+
+  // Unpack native .node modules — they cannot run inside ASAR
+  asar: {
+    unpack: '**/{*.node,ffmpeg*}',
+    // or use unpackDir:
+    unpackDir: '{node_modules/sharp,node_modules/better-sqlite3}',
+  },
+},
+```
+
+:::caution[ASAR is not encryption]
+ASAR prevents casual inspection but is trivially extractable with `npx asar extract app.asar out/`. Do not put secrets in your source code — use environment variables or an external secrets service.
+:::
+
+## App Icons
+
+Prepare icons for all platforms before packaging:
+
+| Platform | Format | Sizes |
+|----------|--------|-------|
+| Windows | `.ico` | 16, 32, 48, 64, 128, 256 px |
+| macOS | `.icns` | 16, 32, 64, 128, 256, 512, 1024 px |
+| Linux | `.png` | 512×512 px (minimum) |
+
+Generate all formats from a single 1024×1024 PNG:
+
+```bash
+# Using electron-icon-builder
+npm install --save-dev electron-icon-builder
+
+npx electron-icon-builder \
+  --input=assets/icon-1024.png \
+  --output=assets \
+  --flatten
+```
+
+## Code Signing
+
+:::caution[Unsigned Apps Are Blocked]
+On macOS, unsigned or un-notarized apps show "can't be opened because it is from an unidentified developer". On Windows, SmartScreen blocks unsigned executables. Code signing is essential for production distribution.
+:::
+
+### Windows Code Signing
+
+<Tabs>
+  <TabItem label="Standard OV/EV Certificate">
+    ```typescript
+    // forge.config.ts — using a PFX certificate
+    makers: [
+      new MakerSquirrel({
+        certificateFile: process.env.WINDOWS_CERTIFICATE_FILE, // path to .pfx
+        certificatePassword: process.env.WINDOWS_CERTIFICATE_PASSWORD,
+      }),
+    ]
+    ```
+
+    ```bash
+    # Set environment variables before building
+    $env:WINDOWS_CERTIFICATE_FILE = "C:\certs\my-cert.pfx"
+    $env:WINDOWS_CERTIFICATE_PASSWORD = "my-password"
+    npm run make
+    ```
+  </TabItem>
+  <TabItem label="Azure Trusted Signing (EV)">
+    ```bash
+    # Install Azure Trusted Signing tools
+    npm install --save-dev @electron/windows-sign
+
+    # Configure in forge.config.ts
+    # packagerConfig.windowsSign = {
+    #   signToolPath: 'path/to/signtool.exe',
+    #   certificateFile: process.env.AZURE_CERT_FILE,
+    #   ...
+    # }
+    ```
+  </TabItem>
+</Tabs>
+
+### macOS Code Signing + Notarization
+
+<Steps>
+
+1. **Create entitlements file** (`assets/entitlements.mac.plist`):
+
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+     "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0">
+     <dict>
+       <key>com.apple.security.cs.allow-jit</key><true/>
+       <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+       <key>com.apple.security.cs.disable-library-validation</key><true/>
+     </dict>
+   </plist>
+   ```
+
+2. **Configure forge.config.ts**:
+
+   ```typescript
+   packagerConfig: {
+     osxSign: {
+       identity: 'Developer ID Application: Your Name (TEAMID)',
+       entitlements: 'assets/entitlements.mac.plist',
+       'entitlements-inherit': 'assets/entitlements.mac.inherit.plist',
+       'signature-flags': 'library',
+     },
+     osxNotarize: {
+       tool: 'notarytool',
+       appleId: process.env.APPLE_ID!,
+       appleIdPassword: process.env.APPLE_APP_SPECIFIC_PASSWORD!,
+       teamId: process.env.APPLE_TEAM_ID!,
+     },
+   },
+   ```
+
+3. **Set environment variables and build**:
+
+   ```bash
+   $env:APPLE_ID = "your@apple.id"
+   $env:APPLE_APP_SPECIFIC_PASSWORD = "xxxx-xxxx-xxxx-xxxx"
+   $env:APPLE_TEAM_ID = "YOURTEAMID"
+   npm run make
+   ```
+
+</Steps>
+
+## GitHub Actions — Multi-Platform CI/CD
+
+```yaml
+# .github/workflows/release.yml
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and make (Windows)
+        if: matrix.os == 'windows-latest'
+        env:
+          WINDOWS_CERTIFICATE_FILE: ${{ secrets.WINDOWS_CERTIFICATE_FILE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run make
+
+      - name: Build and make (macOS)
+        if: matrix.os == 'macos-latest'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run make
+
+      - name: Build and make (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run make
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}
+          path: out/make/**/*
+          retention-days: 7
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/make/**/*
+          draft: true
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+## Auto-Update Flow with GitHub Releases
+
+```typescript
+// src/main.ts — complete auto-update setup
+import { autoUpdater } from 'electron-updater';
+import { dialog, BrowserWindow } from 'electron';
+import log from 'electron-log';
+
+autoUpdater.logger = log;
+autoUpdater.autoDownload = false;
+autoUpdater.autoInstallOnAppQuit = true;
+
+autoUpdater.on('update-available', async (info) => {
+  const win = BrowserWindow.getAllWindows()[0];
+  const result = await dialog.showMessageBox(win, {
+    type: 'info',
+    title: 'Update Available',
+    message: `Version ${info.version} is available`,
+    detail: 'Would you like to download and install it?',
+    buttons: ['Download', 'Later'],
+    defaultId: 0,
+  });
+
+  if (result.response === 0) {
+    autoUpdater.downloadUpdate();
+  }
+});
+
+autoUpdater.on('update-downloaded', async (info) => {
+  const win = BrowserWindow.getAllWindows()[0];
+  const result = await dialog.showMessageBox(win, {
+    type: 'info',
+    title: 'Update Ready',
+    message: `Version ${info.version} downloaded`,
+    detail: 'Restart now to apply the update?',
+    buttons: ['Restart', 'Later'],
+    defaultId: 0,
+  });
+
+  if (result.response === 0) {
+    autoUpdater.quitAndInstall();
+  }
+});
+```
+
+## Version Management
+
+```bash
+# Bump version and create a git tag
+npm version patch   # 1.0.0 → 1.0.1
+npm version minor   # 1.0.1 → 1.1.0
+npm version major   # 1.1.0 → 2.0.0
+
+# Push tag to trigger CI release
+git push --follow-tags
+```
+
+:::tip[Squirrel vs NSIS vs MSI]
+- **Squirrel.Windows** — simple, per-user install, supports delta updates via electron-updater, no UAC prompt
+- **NSIS** — full-featured installer, supports per-machine install, custom install screens
+- **MSI** — enterprise/Group Policy friendly, required for some corporate environments
+
+For most consumer apps, Squirrel or NSIS is sufficient. Use MSI for enterprise/IT-managed deployments.
+:::

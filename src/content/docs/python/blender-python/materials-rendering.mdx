@@ -1,0 +1,577 @@
+---
+title: Materials and Rendering with bpy
+description: Build node-based materials from Python, load textures, configure Cycles and EEVEE render settings, and batch-render frames — all scriptable.
+sidebar:
+  order: 5
+tags: [python, blender, 3d]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Blender's material system is entirely node-based and fully scriptable through `bpy`. You can create materials, build complete shader node networks, assign textures, configure the render engine, and trigger renders — all without touching the UI.
+
+---
+
+## Creating a Material
+
+Every material lives in `bpy.data.materials`. Enable `use_nodes = True` to access the shader node tree.
+
+```python
+import bpy
+
+# ── Create a new material ─────────────────────────────────────────
+mat = bpy.data.materials.new(name="ScriptedMaterial")
+mat.use_nodes = True  # activates the node tree
+
+# Clear the default nodes (Principled BSDF + Material Output)
+mat.node_tree.nodes.clear()
+
+print(f"Material '{mat.name}' created. use_nodes={mat.use_nodes}")
+print(f"Node tree: {mat.node_tree}")
+```
+
+> **Console output:**
+> ```
+> Material 'ScriptedMaterial' created. use_nodes=True
+> Node tree: <NodeTree 'ScriptedMaterial' at 0x...>
+> ```
+
+### Assigning a Material to an Object
+
+```python
+import bpy
+
+obj = bpy.context.active_object  # must be a MESH object
+
+# Replace all existing material slots
+obj.data.materials.clear()
+obj.data.materials.append(mat)
+
+print(f"Material '{mat.name}' assigned to '{obj.name}'")
+print(f"Slot count: {len(obj.data.materials)}")
+```
+
+> **Console output:**
+> ```
+> Material 'ScriptedMaterial' assigned to 'Cube'
+> Slot count: 1
+> ```
+
+---
+
+## Navigating the Node Tree
+
+```python
+import bpy
+
+mat = bpy.data.materials["ScriptedMaterial"]
+nt  = mat.node_tree     # ShaderNodeTree
+nodes = nt.nodes         # NodeGroup — add/remove/find nodes here
+links = nt.links         # NodeLinks — connect outputs to inputs
+
+# List existing nodes
+for node in nodes:
+    print(f"  {node.type:<24} name={node.name!r:<30} label={node.label!r}")
+```
+
+---
+
+## Building a Principled BSDF Material
+
+The most common material workflow: **Image Texture → Principled BSDF → Material Output**.
+
+```python
+import bpy
+
+def build_principled_material(
+    name: str,
+    base_color: tuple = (0.8, 0.2, 0.1, 1.0),
+    metallic: float   = 0.0,
+    roughness: float  = 0.4,
+    ior: float        = 1.45,
+) -> bpy.types.Material:
+    """Create a Principled BSDF material with given PBR parameters."""
+
+    mat = bpy.data.materials.new(name=name)
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    nodes.clear()
+
+    # ── Material Output ───────────────────────────────────────────
+    output = nodes.new(type='ShaderNodeOutputMaterial')
+    output.location = (400, 0)
+
+    # ── Principled BSDF ───────────────────────────────────────────
+    bsdf = nodes.new(type='ShaderNodeBsdfPrincipled')
+    bsdf.location = (0, 0)
+
+    # Set inputs by name (Blender 4.x uses named inputs)
+    bsdf.inputs['Base Color'].default_value  = base_color
+    bsdf.inputs['Metallic'].default_value    = metallic
+    bsdf.inputs['Roughness'].default_value   = roughness
+    bsdf.inputs['IOR'].default_value         = ior
+
+    # ── Connect BSDF → Output ─────────────────────────────────────
+    links.new(bsdf.outputs['BSDF'], output.inputs['Surface'])
+
+    return mat
+
+
+red_plastic = build_principled_material(
+    "RedPlastic",
+    base_color=(0.9, 0.05, 0.05, 1.0),
+    metallic=0.0,
+    roughness=0.6
+)
+
+gold_metal = build_principled_material(
+    "GoldMetal",
+    base_color=(1.0, 0.766, 0.336, 1.0),
+    metallic=1.0,
+    roughness=0.2
+)
+
+print(f"Created: {red_plastic.name}, {gold_metal.name}")
+```
+
+> **Console output:**
+> ```
+> Created: RedPlastic, GoldMetal
+> ```
+>
+> **Viewport result:** Two materials appear in the Material Properties. Assign `RedPlastic` to the cube for a dull red look; `GoldMetal` for a shiny gold surface.
+
+---
+
+## Adding an Emission Shader
+
+```python
+import bpy
+
+def build_emission_material(
+    name: str,
+    color: tuple  = (0.1, 0.5, 1.0, 1.0),
+    strength: float = 5.0,
+) -> bpy.types.Material:
+    """Glowing emission material — useful for neon, screens, fire."""
+
+    mat = bpy.data.materials.new(name=name)
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    nodes.clear()
+
+    output   = nodes.new('ShaderNodeOutputMaterial')
+    output.location = (300, 0)
+
+    emission = nodes.new('ShaderNodeEmission')
+    emission.location = (0, 0)
+    emission.inputs['Color'].default_value    = color
+    emission.inputs['Strength'].default_value = strength
+
+    links.new(emission.outputs['Emission'], output.inputs['Surface'])
+    return mat
+
+
+neon = build_emission_material("NeonBlue", color=(0.05, 0.3, 1.0, 1.0), strength=8.0)
+print(f"Emission material '{neon.name}' created with strength {neon.node_tree.nodes['Emission'].inputs['Strength'].default_value}")
+```
+
+> **Console output:**
+> ```
+> Emission material 'NeonBlue' created with strength 8.0
+> ```
+
+---
+
+## Image Texture Node
+
+```python
+import bpy
+import os
+
+def build_textured_material(
+    name: str,
+    image_path: str,
+    roughness: float = 0.5
+) -> bpy.types.Material:
+    """PBR material with a diffuse image texture."""
+
+    mat = bpy.data.materials.new(name=name)
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    nodes.clear()
+
+    # Material Output
+    output = nodes.new('ShaderNodeOutputMaterial')
+    output.location = (700, 0)
+
+    # Principled BSDF
+    bsdf = nodes.new('ShaderNodeBsdfPrincipled')
+    bsdf.location = (350, 0)
+    bsdf.inputs['Roughness'].default_value = roughness
+
+    # Texture Coordinate + Mapping (for UV control)
+    tex_coord = nodes.new('ShaderNodeTexCoord')
+    tex_coord.location = (-500, 0)
+
+    mapping = nodes.new('ShaderNodeMapping')
+    mapping.location = (-300, 0)
+
+    # Image Texture node
+    img_node = nodes.new('ShaderNodeTexImage')
+    img_node.location = (-50, 0)
+
+    # Load image — raises RuntimeError if path is invalid
+    if os.path.exists(image_path):
+        img = bpy.data.images.load(image_path, check_existing=True)
+        img_node.image = img
+        img.colorspace_settings.name = 'sRGB'
+        print(f"Loaded texture: {os.path.basename(image_path)}")
+    else:
+        print(f"[WARNING] Texture not found: {image_path}")
+
+    # Connect the node chain
+    links.new(tex_coord.outputs['UV'],    mapping.inputs['Vector'])
+    links.new(mapping.outputs['Vector'],  img_node.inputs['Vector'])
+    links.new(img_node.outputs['Color'],  bsdf.inputs['Base Color'])
+    links.new(bsdf.outputs['BSDF'],       output.inputs['Surface'])
+
+    return mat
+
+
+mat = build_textured_material(
+    "WoodPlanks",
+    "/textures/wood_diffuse.png",
+    roughness=0.7
+)
+```
+
+---
+
+## Mix Shader
+
+```python
+import bpy
+
+mat   = bpy.data.materials.new("MixExample")
+mat.use_nodes = True
+nodes = mat.node_tree.nodes
+links = mat.node_tree.links
+nodes.clear()
+
+output  = nodes.new('ShaderNodeOutputMaterial'); output.location  = (600, 0)
+mix     = nodes.new('ShaderNodeMixShader');      mix.location     = (300, 0)
+bsdf    = nodes.new('ShaderNodeBsdfPrincipled'); bsdf.location    = (0, 100)
+glossy  = nodes.new('ShaderNodeBsdfGlossy');     glossy.location  = (0, -150)
+fresnel = nodes.new('ShaderNodeFresnel');         fresnel.location = (0, 300)
+
+bsdf.inputs['Base Color'].default_value   = (0.2, 0.5, 0.9, 1.0)
+bsdf.inputs['Roughness'].default_value    = 0.8
+glossy.inputs['Color'].default_value      = (1.0, 1.0, 1.0, 1.0)
+glossy.inputs['Roughness'].default_value  = 0.05
+fresnel.inputs['IOR'].default_value       = 1.45
+
+links.new(fresnel.outputs['Fac'],    mix.inputs['Fac'])
+links.new(bsdf.outputs['BSDF'],      mix.inputs[1])
+links.new(glossy.outputs['BSDF'],    mix.inputs[2])
+links.new(mix.outputs['Shader'],     output.inputs['Surface'])
+
+print(f"Mix shader material '{mat.name}' built with {len(nodes)} nodes.")
+```
+
+> **Console output:**
+> ```
+> Mix shader material 'MixExample' built with 5 nodes.
+> ```
+>
+> **Viewport result:** A Fresnel-blended material — diffuse at oblique angles, glossy at glancing angles, mimicking plastic or lacquered wood.
+
+---
+
+## UV Unwrapping via Python
+
+```python
+import bpy
+
+obj = bpy.context.active_object
+
+# Smart UV Project (auto-unwrap)
+bpy.context.view_layer.objects.active = obj
+bpy.ops.object.mode_set(mode='EDIT')
+bpy.ops.mesh.select_all(action='SELECT')
+bpy.ops.uv.smart_project(
+    angle_limit=66.0,
+    island_margin=0.02,
+    scale_to_bounds=False
+)
+bpy.ops.object.mode_set(mode='OBJECT')
+
+# Report UV maps
+for uv_map in obj.data.uv_layers:
+    print(f"UV map: {uv_map.name} (active={uv_map.active})")
+```
+
+> **Console output:**
+> ```
+> UV map: UVMap (active=True)
+> ```
+
+---
+
+## Render Settings
+
+### Choosing the Engine
+
+```python
+import bpy
+
+scene = bpy.context.scene
+
+# CYCLES — path-traced, physically accurate
+scene.render.engine = 'CYCLES'
+scene.cycles.device         = 'GPU'       # 'CPU' if no GPU
+scene.cycles.samples        = 128
+scene.cycles.use_denoising  = True
+scene.cycles.denoising_input_passes = 'RGB_ALBEDO_NORMAL'
+
+# BLENDER_EEVEE — real-time rasteriser
+# scene.render.engine = 'BLENDER_EEVEE'
+# scene.eevee.taa_render_samples   = 64
+# scene.eevee.use_ssr               = True   # screen-space reflections
+# scene.eevee.use_gtao              = True   # ambient occlusion
+# scene.eevee.use_bloom             = True
+
+print(f"Engine : {scene.render.engine}")
+print(f"Device : {scene.cycles.device}")
+print(f"Samples: {scene.cycles.samples}")
+```
+
+> **Console output:**
+> ```
+> Engine : CYCLES
+> Device : GPU
+> Samples: 128
+> ```
+
+### Resolution and Output
+
+```python
+import bpy
+
+render = bpy.context.scene.render
+
+# Resolution
+render.resolution_x          = 1920
+render.resolution_y          = 1080
+render.resolution_percentage = 100     # 50 = half resolution
+
+# Frame range
+bpy.context.scene.frame_start = 1
+bpy.context.scene.frame_end   = 250
+
+# Output
+render.filepath = "/renders/project_"  # frame number appended automatically
+render.image_settings.file_format      = 'PNG'
+render.image_settings.color_mode       = 'RGBA'
+render.image_settings.color_depth      = '16'   # 16-bit PNG
+
+print(f"Output: {render.filepath}####.png")
+print(f"Resolution: {render.resolution_x}x{render.resolution_y} @ {render.resolution_percentage}%")
+```
+
+> **Console output:**
+> ```
+> Output: /renders/project_####.png
+> Resolution: 1920x1080 @ 100%
+> ```
+
+---
+
+## Rendering a Single Frame to File
+
+```python
+import bpy
+
+scene = bpy.context.scene
+
+# Configure output
+scene.render.engine       = 'CYCLES'
+scene.cycles.samples      = 64
+scene.render.filepath     = "/tmp/render_frame001.png"
+scene.render.image_settings.file_format = 'PNG'
+
+# Render frame 1 and write to disk immediately
+bpy.ops.render.render(
+    write_still=True,   # save to render.filepath
+    use_viewport=False  # use scene camera, not viewport camera
+)
+
+print(f"Frame rendered to: {scene.render.filepath}")
+```
+
+> **Console output:**
+> ```
+> Fra:1 Mem:45.12M (Peak 68.45M) | Time:00:03.42 | Compositing
+> Fra:1 Mem:45.12M (Peak 68.45M) | Time:00:03.47 | Finished
+> Frame rendered to: /tmp/render_frame001.png
+> ```
+
+---
+
+## Rendering to an In-Memory Image
+
+You can render and immediately access the pixel data without writing to disk:
+
+```python
+import bpy
+
+scene = bpy.context.scene
+scene.render.engine = 'CYCLES'
+scene.cycles.samples = 16
+
+# Render without write_still — result lives in bpy.data.images['Render Result']
+bpy.ops.render.render(write_still=False)
+
+# Access the rendered pixels
+render_result = bpy.data.images.get('Render Result')
+if render_result:
+    w = render_result.size[0]
+    h = render_result.size[1]
+    print(f"Rendered: {w}x{h}, {len(render_result.pixels) // 4} pixels")
+
+    # Save manually to a custom path
+    render_result.save_render("/tmp/manual_save.exr")
+    print("Saved EXR to /tmp/manual_save.exr")
+```
+
+> **Console output:**
+> ```
+> Rendered: 1920x1080, 2073600 pixels
+> Saved EXR to /tmp/manual_save.exr
+> ```
+
+---
+
+## Batch Rendering Multiple Frames
+
+### Render Every Nth Frame
+
+```python
+import bpy
+import os
+
+def batch_render_frames(
+    output_dir: str,
+    frame_start: int,
+    frame_end: int,
+    step: int = 1,
+    samples: int = 64,
+) -> None:
+    """Render a range of frames to individual PNG files."""
+    os.makedirs(output_dir, exist_ok=True)
+
+    scene = bpy.context.scene
+    scene.render.engine           = 'CYCLES'
+    scene.cycles.samples          = samples
+    scene.render.image_settings.file_format = 'PNG'
+    scene.render.resolution_percentage = 100
+
+    total = len(range(frame_start, frame_end + 1, step))
+    print(f"Rendering {total} frame(s) to '{output_dir}'")
+
+    for idx, frame in enumerate(range(frame_start, frame_end + 1, step)):
+        scene.frame_set(frame)
+        scene.render.filepath = os.path.join(output_dir, f"frame_{frame:04d}.png")
+
+        print(f"  [{idx+1}/{total}] Frame {frame} → {scene.render.filepath}")
+        bpy.ops.render.render(write_still=True)
+
+    print("Batch render complete.")
+
+
+batch_render_frames(
+    output_dir="/tmp/batch_renders/",
+    frame_start=1,
+    frame_end=24,
+    step=4,        # render frames 1, 5, 9, 13, 17, 21
+    samples=32
+)
+```
+
+> **Console output:**
+> ```
+> Rendering 6 frame(s) to '/tmp/batch_renders/'
+>   [1/6] Frame 1  → /tmp/batch_renders/frame_0001.png
+>   [2/6] Frame 5  → /tmp/batch_renders/frame_0005.png
+>   [3/6] Frame 9  → /tmp/batch_renders/frame_0009.png
+>   [4/6] Frame 13 → /tmp/batch_renders/frame_0013.png
+>   [5/6] Frame 17 → /tmp/batch_renders/frame_0017.png
+>   [6/6] Frame 21 → /tmp/batch_renders/frame_0021.png
+> Batch render complete.
+> ```
+
+---
+
+## Render Passes and Compositing Output
+
+```python
+import bpy
+
+scene  = bpy.context.scene
+view_layer = scene.view_layers[0]
+
+# Enable render passes
+view_layer.use_pass_diffuse_color  = True
+view_layer.use_pass_glossy_color   = True
+view_layer.use_pass_z              = True    # depth pass
+view_layer.use_pass_normal         = True
+view_layer.use_pass_shadow         = True
+view_layer.use_pass_ambient_occlusion = True
+
+# Output to multi-layer EXR (preserves all passes in one file)
+scene.render.image_settings.file_format = 'OPEN_EXR_MULTILAYER'
+scene.render.image_settings.exr_codec   = 'ZIP'
+scene.render.filepath = "/tmp/multi_pass_render"
+
+print("Render passes enabled:")
+for attr in dir(view_layer):
+    if attr.startswith("use_pass_") and getattr(view_layer, attr):
+        print(f"  {attr}")
+```
+
+> **Console output:**
+> ```
+> Render passes enabled:
+>   use_pass_ambient_occlusion
+>   use_pass_combined
+>   use_pass_diffuse_color
+>   use_pass_glossy_color
+>   use_pass_normal
+>   use_pass_shadow
+>   use_pass_z
+> ```
+
+:::caution[GPU Rendering Requires a GPU Context]
+`scene.cycles.device = 'GPU'` only works when running inside the full Blender UI or when the system has a CUDA/OptiX/Metal-capable GPU with the appropriate drivers. In headless mode (`--background`), Blender defaults to CPU unless explicitly set up with environment variables. Use `bpy.context.preferences.addons['cycles'].preferences.compute_device_type = 'CUDA'` before setting device to GPU in headless scripts.
+:::
+
+---
+
+## Quick Reference
+
+| Task | Code |
+|---|---|
+| New material | `bpy.data.materials.new("Name")` |
+| Enable nodes | `mat.use_nodes = True` |
+| Get node tree | `mat.node_tree` |
+| Add a node | `nodes.new('ShaderNodeBsdfPrincipled')` |
+| Link nodes | `links.new(out_socket, in_socket)` |
+| Load image | `bpy.data.images.load("/path/to/file.png")` |
+| Set render engine | `scene.render.engine = 'CYCLES'` |
+| Set samples | `scene.cycles.samples = 128` |
+| Set output path | `scene.render.filepath = "/out/frame_"` |
+| Render to file | `bpy.ops.render.render(write_still=True)` |
+| Set frame | `scene.frame_set(42)` |

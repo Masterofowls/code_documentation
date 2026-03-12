@@ -1,0 +1,498 @@
+---
+title: Objects and Classes in JavaScript
+description: Deep dive into JavaScript's object model — object literals, property descriptors, prototype chains, ES6 classes, private fields, inheritance, Proxy, Reflect, and deep cloning.
+sidebar:
+  order: 5
+tags: [javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+JavaScript is prototype-based: objects can inherit directly from other objects. ES6 classes are **syntactic sugar** over this prototype system — they look like class-based OOP but work via prototypes underneath.
+
+## Object Literals
+
+```js
+// Basic object literal
+const person = {
+  name: 'Alice',
+  age: 30,
+  greet() {
+    return `Hi, I'm ${this.name}`;
+  },
+};
+console.log(person.greet()); // output: Hi, I'm Alice
+
+// Shorthand properties (when variable name = key name)
+const name = 'Bob';
+const age = 25;
+const user = { name, age }; // same as { name: name, age: age }
+console.log(user); // output: { name: 'Bob', age: 25 }
+
+// Computed property keys
+const prefix = 'user';
+const profile = {
+  [`${prefix}Name`]: 'Carol',
+  [`${prefix}Age`]: 28,
+  [Symbol.toStringTag]: 'UserProfile',
+};
+console.log(profile.userName); // output: Carol
+
+// Method shorthand
+const calculator = {
+  value: 0,
+  add(n) { this.value += n; return this; },     // chainable
+  subtract(n) { this.value -= n; return this; },
+  result() { return this.value; },
+};
+console.log(calculator.add(10).add(5).subtract(3).result()); // output: 12
+```
+
+## Property Descriptors
+
+Every property has a **descriptor** controlling its behavior — writability, enumerability, and configurability.
+
+```js
+// Object.defineProperty — fine-grained property control
+const config = {};
+
+Object.defineProperty(config, 'MAX_RETRIES', {
+  value: 3,
+  writable: false,      // cannot be reassigned
+  enumerable: true,     // shows in for...in and Object.keys
+  configurable: false,  // cannot be deleted or redefined
+});
+
+config.MAX_RETRIES = 10; // silently fails (throws in strict mode)
+console.log(config.MAX_RETRIES); // output: 3
+
+// Define multiple properties at once
+const rect = Object.defineProperties({}, {
+  width:  { value: 100, writable: true, enumerable: true, configurable: true },
+  height: { value: 50,  writable: true, enumerable: true, configurable: true },
+  area: {
+    get() { return this.width * this.height; }, // getter descriptor
+    enumerable: true,
+    configurable: true,
+  },
+});
+console.log(rect.area); // output: 5000
+
+// Inspect a property's descriptor
+const descriptor = Object.getOwnPropertyDescriptor(config, 'MAX_RETRIES');
+console.log(descriptor);
+// output: { value: 3, writable: false, enumerable: true, configurable: false }
+
+// Non-enumerable properties are hidden from Object.keys and for...in
+const obj = { visible: 1 };
+Object.defineProperty(obj, 'hidden', { value: 2, enumerable: false });
+console.log(Object.keys(obj));        // output: ['visible']
+console.log(obj.hidden);              // output: 2 (still accessible directly)
+console.log(JSON.stringify(obj));     // output: {"visible":1}
+```
+
+## The Prototype Chain
+
+Every JavaScript object has an internal `[[Prototype]]` link to another object (or `null`). Property lookup walks up this chain.
+
+```js
+const animal = {
+  breathe() { return `${this.name} breathes`; },
+  eat() { return `${this.name} eats`; },
+};
+
+const dog = Object.create(animal); // dog's prototype is animal
+dog.name = 'Rex';
+dog.bark = function() { return `${this.name} barks`; };
+
+console.log(dog.breathe()); // output: Rex breathes  (found on prototype)
+console.log(dog.bark());    // output: Rex barks      (own property)
+console.log(dog.hasOwnProperty('name'));   // output: true
+console.log(dog.hasOwnProperty('breathe')); // output: false (on prototype)
+
+// Prototype chain visualization
+// dog → animal → Object.prototype → null
+console.log(Object.getPrototypeOf(dog) === animal);            // output: true
+console.log(Object.getPrototypeOf(animal) === Object.prototype); // output: true
+
+// Property shadowing
+dog.eat = function() { return `${this.name} eats bones specifically`; };
+console.log(dog.eat()); // output: Rex eats bones specifically (shadowed)
+
+const cat = Object.create(animal);
+cat.name = 'Whiskers';
+console.log(cat.eat()); // output: Whiskers eats (uses animal's method — not shadowed)
+```
+
+## ES6 Classes
+
+Classes provide clean syntax for creating objects with shared behavior via prototypes.
+
+```js
+class Animal {
+  // Class fields (ES2022)
+  #name;
+  #sound;
+  static count = 0; // shared across all instances
+
+  constructor(name, sound) {
+    this.#name = name;
+    this.#sound = sound;
+    Animal.count++;
+  }
+
+  // Getter
+  get name() { return this.#name; }
+
+  // Method (lives on Animal.prototype)
+  speak() {
+    return `${this.#name} says ${this.#sound}!`;
+  }
+
+  // Static method (on Animal itself, not instances)
+  static create(name, sound) {
+    return new Animal(name, sound);
+  }
+
+  toString() {
+    return `Animal(${this.#name})`;
+  }
+}
+
+const dog = new Animal('Dog', 'woof');
+const cat = Animal.create('Cat', 'meow');
+
+console.log(dog.speak());    // output: Dog says woof!
+console.log(cat.speak());    // output: Cat says meow!
+console.log(Animal.count);   // output: 2
+console.log(`${dog}`);       // output: Animal(Dog)
+
+// Classes are just functions under the hood
+console.log(typeof Animal);            // output: function
+console.log(dog.constructor === Animal); // output: true
+```
+
+### Private Fields and Methods
+
+```js
+class BankAccount {
+  #balance;
+  #transactionLog = [];
+
+  constructor(owner, initialBalance = 0) {
+    this.owner = owner;
+    this.#balance = initialBalance;
+  }
+
+  // Private method
+  #logTransaction(type, amount) {
+    this.#transactionLog.push({
+      type,
+      amount,
+      balance: this.#balance,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  deposit(amount) {
+    if (amount <= 0) throw new RangeError('Amount must be positive');
+    this.#balance += amount;
+    this.#logTransaction('deposit', amount);
+    return this;
+  }
+
+  withdraw(amount) {
+    if (amount > this.#balance) throw new Error('Insufficient funds');
+    this.#balance -= amount;
+    this.#logTransaction('withdrawal', amount);
+    return this;
+  }
+
+  get balance() { return this.#balance; }
+  get log() { return [...this.#transactionLog]; }
+
+  // Static private
+  static #validateAmount(amount) {
+    return typeof amount === 'number' && amount > 0;
+  }
+
+  transfer(target, amount) {
+    if (!BankAccount.#validateAmount(amount)) throw new TypeError('Invalid amount');
+    this.withdraw(amount);
+    target.deposit(amount);
+    return this;
+  }
+}
+
+const acc = new BankAccount('Alice', 1000);
+acc.deposit(500).withdraw(200);
+console.log(acc.balance);    // output: 1300
+console.log(acc.#balance);   // SyntaxError: Private field '#balance' must be declared in an enclosing class
+```
+
+### Inheritance with `extends` and `super`
+
+```js
+class Shape {
+  constructor(color = 'black') {
+    this.color = color;
+  }
+
+  area() {
+    throw new Error('area() must be implemented by subclass');
+  }
+
+  toString() {
+    return `${this.constructor.name}(color=${this.color}, area=${this.area().toFixed(2)})`;
+  }
+}
+
+class Circle extends Shape {
+  #radius;
+
+  constructor(radius, color) {
+    super(color); // MUST call super() before using `this`
+    this.#radius = radius;
+  }
+
+  area() {
+    return Math.PI * this.#radius ** 2;
+  }
+
+  get radius() { return this.#radius; }
+}
+
+class Rectangle extends Shape {
+  constructor(width, height, color) {
+    super(color);
+    this.width = width;
+    this.height = height;
+  }
+
+  area() {
+    return this.width * this.height;
+  }
+}
+
+class Square extends Rectangle {
+  constructor(side, color) {
+    super(side, side, color); // reuse Rectangle constructor
+  }
+}
+
+const circle = new Circle(5, 'red');
+const rect = new Rectangle(4, 6, 'blue');
+const sq = new Square(4, 'green');
+
+console.log(circle.toString());
+// output: Circle(color=red, area=78.54)
+console.log(rect.toString());
+// output: Rectangle(color=blue, area=24.00)
+console.log(sq.toString());
+// output: Square(color=green, area=16.00)
+
+// instanceof checks the entire prototype chain
+console.log(sq instanceof Square);    // output: true
+console.log(sq instanceof Rectangle); // output: true
+console.log(sq instanceof Shape);     // output: true
+console.log(sq instanceof Circle);    // output: false
+```
+
+### Getters and Setters
+
+```js
+class Temperature {
+  #celsius;
+
+  constructor(celsius) {
+    this.#celsius = celsius;
+  }
+
+  get celsius() { return this.#celsius; }
+  set celsius(value) {
+    if (value < -273.15) throw new RangeError('Temperature below absolute zero');
+    this.#celsius = value;
+  }
+
+  get fahrenheit() { return this.#celsius * 9/5 + 32; }
+  set fahrenheit(value) { this.celsius = (value - 32) * 5/9; }
+
+  get kelvin() { return this.#celsius + 273.15; }
+  set kelvin(value) { this.celsius = value - 273.15; }
+}
+
+const temp = new Temperature(100);
+console.log(temp.fahrenheit); // output: 212
+console.log(temp.kelvin);     // output: 373.15
+
+temp.fahrenheit = 32;
+console.log(temp.celsius);    // output: 0
+console.log(temp.kelvin);     // output: 273.15
+```
+
+## Proxy and Reflect
+
+`Proxy` wraps an object, intercepting fundamental operations. `Reflect` provides the same operations as methods.
+
+```js
+// Validation proxy
+function createValidatedObject(target, validators) {
+  return new Proxy(target, {
+    set(obj, prop, value) {
+      if (validators[prop]) {
+        const { valid, message } = validators[prop](value);
+        if (!valid) throw new TypeError(`${prop}: ${message}`);
+      }
+      obj[prop] = value;
+      return true; // must return true to indicate success
+    },
+
+    get(obj, prop) {
+      return Reflect.get(obj, prop); // default behavior via Reflect
+    },
+  });
+}
+
+const user = createValidatedObject({}, {
+  age: (v) => ({
+    valid: Number.isInteger(v) && v >= 0 && v <= 150,
+    message: 'must be an integer between 0 and 150',
+  }),
+  email: (v) => ({
+    valid: typeof v === 'string' && v.includes('@'),
+    message: 'must be a valid email address',
+  }),
+});
+
+user.name = 'Alice';     // OK — no validator
+user.age = 30;           // OK
+user.email = 'alice@example.com'; // OK
+user.age = -1;           // TypeError: age: must be an integer between 0 and 150
+```
+
+```js
+// Observable proxy — track property access and changes
+function observable(target, callback) {
+  return new Proxy(target, {
+    get(obj, prop, receiver) {
+      callback('get', prop, obj[prop]);
+      return Reflect.get(obj, prop, receiver);
+    },
+    set(obj, prop, value, receiver) {
+      callback('set', prop, value, obj[prop]);
+      return Reflect.set(obj, prop, value, receiver);
+    },
+    deleteProperty(obj, prop) {
+      callback('delete', prop, obj[prop]);
+      return Reflect.deleteProperty(obj, prop);
+    },
+  });
+}
+
+const state = observable({ count: 0 }, (action, prop, newVal, oldVal) => {
+  if (action === 'set') console.log(`${prop}: ${oldVal} → ${newVal}`);
+});
+
+state.count = 1;  // output: count: 0 → 1
+state.count = 5;  // output: count: 1 → 5
+```
+
+```js
+// Reflect API mirrors Proxy traps
+const obj = { x: 1, y: 2 };
+
+Reflect.set(obj, 'z', 3);
+console.log(Reflect.get(obj, 'z'));       // output: 3
+console.log(Reflect.has(obj, 'x'));       // output: true
+console.log(Reflect.ownKeys(obj));        // output: ['x', 'y', 'z']
+Reflect.deleteProperty(obj, 'y');
+console.log(Reflect.ownKeys(obj));        // output: ['x', 'z']
+```
+
+## Deep Cloning
+
+```js
+// Shallow copy — only copies top-level properties
+const original = { name: 'Alice', address: { city: 'London' } };
+const shallow = { ...original };
+shallow.address.city = 'Paris'; // mutates original's nested object!
+console.log(original.address.city); // output: Paris — shared reference!
+
+// structuredClone (ES2022) — true deep clone, handles most built-in types
+const deep = structuredClone(original);
+deep.address.city = 'Berlin';
+console.log(original.address.city); // output: Paris — unaffected
+
+// structuredClone handles complex types
+const complex = {
+  date: new Date(),
+  map: new Map([['key', 'value']]),
+  set: new Set([1, 2, 3]),
+  array: [[1, 2], [3, 4]],
+};
+const cloned = structuredClone(complex);
+console.log(cloned.date instanceof Date);  // output: true
+console.log(cloned.map instanceof Map);    // output: true
+
+// structuredClone limitations — does NOT clone:
+// - Functions
+// - DOM nodes
+// - Getters/setters
+// - class instance methods (though data properties are copied)
+```
+
+:::caution[JSON.parse(JSON.stringify()) Pitfalls]
+A common deep-clone trick — but it silently drops `undefined` values, converts `Date` to strings, throws on circular references, and ignores `Symbol` keys and functions. Prefer `structuredClone()` in modern environments.
+:::
+
+## Mixins
+
+JavaScript doesn't support multiple inheritance, but mixins let you compose behavior from multiple sources:
+
+```js
+const Serializable = (superclass) => class extends superclass {
+  serialize() {
+    return JSON.stringify(this);
+  }
+
+  static deserialize(data) {
+    return Object.assign(new this(), JSON.parse(data));
+  }
+};
+
+const Validatable = (superclass) => class extends superclass {
+  validate() {
+    const errors = [];
+    for (const [field, rules] of Object.entries(this.constructor.validationRules ?? {})) {
+      const value = this[field];
+      if (rules.required && (value === undefined || value === null || value === '')) {
+        errors.push(`${field} is required`);
+      }
+      if (rules.minLength && String(value).length < rules.minLength) {
+        errors.push(`${field} must be at least ${rules.minLength} characters`);
+      }
+    }
+    return errors;
+  }
+};
+
+class BaseModel {
+  constructor(data = {}) {
+    Object.assign(this, data);
+  }
+}
+
+class User extends Serializable(Validatable(BaseModel)) {
+  static validationRules = {
+    name: { required: true, minLength: 2 },
+    email: { required: true },
+  };
+}
+
+const user = new User({ name: 'Al', email: 'al@example.com' });
+console.log(user.validate()); // output: ['name must be at least 2 characters']
+
+const user2 = new User({ name: 'Alice', email: 'alice@example.com' });
+console.log(user2.validate()); // output: []
+console.log(user2.serialize()); // output: '{"name":"Alice","email":"alice@example.com"}'
+```

@@ -1,0 +1,502 @@
+---
+title: Database
+description: SQLAlchemy 2.0 async CRUD with FastAPI, Alembic migrations, connection pooling, and SQLite vs PostgreSQL configuration.
+sidebar:
+  order: 6
+tags: [python, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+FastAPI does not bundle an ORM, giving you full freedom to choose. The recommended setup for production is **SQLAlchemy 2.0** with the async extension backed by **asyncpg** (PostgreSQL) or **aiosqlite** (SQLite). This guide builds a complete, production-ready async database layer.
+
+## Installation
+
+```bash
+# PostgreSQL (production)
+pip install "sqlalchemy[asyncio]" asyncpg alembic
+
+# SQLite (development / testing)
+pip install "sqlalchemy[asyncio]" aiosqlite alembic
+```
+
+## Database Engine and Session Factory
+
+```python
+# app/db/session.py
+from sqlalchemy.ext.asyncio import (
+    create_async_engine,
+    async_sessionmaker,
+    AsyncSession,
+    AsyncEngine,
+)
+from app.core.config import settings
+
+# Create the async engine
+engine: AsyncEngine = create_async_engine(
+    settings.DATABASE_URL,
+    echo=settings.DEBUG,          # Log all SQL in debug mode
+    pool_size=10,                 # Max persistent connections
+    max_overflow=20,              # Extra connections allowed above pool_size
+    pool_timeout=30,              # Seconds to wait for a connection from the pool
+    pool_recycle=1800,            # Recycle connections older than 30 minutes
+    pool_pre_ping=True,           # Test connections before use (detects stale connections)
+)
+
+# Session factory — use this to create sessions
+AsyncSessionLocal = async_sessionmaker(
+    bind=engine,
+    expire_on_commit=False,       # Don't expire attributes after commit (important for async)
+    autoflush=False,
+    autocommit=False,
+)
+```
+
+## Declarative Base and ORM Models
+
+```python
+# app/db/base.py
+from datetime import datetime
+from sqlalchemy import func
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+class Base(DeclarativeBase):
+    """Common base for all ORM models."""
+    pass
+
+
+class TimestampMixin:
+    """Adds created_at and updated_at to any model."""
+    created_at: Mapped[datetime] = mapped_column(
+        server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+```
+
+```python
+# app/db/models/item.py
+from sqlalchemy import String, Float, ForeignKey, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.db.base import Base, TimestampMixin
+
+
+class Category(Base, TimestampMixin):
+    __tablename__ = "categories"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    items: Mapped[list["Item"]] = relationship("Item", back_populates="category")
+
+
+class Item(Base, TimestampMixin):
+    __tablename__ = "items"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    is_active: Mapped[bool] = mapped_column(default=True)
+    category_id: Mapped[int | None] = mapped_column(
+        ForeignKey("categories.id", ondelete="SET NULL"), nullable=True
+    )
+    category: Mapped["Category | None"] = relationship("Category", back_populates="items")
+```
+
+## Pydantic Schemas
+
+```python
+# app/schemas/item.py
+from pydantic import BaseModel, Field, ConfigDict
+from datetime import datetime
+
+
+class ItemBase(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = None
+    price: float = Field(gt=0)
+    is_active: bool = True
+    category_id: int | None = None
+
+
+class ItemCreate(ItemBase):
+    pass
+
+
+class ItemUpdate(BaseModel):
+    """All fields optional for PATCH requests."""
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = None
+    price: float | None = Field(default=None, gt=0)
+    is_active: bool | None = None
+    category_id: int | None = None
+
+
+class ItemRead(ItemBase):
+    model_config = ConfigDict(from_attributes=True)  # Allow ORM -> Pydantic conversion
+
+    id: int
+    created_at: datetime
+    updated_at: datetime
+```
+
+## Database Dependency
+
+```python
+# app/dependencies/db.py
+from collections.abc import AsyncGenerator
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.db.session import AsyncSessionLocal
+
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """
+    Yields a database session for the lifetime of a single request.
+    Commits on success, rolls back on any exception.
+    """
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+```
+
+## Full CRUD Implementation
+
+```python
+# app/repositories/item.py
+from sqlalchemy import select, func, delete
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+from app.db.models.item import Item
+from app.schemas.item import ItemCreate, ItemUpdate
+
+
+class ItemRepository:
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
+
+    async def get_by_id(self, item_id: int) -> Item | None:
+        result = await self.db.execute(
+            select(Item)
+            .where(Item.id == item_id)
+            .options(selectinload(Item.category))  # Eager-load category
+        )
+        return result.scalar_one_or_none()
+
+    async def list(
+        self,
+        offset: int = 0,
+        limit: int = 20,
+        search: str | None = None,
+        active_only: bool = True,
+    ) -> tuple[list[Item], int]:
+        query = select(Item).options(selectinload(Item.category))
+        if active_only:
+            query = query.where(Item.is_active == True)
+        if search:
+            query = query.where(Item.name.ilike(f"%{search}%"))
+
+        total_result = await self.db.execute(
+            select(func.count()).select_from(query.subquery())
+        )
+        total = total_result.scalar_one()
+
+        items_result = await self.db.execute(query.offset(offset).limit(limit))
+        items = items_result.scalars().all()
+        return list(items), total
+
+    async def create(self, data: ItemCreate) -> Item:
+        item = Item(**data.model_dump())
+        self.db.add(item)
+        await self.db.flush()   # Flush to get the auto-generated ID
+        await self.db.refresh(item)
+        return item
+
+    async def update(self, item: Item, data: ItemUpdate) -> Item:
+        for field, value in data.model_dump(exclude_unset=True).items():
+            setattr(item, field, value)
+        await self.db.flush()
+        await self.db.refresh(item)
+        return item
+
+    async def delete(self, item_id: int) -> bool:
+        result = await self.db.execute(
+            delete(Item).where(Item.id == item_id)
+        )
+        return result.rowcount > 0
+```
+
+## CRUD Routes
+
+```python
+# app/routers/items.py
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.dependencies.db import get_db
+from app.repositories.item import ItemRepository
+from app.schemas.item import ItemCreate, ItemRead, ItemUpdate
+
+router = APIRouter(prefix="/items", tags=["items"])
+
+
+@router.get("/", response_model=dict)
+async def list_items(
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+    search: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    repo = ItemRepository(db)
+    items, total = await repo.list(offset=offset, limit=limit, search=search)
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "items": [ItemRead.model_validate(i) for i in items],
+    }
+
+
+@router.post("/", response_model=ItemRead, status_code=status.HTTP_201_CREATED)
+async def create_item(data: ItemCreate, db: AsyncSession = Depends(get_db)):
+    repo = ItemRepository(db)
+    item = await repo.create(data)
+    return ItemRead.model_validate(item)
+
+
+@router.get("/{item_id}", response_model=ItemRead)
+async def get_item(item_id: int, db: AsyncSession = Depends(get_db)):
+    repo = ItemRepository(db)
+    item = await repo.get_by_id(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {item_id} not found")
+    return ItemRead.model_validate(item)
+
+
+@router.patch("/{item_id}", response_model=ItemRead)
+async def update_item(
+    item_id: int, data: ItemUpdate, db: AsyncSession = Depends(get_db)
+):
+    repo = ItemRepository(db)
+    item = await repo.get_by_id(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {item_id} not found")
+    updated = await repo.update(item, data)
+    return ItemRead.model_validate(updated)
+
+
+@router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_item(item_id: int, db: AsyncSession = Depends(get_db)):
+    repo = ItemRepository(db)
+    deleted = await repo.delete(item_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Item {item_id} not found")
+```
+
+Test the CRUD API:
+
+```bash
+# Create
+curl -X POST http://localhost:8000/items/ \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Wireless Keyboard", "price": 79.99, "description": "Bluetooth mechanical keyboard"}'
+```
+
+```json
+{
+  "id": 1,
+  "name": "Wireless Keyboard",
+  "description": "Bluetooth mechanical keyboard",
+  "price": 79.99,
+  "is_active": true,
+  "category_id": null,
+  "created_at": "2024-01-15T10:30:00",
+  "updated_at": "2024-01-15T10:30:00"
+}
+```
+
+```bash
+# List with search
+curl "http://localhost:8000/items/?search=keyboard&limit=5"
+```
+
+```json
+{"total": 1, "offset": 0, "limit": 5, "items": [{"id": 1, "name": "Wireless Keyboard", "price": 79.99}]}
+```
+
+```bash
+# Partial update
+curl -X PATCH http://localhost:8000/items/1 \
+  -H "Content-Type: application/json" \
+  -d '{"price": 69.99}'
+```
+
+```json
+{
+  "id": 1,
+  "name": "Wireless Keyboard",
+  "price": 69.99,
+  "updated_at": "2024-01-15T11:00:00"
+}
+```
+
+## Alembic Migrations
+
+<Steps>
+1. **Initialize Alembic**
+
+   ```bash
+   alembic init alembic
+   ```
+
+2. **Configure `alembic/env.py`**
+
+   ```python
+   # alembic/env.py
+   import asyncio
+   from logging.config import fileConfig
+   from sqlalchemy import pool
+   from sqlalchemy.ext.asyncio import create_async_engine
+   from alembic import context
+
+   from app.core.config import settings
+   from app.db.base import Base
+
+   # Import all models so Alembic can detect them
+   from app.db.models import item, user  # noqa: F401
+
+   config = context.config
+   fileConfig(config.config_file_name)
+   target_metadata = Base.metadata
+
+
+   def run_migrations_offline() -> None:
+       url = settings.DATABASE_URL
+       context.configure(
+           url=url,
+           target_metadata=target_metadata,
+           literal_binds=True,
+           dialect_opts={"paramstyle": "named"},
+       )
+       with context.begin_transaction():
+           context.run_migrations()
+
+
+   def do_run_migrations(connection):
+       context.configure(connection=connection, target_metadata=target_metadata)
+       with context.begin_transaction():
+           context.run_migrations()
+
+
+   async def run_migrations_online() -> None:
+       connectable = create_async_engine(settings.DATABASE_URL, poolclass=pool.NullPool)
+       async with connectable.connect() as connection:
+           await connection.run_sync(do_run_migrations)
+       await connectable.dispose()
+
+
+   if context.is_offline_mode():
+       run_migrations_offline()
+   else:
+       asyncio.run(run_migrations_online())
+   ```
+
+3. **Point `alembic.ini` at your database**
+
+   ```ini
+   # alembic.ini
+   [alembic]
+   script_location = alembic
+   sqlalchemy.url = postgresql+asyncpg://user:password@localhost/mydb
+   ```
+
+4. **Generate your first migration**
+
+   ```bash
+   alembic revision --autogenerate -m "create items and categories tables"
+   ```
+
+5. **Apply the migration**
+
+   ```bash
+   alembic upgrade head
+   ```
+
+6. **Roll back one revision**
+
+   ```bash
+   alembic downgrade -1
+   ```
+
+</Steps>
+
+## Connection Pooling Reference
+
+| Parameter | Default | Recommendation |
+|-----------|---------|---------------|
+| `pool_size` | 5 | Set to CPU count × 2 |
+| `max_overflow` | 10 | Set to `pool_size` × 2 |
+| `pool_timeout` | 30 | Keep at 30s; alert if frequently hit |
+| `pool_recycle` | -1 | Set to 1800 (30 min) to avoid stale connections |
+| `pool_pre_ping` | False | **Always set to True** in production |
+
+## SQLite vs PostgreSQL Configuration
+
+<Tabs>
+  <TabItem label="SQLite (Development)">
+
+```python
+# .env
+DATABASE_URL=sqlite+aiosqlite:///./dev.db
+
+# Additional settings for SQLite
+engine = create_async_engine(
+    "sqlite+aiosqlite:///./dev.db",
+    echo=True,
+    connect_args={"check_same_thread": False},
+)
+```
+
+```bash
+pip install aiosqlite
+```
+
+  </TabItem>
+  <TabItem label="PostgreSQL (Production)">
+
+```python
+# .env
+DATABASE_URL=postgresql+asyncpg://user:password@db:5432/mydb
+
+engine = create_async_engine(
+    settings.DATABASE_URL,
+    echo=False,
+    pool_size=10,
+    max_overflow=20,
+    pool_timeout=30,
+    pool_recycle=1800,
+    pool_pre_ping=True,
+)
+```
+
+```bash
+pip install asyncpg
+```
+
+  </TabItem>
+</Tabs>
+
+:::tip[Inspect Running Queries]
+In development, set `echo=True` on the engine to log every SQL statement with timing. For production query analysis, use `EXPLAIN ANALYZE` in psql or enable `pg_stat_statements` on your PostgreSQL instance.
+:::
+
+:::caution[Never Run Migrations Automatically on Startup]
+It is tempting to call `alembic upgrade head` inside the lifespan startup handler. This is dangerous in multi-replica deployments — several instances can attempt to migrate simultaneously, causing conflicts or data corruption. Run migrations as a **separate step** in your CI/CD pipeline before deploying the new application version.
+:::

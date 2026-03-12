@@ -1,0 +1,442 @@
+---
+title: Renderer Process
+description: Understand Electron's renderer process — contextIsolation, sandbox mode, preload patterns, CSP, and frontend framework integration.
+sidebar:
+  order: 4
+tags: [javascript, desktop]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+The **renderer process** is a Chromium browser instance that renders your application's UI. Each `BrowserWindow` spawns its own renderer process — they are fully isolated from each other and from the main process. The renderer is where your React, Vue, Svelte, or vanilla JS frontend lives.
+
+## Role of the Renderer Process
+
+- Runs in a Chromium (Blink) rendering engine context
+- Executes your frontend JavaScript / TypeScript
+- Has full access to Web APIs: DOM, Fetch, WebSockets, WebGL, WebAudio, etc.
+- **Does not** have direct Node.js or Electron API access (by design)
+- Communicates with the main process only through the `contextBridge` / IPC mechanism
+- Can be sandboxed at the OS level (`sandbox: true`)
+
+## contextIsolation
+
+`contextIsolation` is the most critical security setting in Electron. When enabled (the default since Electron 12), it creates a separate JavaScript context for the preload script, completely isolating it from the renderer's page context.
+
+```
+Without contextIsolation (DANGEROUS):
+  Preload world ────────── Renderer world
+      (shared JavaScript context — renderer can access Electron internals)
+
+With contextIsolation (SECURE):
+  Preload world ══ contextBridge ══ Renderer world
+      (separate contexts — only explicitly exposed APIs cross the boundary)
+```
+
+:::caution[contextIsolation Must Be True]
+Setting `contextIsolation: false` is a critical security flaw. An attacker who can run arbitrary JavaScript in your renderer (via XSS or a malicious dependency) can then call `require('electron')`, `require('child_process')`, or any other Node.js API, achieving full system compromise.
+:::
+
+### What contextIsolation Breaks (and Fixes)
+
+When you enable `contextIsolation: true`, the following patterns from older Electron code **stop working**:
+
+```typescript
+// ❌ BROKEN with contextIsolation: true
+// (renderer trying to use Node.js directly)
+const fs = require('fs');
+const { ipcRenderer } = require('electron');
+
+// ❌ BROKEN — preload can no longer pollute window
+// preload.ts (old pattern)
+window.myAPI = { /* ... */ };  // renderer cannot see this
+```
+
+The correct pattern uses `contextBridge`:
+
+```typescript
+// ✅ CORRECT — preload.ts
+import { contextBridge, ipcRenderer } from 'electron';
+
+contextBridge.exposeInMainWorld('electronAPI', {
+  readFile: (path: string) => ipcRenderer.invoke('fs:readFile', path),
+  writeFile: (path: string, content: string) =>
+    ipcRenderer.invoke('fs:writeFile', path, content),
+});
+
+// ✅ CORRECT — renderer (App.tsx or any frontend file)
+const content = await window.electronAPI.readFile('/path/to/file.txt');
+```
+
+## Sandbox Mode
+
+`sandbox: true` enables Chromium's OS-level sandboxing. The preload script runs in a sandboxed environment with **no** Node.js APIs — it can only use `contextBridge` and `ipcRenderer` from Electron's sandbox-safe module.
+
+```typescript
+// When sandbox: true, preload has access to:
+import { contextBridge, ipcRenderer } from 'electron';
+// ✅ Available
+
+// But NOT:
+import fs from 'node:fs';
+// ❌ Not available in sandboxed preload
+
+import path from 'node:path';
+// ❌ Not available in sandboxed preload
+```
+
+:::tip[Sandbox vs contextIsolation]
+These are complementary, not alternatives:
+- **`contextIsolation: true`** — JavaScript-level isolation (V8 context separation)
+- **`sandbox: true`** — OS-level process sandboxing (Chromium sandbox)
+
+Enable both for maximum security. The main process handles any operations that require Node.js APIs.
+:::
+
+## The contextBridge Exposure Pattern
+
+The preload script is the only place where you can bridge the gap between Electron's main process APIs and the renderer's JavaScript environment. Follow these principles:
+
+1. **Expose functions, not objects with dangerous capabilities**
+2. **Never expose `ipcRenderer` directly** — a renderer that can call any IPC channel is not better than `nodeIntegration: true`
+3. **Validate and sanitize arguments** in the main process IPC handler, not the preload
+
+### Complete Preload Example
+
+```typescript
+// src/preload.ts
+import { contextBridge, ipcRenderer } from 'electron';
+
+// Type-safe channel definitions (shared with main process)
+type ValidChannels =
+  | 'dialog:openFile'
+  | 'dialog:saveFile'
+  | 'fs:readFile'
+  | 'fs:writeFile'
+  | 'app:getVersion'
+  | 'app:quit';
+
+type ValidListenChannels =
+  | 'update-available'
+  | 'update-downloaded'
+  | 'download-progress'
+  | 'theme-changed';
+
+const electronAPI = {
+  // Invoke (two-way, returns a promise)
+  invoke: <T = unknown>(channel: ValidChannels, ...args: unknown[]): Promise<T> => {
+    return ipcRenderer.invoke(channel, ...args);
+  },
+
+  // One-way: renderer → main
+  send: (channel: ValidChannels, ...args: unknown[]): void => {
+    ipcRenderer.send(channel, ...args);
+  },
+
+  // One-way: main → renderer (subscribe)
+  on: (channel: ValidListenChannels, callback: (...args: unknown[]) => void): void => {
+    ipcRenderer.on(channel, (_event, ...args) => callback(...args));
+  },
+
+  // Clean up a listener
+  removeAllListeners: (channel: ValidListenChannels): void => {
+    ipcRenderer.removeAllListeners(channel);
+  },
+
+  // Convenience shortcuts
+  openFile: () => ipcRenderer.invoke('dialog:openFile'),
+  saveFile: (content: string) => ipcRenderer.invoke('dialog:saveFile', content),
+  getAppVersion: () => ipcRenderer.invoke('app:getVersion'),
+  quitApp: () => ipcRenderer.send('app:quit'),
+};
+
+contextBridge.exposeInMainWorld('electronAPI', electronAPI);
+
+// Export type for TypeScript
+export type ElectronAPI = typeof electronAPI;
+```
+
+## TypeScript Types for contextBridge
+
+Declare the global type so TypeScript knows about `window.electronAPI`:
+
+```typescript
+// src/electron.d.ts
+import type { ElectronAPI } from './preload';
+
+declare global {
+  interface Window {
+    electronAPI: ElectronAPI;
+  }
+}
+```
+
+Or define the interface inline:
+
+```typescript
+// src/types/electron.d.ts
+export interface IElectronAPI {
+  openFile: () => Promise<string | null>;
+  saveFile: (content: string) => Promise<{ success: boolean; path?: string }>;
+  getAppVersion: () => Promise<string>;
+  quitApp: () => void;
+  invoke: <T = unknown>(channel: string, ...args: unknown[]) => Promise<T>;
+  on: (channel: string, callback: (...args: unknown[]) => void) => void;
+  removeAllListeners: (channel: string) => void;
+}
+
+declare global {
+  interface Window {
+    electronAPI: IElectronAPI;
+  }
+}
+```
+
+## Frontend Framework Integration
+
+<Tabs>
+  <TabItem label="React">
+    ```typescript
+    // src/App.tsx
+    import React, { useState, useEffect, useCallback } from 'react';
+
+    interface UpdateInfo {
+      version: string;
+      releaseNotes: string;
+    }
+
+    export const App: React.FC = () => {
+      const [appVersion, setAppVersion] = useState<string>('');
+      const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+      const [filePath, setFilePath] = useState<string | null>(null);
+
+      useEffect(() => {
+        // Fetch app version once on mount
+        window.electronAPI.getAppVersion().then(setAppVersion);
+
+        // Subscribe to update notifications from main process
+        window.electronAPI.on('update-available', (version: string) => {
+          setUpdateInfo({ version, releaseNotes: '' });
+        });
+
+        // IMPORTANT: Remove listeners on unmount to prevent memory leaks
+        return () => {
+          window.electronAPI.removeAllListeners('update-available');
+        };
+      }, []);
+
+      const handleOpenFile = useCallback(async () => {
+        const path = await window.electronAPI.openFile();
+        if (path) setFilePath(path);
+      }, []);
+
+      return (
+        <div className="app">
+          <header>
+            <h1>My Electron App</h1>
+            <span>v{appVersion}</span>
+          </header>
+          <main>
+            <button onClick={handleOpenFile}>Open File</button>
+            {filePath && <p>Selected: {filePath}</p>}
+            {updateInfo && (
+              <div className="update-banner">
+                Update {updateInfo.version} available!
+              </div>
+            )}
+          </main>
+        </div>
+      );
+    };
+    ```
+  </TabItem>
+  <TabItem label="Vue">
+    ```typescript
+    <!-- src/App.vue -->
+    <script setup lang="ts">
+    import { ref, onMounted, onBeforeUnmount } from 'vue';
+
+    const appVersion = ref('');
+    const filePath = ref<string | null>(null);
+    const updateAvailable = ref(false);
+
+    onMounted(async () => {
+      appVersion.value = await window.electronAPI.getAppVersion();
+
+      window.electronAPI.on('update-available', () => {
+        updateAvailable.value = true;
+      });
+    });
+
+    onBeforeUnmount(() => {
+      window.electronAPI.removeAllListeners('update-available');
+    });
+
+    const openFile = async () => {
+      filePath.value = await window.electronAPI.openFile();
+    };
+    </script>
+
+    <template>
+      <div class="app">
+        <h1>My Electron App v{{ appVersion }}</h1>
+        <button @click="openFile">Open File</button>
+        <p v-if="filePath">Selected: {{ filePath }}</p>
+        <div v-if="updateAvailable" class="update-banner">
+          Update available!
+        </div>
+      </div>
+    </template>
+    ```
+  </TabItem>
+  <TabItem label="Svelte">
+    ```typescript
+    <!-- src/App.svelte -->
+    <script lang="ts">
+      import { onMount, onDestroy } from 'svelte';
+
+      let appVersion = '';
+      let filePath: string | null = null;
+      let updateAvailable = false;
+
+      onMount(async () => {
+        appVersion = await window.electronAPI.getAppVersion();
+
+        window.electronAPI.on('update-available', () => {
+          updateAvailable = true;
+        });
+      });
+
+      onDestroy(() => {
+        window.electronAPI.removeAllListeners('update-available');
+      });
+
+      async function openFile() {
+        filePath = await window.electronAPI.openFile();
+      }
+    </script>
+
+    <div class="app">
+      <h1>My Electron App v{appVersion}</h1>
+      <button on:click={openFile}>Open File</button>
+      {#if filePath}<p>Selected: {filePath}</p>{/if}
+      {#if updateAvailable}
+        <div class="update-banner">Update available!</div>
+      {/if}
+    </div>
+    ```
+  </TabItem>
+</Tabs>
+
+## Content Security Policy
+
+Set a strict Content Security Policy to mitigate XSS attacks in the renderer. Electron apps should be especially strict because a compromise in the renderer can be used to escalate to native access via IPC.
+
+### Setting CSP via Meta Tag
+
+```html
+<!-- index.html -->
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="
+        default-src 'self';
+        script-src 'self';
+        style-src 'self' 'unsafe-inline';
+        img-src 'self' data: blob:;
+        font-src 'self' data:;
+        connect-src 'self';
+        media-src 'none';
+        object-src 'none';
+        child-src 'none';
+        frame-src 'none';
+        worker-src blob:;
+        form-action 'none';
+      "
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/renderer.ts"></script>
+  </body>
+</html>
+```
+
+### Setting CSP via Session Headers (Main Process)
+
+```typescript
+import { session } from 'electron';
+
+app.whenReady().then(() => {
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': [
+          "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'",
+        ],
+      },
+    });
+  });
+});
+```
+
+:::caution[Avoid unsafe-eval and unsafe-inline for scripts]
+Avoid `'unsafe-eval'` in `script-src` — it enables `eval()` and `new Function()`, which significantly weakens XSS protection. Some build tools (like older Webpack configs) require it, but Vite does not. Always audit your CSP in production.
+:::
+
+## WebContentsView (Replacing BrowserView)
+
+`BrowserView` was deprecated in Electron 30. Use `WebContentsView` for embedding additional web content:
+
+```typescript
+import { BrowserWindow, WebContentsView } from 'electron';
+
+const win = new BrowserWindow({ width: 1200, height: 800 });
+
+// Create a view for embedded web content
+const view = new WebContentsView({
+  webPreferences: {
+    contextIsolation: true,
+    sandbox: true,
+  },
+});
+
+// Add the view to the window's content view
+win.contentView.addChildView(view);
+
+// Position the view
+view.setBounds({ x: 0, y: 80, width: 1200, height: 720 });
+view.webContents.loadURL('https://example.com');
+```
+
+:::tip[webview Tag — Avoid It]
+The `<webview>` HTML tag embeds web content directly in the renderer. It is considered dangerous (hard to sandbox correctly), poorly maintained, and may be removed in a future Electron version. Always use `WebContentsView` or a separate `BrowserWindow` instead.
+:::
+
+## Loading External CSS and Fonts
+
+Since the renderer is a browser, you can import CSS normally:
+
+```typescript
+// src/renderer.ts or src/main.tsx
+import './styles/globals.css';
+import './styles/tokens.css';
+```
+
+For local fonts, add them to your assets and reference via CSS:
+
+```css
+/* src/styles/fonts.css */
+@font-face {
+  font-family: 'Inter';
+  src: url('../assets/fonts/Inter-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-display: swap;
+}
+```
+
+Google Fonts and other external CDNs require updating your CSP's `style-src` and `font-src` directives — and require internet access, which may not be available.

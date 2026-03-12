@@ -1,0 +1,578 @@
+---
+title: Mesh Editing with bpy and bmesh
+description: Create meshes from raw data, use the bmesh module for surgical edits, generate procedural geometry, and work with the full modifier stack — all from Python.
+sidebar:
+  order: 4
+tags: [python, blender, 3d]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Blender provides two complementary APIs for mesh work: the high-level `bpy.data.meshes` interface for creating and updating mesh data-blocks, and the `bmesh` module for precise, element-level editing. This page covers both, plus procedural geometry generation and the modifier stack.
+
+---
+
+## Creating a Mesh from Scratch
+
+The lowest-level way to create geometry is to supply explicit vertices, edges, and polygons to `Mesh.from_pydata()`.
+
+```python
+import bpy
+
+# ── 1. Create a new mesh data-block ──────────────────────────────
+mesh = bpy.data.meshes.new("PyramidMesh")
+
+# ── 2. Define geometry ───────────────────────────────────────────
+vertices = [
+    ( 0.0,  0.0,  1.0),   # apex     — index 0
+    (-1.0, -1.0,  0.0),   # base BL  — index 1
+    ( 1.0, -1.0,  0.0),   # base BR  — index 2
+    ( 1.0,  1.0,  0.0),   # base TR  — index 3
+    (-1.0,  1.0,  0.0),   # base TL  — index 4
+]
+
+edges = []  # from_pydata can infer edges from faces
+
+faces = [
+    (0, 1, 2),    # front triangle
+    (0, 2, 3),    # right triangle
+    (0, 3, 4),    # back triangle
+    (0, 4, 1),    # left triangle
+    (1, 2, 3, 4), # base quad
+]
+
+# ── 3. Build and validate ─────────────────────────────────────────
+mesh.from_pydata(vertices, edges, faces)
+mesh.validate(verbose=True)   # prints any geometry errors to console
+mesh.update()
+
+# ── 4. Link to a new object and add to scene ──────────────────────
+obj = bpy.data.objects.new("Pyramid", mesh)
+bpy.context.scene.collection.objects.link(obj)
+
+# Make it active and select it
+bpy.context.view_layer.objects.active = obj
+obj.select_set(True)
+
+print(f"Created '{obj.name}': {len(mesh.vertices)} verts, {len(mesh.polygons)} faces")
+```
+
+> **Viewport result:** A 5-sided pyramid appears at the world origin with a square base and four triangular faces meeting at the apex.
+>
+> **Console output:**
+> ```
+> Created 'Pyramid': 5 verts, 5 faces
+> ```
+
+:::tip[validate() Is Free Quality Assurance]
+Always call `mesh.validate(verbose=True)` after `from_pydata()`. It detects and automatically corrects issues like duplicate vertices, degenerate faces, and invalid edge loops, and prints a summary to the System Console.
+:::
+
+---
+
+## The bmesh Module
+
+`bmesh` is a full mesh-editing library that operates on an in-memory copy of the mesh. It gives direct access to individual vertices, edges, and faces and exposes a rich set of boolean, topological, and transform operations.
+
+### Workflow: Edit Mode vs. Standalone
+
+<Tabs>
+  <TabItem label="Standalone (Object Mode)">
+```python
+import bpy
+import bmesh
+
+obj = bpy.context.active_object
+
+# Create a bmesh from the existing mesh (object must be in Object Mode)
+bm = bmesh.new()
+bm.from_mesh(obj.data)
+
+# --- make edits here ---
+bmesh.ops.subdivide_edges(
+    bm,
+    edges=bm.edges,
+    cuts=2,
+    use_grid_fill=True
+)
+
+# Write changes back to the mesh and free bmesh memory
+bm.to_mesh(obj.data)
+obj.data.update()
+bm.free()
+
+print(f"Vertex count after subdivide: {len(obj.data.vertices)}")
+```
+  </TabItem>
+  <TabItem label="From Edit Mode">
+```python
+import bpy
+import bmesh
+
+# Object must already be in Edit Mode
+obj = bpy.context.active_object
+bpy.ops.object.mode_set(mode='EDIT')
+
+# Grab the live bmesh (changes are reflected immediately)
+bm = bmesh.from_edit_mesh(obj.data)
+
+# Select all faces and inset them
+bm.faces.ensure_lookup_table()
+for face in bm.faces:
+    face.select = True
+
+bmesh.ops.inset_individual(
+    bm, faces=bm.faces, thickness=0.1, depth=0.0
+)
+
+# Update the mesh in the viewport without leaving Edit Mode
+bmesh.update_edit_mesh(obj.data, loop_triangles=True)
+
+bpy.ops.object.mode_set(mode='OBJECT')
+print("Inset complete.")
+```
+  </TabItem>
+</Tabs>
+
+> **Viewport result (Standalone):** Every edge on the cube is split into 3 segments, increasing the vertex count from 8 to 98.
+>
+> **Console output (Standalone):**
+> ```
+> Vertex count after subdivide: 98
+> ```
+
+---
+
+## bmesh Operations Reference
+
+All `bmesh.ops.*` functions accept a bmesh and keyword arguments. They return a dictionary of result geometry.
+
+### Extrude Faces
+
+```python
+import bpy
+import bmesh
+from mathutils import Vector
+
+obj = bpy.context.active_object
+bm = bmesh.new()
+bm.from_mesh(obj.data)
+
+bm.faces.ensure_lookup_table()
+top_face = max(bm.faces, key=lambda f: f.calc_center_median().z)
+
+# Extrude the highest face upward by 1 m
+result = bmesh.ops.extrude_face_region(bm, geom=[top_face])
+extruded_verts = [v for v in result['geom'] if isinstance(v, bmesh.types.BMVert)]
+bmesh.ops.translate(bm, verts=extruded_verts, vec=Vector((0, 0, 1.0)))
+
+bm.to_mesh(obj.data)
+obj.data.update()
+bm.free()
+
+print(f"Vertices after extrude: {len(obj.data.vertices)}")
+```
+
+> **Viewport result:** The top face of the cube is extruded upward, creating a step shape. The object now has 12 vertices.
+
+### Bevel Edges
+
+```python
+import bpy
+import bmesh
+
+obj = bpy.context.active_object
+bm = bmesh.new()
+bm.from_mesh(obj.data)
+
+# Bevel all edges
+result = bmesh.ops.bevel(
+    bm,
+    geom=bm.edges[:],
+    offset=0.1,         # bevel width
+    segments=3,         # number of loop cuts
+    profile=0.5,        # circular profile
+    affect='EDGES'
+)
+
+bm.to_mesh(obj.data)
+obj.data.update()
+bm.free()
+
+print(f"Vertices after bevel: {len(obj.data.vertices)}")
+```
+
+> **Viewport result:** All 12 edges of the cube gain a 0.1 m rounded bevel with 3 segments, producing a smooth, chamfered box.
+
+### Loop Cuts (Knife)
+
+```python
+import bpy
+import bmesh
+
+obj = bpy.context.active_object
+bm = bmesh.new()
+bm.from_mesh(obj.data)
+
+# Add 3 evenly-spaced loop cuts along the Z axis
+# We need to find edges perpendicular to Z
+vertical_edges = [e for e in bm.edges if abs(e.verts[0].co.z - e.verts[1].co.z) > 0.5]
+
+bmesh.ops.subdivide_edgering(
+    bm,
+    edges=vertical_edges,
+    cuts=3,
+    smooth=0.0,
+    profile_shape='STRAIGHT'
+)
+
+bm.to_mesh(obj.data)
+obj.data.update()
+bm.free()
+
+print(f"Faces after loop cuts: {len(obj.data.polygons)}")
+```
+
+### Vertex, Edge, Face Selection
+
+```python
+import bpy
+import bmesh
+
+obj = bpy.context.active_object
+bpy.ops.object.mode_set(mode='EDIT')
+bm = bmesh.from_edit_mesh(obj.data)
+
+# Clear all selections
+for v in bm.verts: v.select = False
+for e in bm.edges: e.select = False
+for f in bm.faces: f.select = False
+bm.select_flush_mode()
+
+# Select faces whose normal points up (top faces)
+for face in bm.faces:
+    if face.normal.z > 0.9:   # close to pointing straight up
+        face.select = True
+
+bmesh.update_edit_mesh(obj.data)
+selected = sum(1 for f in bm.faces if f.select)
+print(f"Top faces selected: {selected}")
+
+bpy.ops.object.mode_set(mode='OBJECT')
+```
+
+> **Console output:**
+> ```
+> Top faces selected: 1
+> ```
+
+---
+
+## Transformations with bmesh
+
+```python
+import bpy
+import bmesh
+from mathutils import Vector, Matrix
+import math
+
+obj = bpy.context.active_object
+bm = bmesh.new()
+bm.from_mesh(obj.data)
+
+# Translate all verts up by 1 m
+bmesh.ops.translate(bm, verts=bm.verts[:], vec=Vector((0, 0, 1)))
+
+# Rotate 45° around the Z axis
+rot_matrix = Matrix.Rotation(math.radians(45), 3, 'Z')
+bmesh.ops.rotate(
+    bm,
+    verts=bm.verts[:],
+    cent=Vector((0, 0, 0)),
+    matrix=rot_matrix
+)
+
+# Scale by 2x on X
+bmesh.ops.scale(
+    bm,
+    verts=bm.verts[:],
+    vec=Vector((2.0, 1.0, 1.0))
+)
+
+bm.to_mesh(obj.data)
+obj.data.update()
+bm.free()
+
+print("Transform complete: translated, rotated, scaled.")
+```
+
+> **Viewport result:** The mesh is lifted 1 m, rotated 45° around Z, then stretched to double width on X — all in one edit session.
+
+---
+
+## Procedural Shape Generation
+
+### Grid Plane
+
+```python
+import bpy
+import bmesh
+from mathutils import Vector
+
+def make_grid(rows: int, cols: int, size: float = 1.0) -> bpy.types.Object:
+    """Generate a flat grid mesh with `rows` × `cols` quads."""
+    bm = bmesh.new()
+
+    step = size / max(rows, cols)
+    half_r = rows * step / 2
+    half_c = cols * step / 2
+
+    verts = {}
+    for r in range(rows + 1):
+        for c in range(cols + 1):
+            x = c * step - half_c
+            y = r * step - half_r
+            v = bm.verts.new(Vector((x, y, 0)))
+            verts[(r, c)] = v
+
+    for r in range(rows):
+        for c in range(cols):
+            bm.faces.new([
+                verts[(r,   c)],
+                verts[(r,   c+1)],
+                verts[(r+1, c+1)],
+                verts[(r+1, c)],
+            ])
+
+    bm.normal_update()
+
+    mesh = bpy.data.meshes.new(f"Grid_{rows}x{cols}")
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.update()
+
+    obj = bpy.data.objects.new(mesh.name, mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    return obj
+
+
+grid = make_grid(rows=8, cols=8, size=4.0)
+print(f"Grid: {len(grid.data.vertices)} verts, {len(grid.data.polygons)} faces")
+```
+
+> **Viewport result:** An 8×8 quad grid (64 faces) centred at the world origin, spanning 4 m × 4 m.
+>
+> **Console output:**
+> ```
+> Grid: 81 verts, 64 faces
+> ```
+
+### Parametric Torus
+
+```python
+import bpy
+import bmesh
+from mathutils import Vector
+import math
+
+def make_torus(
+    major_radius: float = 1.0,
+    minor_radius: float = 0.25,
+    major_segments: int = 32,
+    minor_segments: int = 16
+) -> bpy.types.Object:
+    """Build a torus analytically."""
+    bm = bmesh.new()
+    verts = []
+
+    for i in range(major_segments):
+        ring = []
+        phi = 2 * math.pi * i / major_segments
+        for j in range(minor_segments):
+            theta = 2 * math.pi * j / minor_segments
+            x = (major_radius + minor_radius * math.cos(theta)) * math.cos(phi)
+            y = (major_radius + minor_radius * math.cos(theta)) * math.sin(phi)
+            z = minor_radius * math.sin(theta)
+            ring.append(bm.verts.new(Vector((x, y, z))))
+        verts.append(ring)
+
+    bm.verts.ensure_lookup_table()
+
+    for i in range(major_segments):
+        next_i = (i + 1) % major_segments
+        for j in range(minor_segments):
+            next_j = (j + 1) % minor_segments
+            bm.faces.new([
+                verts[i][j],
+                verts[i][next_j],
+                verts[next_i][next_j],
+                verts[next_i][j],
+            ])
+
+    bm.normal_update()
+
+    mesh = bpy.data.meshes.new("Torus")
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.update()
+
+    obj = bpy.data.objects.new("Torus", mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    return obj
+
+
+torus = make_torus(major_radius=1.5, minor_radius=0.3, major_segments=48, minor_segments=24)
+print(f"Torus: {len(torus.data.vertices)} verts, {len(torus.data.polygons)} faces")
+```
+
+> **Viewport result:** A smooth torus (donut shape) with major radius 1.5 m and tube radius 0.3 m — 1,152 quad faces with smooth normals.
+>
+> **Console output:**
+> ```
+> Torus: 1152 verts, 1152 faces
+> ```
+
+---
+
+## The Modifier Stack
+
+### Adding Modifiers
+
+```python
+import bpy
+
+obj = bpy.context.active_object
+
+# ── Subdivision Surface ───────────────────────────────────────────
+subsurf = obj.modifiers.new(name="Subdivision", type='SUBSURF')
+subsurf.levels          = 2    # viewport subdivisions
+subsurf.render_levels   = 3    # render subdivisions
+subsurf.subdivision_type = 'CATMULL_CLARK'
+
+# ── Solidify ──────────────────────────────────────────────────────
+solid = obj.modifiers.new(name="Solidify", type='SOLIDIFY')
+solid.thickness          = 0.05
+solid.offset             = -1.0   # extrude inward
+
+# ── Array ─────────────────────────────────────────────────────────
+array = obj.modifiers.new(name="Array", type='ARRAY')
+array.count              = 5
+array.use_constant_offset = False
+array.relative_offset_displace = (1.2, 0.0, 0.0)
+
+# ── Bevel (modifier version) ──────────────────────────────────────
+bevel = obj.modifiers.new(name="Bevel", type='BEVEL')
+bevel.width              = 0.05
+bevel.segments           = 2
+bevel.limit_method       = 'ANGLE'
+bevel.angle_limit        = 0.5236   # 30 degrees in radians
+
+print("Modifiers applied:")
+for mod in obj.modifiers:
+    print(f"  {mod.name} ({mod.type})")
+```
+
+> **Console output:**
+> ```
+> Modifiers applied:
+>   Subdivision (SUBSURF)
+>   Solidify (SOLIDIFY)
+>   Array (ARRAY)
+>   Bevel (BEVEL)
+> ```
+>
+> **Viewport result:** The cube now shows a 5-element array along X, each element solidified, bevelled, and subdivided.
+
+### Applying All Modifiers
+
+```python
+import bpy
+
+def apply_all_modifiers(obj: bpy.types.Object) -> int:
+    """Apply all modifiers on an object. Returns the number applied."""
+    bpy.ops.ed.undo_push(message="Apply All Modifiers")
+    bpy.context.view_layer.objects.active = obj
+
+    count = 0
+    # Iterate over a copy because the list changes as we apply
+    for mod in list(obj.modifiers):
+        try:
+            bpy.ops.object.modifier_apply(modifier=mod.name)
+            print(f"  Applied: {mod.name}")
+            count += 1
+        except RuntimeError as e:
+            print(f"  Skipped '{mod.name}': {e}")
+    return count
+
+
+obj = bpy.context.active_object
+n = apply_all_modifiers(obj)
+print(f"\nApplied {n} modifier(s). Final vertex count: {len(obj.data.vertices)}")
+```
+
+> **Console output:**
+> ```
+>   Applied: Subdivision
+>   Applied: Solidify
+>   Applied: Array
+>   Applied: Bevel
+>
+> Applied 4 modifier(s). Final vertex count: 4680
+> ```
+
+---
+
+## Exporting Meshes
+
+```python
+import bpy
+import os
+
+# Set the export path
+output_dir = bpy.path.abspath("//exports/")
+os.makedirs(output_dir, exist_ok=True)
+
+# Export selected objects as OBJ
+bpy.ops.export_scene.obj(
+    filepath=os.path.join(output_dir, "scene.obj"),
+    use_selection=True,
+    use_materials=True,
+    use_normals=True,
+    use_uvs=True,
+    axis_forward='-Z',
+    axis_up='Y'
+)
+print(f"OBJ exported to: {output_dir}scene.obj")
+
+# Export as FBX
+bpy.ops.export_scene.fbx(
+    filepath=os.path.join(output_dir, "scene.fbx"),
+    use_selection=True,
+    embed_textures=False,
+    path_mode='RELATIVE',
+    axis_forward='-Z',
+    axis_up='Y'
+)
+print(f"FBX exported to: {output_dir}scene.fbx")
+
+# Export as GLTF 2.0 (preferred for real-time engines)
+bpy.ops.export_scene.gltf(
+    filepath=os.path.join(output_dir, "scene.glb"),
+    export_format='GLB',
+    use_selection=True,
+    export_apply=True,    # apply modifiers before export
+    export_materials='EXPORT'
+)
+print(f"GLB exported to: {output_dir}scene.glb")
+```
+
+> **Console output:**
+> ```
+> OBJ exported to: /project/exports/scene.obj
+> FBX exported to: /project/exports/scene.fbx
+> GLB exported to: /project/exports/scene.glb
+> ```
+
+:::caution[Export Operators Require Object Mode]
+The `export_scene.*` operators must be called while the active object is in **Object Mode**. Calling them from Edit Mode raises a `RuntimeError`. Always call `bpy.ops.object.mode_set(mode='OBJECT')` before exporting.
+:::

@@ -1,0 +1,518 @@
+---
+title: Types & Interfaces
+description: Deep dive into TypeScript's type system — primitives, type aliases, interfaces, unions, intersections, discriminated unions, and exhaustive checks.
+sidebar:
+  order: 3
+tags: [typescript, javascript]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+## Primitive Types
+
+TypeScript's primitive types map directly to JavaScript's runtime primitives:
+
+```ts
+// The 7 primitive types
+const str: string = 'hello';
+const num: number = 42;
+const big: bigint = 9007199254740993n;
+const bool: boolean = true;
+const sym: symbol = Symbol('id');
+const nothing: null = null;
+const missing: undefined = undefined;
+
+// Special top/bottom types
+const anything: any = 'bypass the type system';    // avoid!
+const safe: unknown = fetchData();                  // type-safe top type
+const impossible: never = undefined as never;       // bottom type
+
+// Non-primitive types
+const obj: object = { key: 'value' };              // any non-primitive
+const fn: Function = () => 'hello';                // any function (avoid)
+```
+
+### `void` vs `undefined`
+
+```ts
+// void — used as function return type when the return value is not used
+function logError(msg: string): void {
+  console.error(msg);
+  // Returning undefined is OK
+  // Returning a string is a type error
+}
+
+// undefined — an actual value that can be passed around
+function maybeGet(): string | undefined {
+  return Math.random() > 0.5 ? 'value' : undefined;
+}
+
+const result: undefined = undefined; // explicit undefined value
+```
+
+---
+
+## Type Aliases
+
+A **type alias** creates a new name for any type — primitives, objects, unions, intersections, or computed types.
+
+```ts
+// Primitive alias — useful for documentation
+type UserId = string;
+type Milliseconds = number;
+type Bytes = number;
+
+// Object type alias
+type Point = {
+  x: number;
+  y: number;
+};
+
+type Color = {
+  r: number;
+  g: number;
+  b: number;
+  a?: number; // optional
+};
+
+// Function type alias
+type Predicate<T> = (value: T) => boolean;
+type EventHandler<T = Event> = (event: T) => void;
+
+// Usage
+const origin: Point = { x: 0, y: 0 };
+const isEven: Predicate<number> = (n) => n % 2 === 0;
+```
+
+---
+
+## Interfaces
+
+An **interface** describes the shape of an object. Unlike type aliases, interfaces are **open** — they can be extended and merged.
+
+```ts
+interface Animal {
+  name: string;
+  sound(): string;
+}
+
+interface Pet extends Animal {
+  owner: string;
+  microchipId?: number; // optional property
+}
+
+const dog: Pet = {
+  name: 'Rex',
+  owner: 'Alice',
+  sound() {
+    return 'Woof!';
+  },
+};
+```
+
+### Optional and Readonly Properties
+
+```ts
+interface Config {
+  readonly apiUrl: string;       // cannot be reassigned after creation
+  readonly maxRetries: number;
+  timeout?: number;              // optional — may be undefined
+  headers?: Record<string, string>;
+}
+
+const config: Config = {
+  apiUrl: 'https://api.example.com',
+  maxRetries: 3,
+};
+
+config.apiUrl = 'other'; // Error: Cannot assign to 'apiUrl' because it is a read-only property.
+config.timeout = 5000;   // OK — optional property can be set
+```
+
+### Index Signatures
+
+```ts
+// Allow any string key with string values
+interface StringMap {
+  [key: string]: string;
+}
+
+// Mix of known and dynamic keys
+interface FlexConfig {
+  name: string;          // must be string (consistent with index sig)
+  [key: string]: string; // dynamic keys
+}
+
+// Number index signatures
+interface NumberedList {
+  [index: number]: string;
+  length: number;
+}
+
+const map: StringMap = { foo: 'bar', baz: 'qux' };
+const list: NumberedList = { 0: 'a', 1: 'b', length: 2 };
+```
+
+---
+
+## Interface vs Type Alias
+
+Both can describe object shapes, but they differ in important ways:
+
+| Feature | `interface` | `type` |
+|---|---|---|
+| Extending | `extends` keyword | `&` intersection |
+| Declaration merging | ✅ Yes (open) | ❌ No (closed) |
+| Implements by class | ✅ Yes | ✅ Yes |
+| Computed property names | ❌ No | ✅ Yes |
+| Union / intersection | ❌ No (only object shapes) | ✅ Yes |
+| Primitive, tuple, function | ❌ No | ✅ Yes |
+| Error messages | Often clearer | Can be verbose |
+
+```ts
+// Interface — declaration merging
+interface Window {
+  myLib: { version: string };
+}
+interface Window {
+  myPlugin: () => void; // merged! both declarations combine
+}
+// Window now has BOTH myLib and myPlugin
+
+// Type alias — no merging
+type Box = { width: number };
+type Box = { height: number }; // Error: Duplicate identifier 'Box'.
+
+// Extending via interface
+interface Shape {
+  color: string;
+}
+interface Square extends Shape {
+  side: number;
+}
+
+// Extending via type alias
+type Shape2 = { color: string };
+type Square2 = Shape2 & { side: number };
+```
+
+:::tip[When to Use Which]
+Use **`interface`** for object shapes that may be extended or implemented by classes — especially in public APIs and libraries. Use **`type`** for unions, intersections, mapped types, conditional types, primitives, and tuples. When in doubt for plain object shapes, prefer `interface`.
+:::
+
+---
+
+## Excess Property Checking
+
+TypeScript performs **excess property checking** when a fresh object literal is assigned to a typed variable:
+
+```ts
+interface Point {
+  x: number;
+  y: number;
+}
+
+// Direct assignment — excess property checking fires
+const p: Point = { x: 0, y: 0, z: 0 };
+// Error: Object literal may only specify known properties,
+//        and 'z' does not exist in type 'Point'.
+
+// Indirect assignment — no excess property checking
+const raw = { x: 0, y: 0, z: 0 };
+const p2: Point = raw; // OK — raw is structurally compatible
+
+// Function arguments — excess property checking fires
+function render(point: Point): void { /* ... */ }
+render({ x: 0, y: 0, z: 0 }); // Error: same as direct assignment
+```
+
+---
+
+## Type Assertions
+
+Sometimes you know more about a type than TypeScript does. Use **type assertions** to override the inferred type.
+
+```ts
+// 'as' syntax (preferred — works in JSX too)
+const input = document.getElementById('name') as HTMLInputElement;
+input.value = 'TypeScript'; // OK — HTMLInputElement has .value
+
+// Angle-bracket syntax (avoid in .tsx files — conflicts with JSX)
+const input2 = <HTMLInputElement>document.getElementById('name');
+
+// Double assertion through unknown (escape hatch — use sparingly)
+const x = 'hello' as unknown as number;
+// This does NOT convert the value — 'hello' is still a string at runtime!
+console.log(typeof x); // "string"
+
+// Const assertion — infer the narrowest literal type
+const direction = 'north' as const; // type: "north", not string
+const config = {
+  host: 'localhost',
+  port: 5432,
+} as const;
+// type: { readonly host: "localhost"; readonly port: 5432 }
+```
+
+### Non-Null Assertion (`!`)
+
+```ts
+// The postfix ! asserts a value is not null or undefined
+function getLength(str: string | null): number {
+  return str!.length; // tells TS: "I know this is not null"
+  // Equivalent to: (str as string).length
+  // RUNTIME RISK: if str is actually null, this throws
+}
+
+// Prefer a type guard when possible:
+function getLengthSafe(str: string | null): number {
+  if (str === null) throw new Error('Expected a string');
+  return str.length; // str is now narrowed to string
+}
+```
+
+:::caution[Assertion Caveats]
+Type assertions and non-null assertions are **compile-time only**. They do not insert runtime checks. If your assertion is wrong, you get a runtime error that TypeScript cannot warn you about. Prefer narrowing with type guards whenever possible.
+:::
+
+---
+
+## The `satisfies` Operator
+
+Introduced in TypeScript 4.9, `satisfies` validates that a value matches a type **without widening** the inferred type:
+
+```ts
+type Palette = {
+  red: string | [number, number, number];
+  green: string | [number, number, number];
+  blue: string | [number, number, number];
+};
+
+// Problem with a regular type annotation:
+const palette1: Palette = {
+  red: [255, 0, 0],
+  green: '#00ff00',
+  blue: [0, 0, 255],
+};
+// palette1.red is typed as string | [number, number, number]
+// So this fails:
+// palette1.red.map(v => v * 2); // Error: map does not exist on string | number[]
+
+// Solution with satisfies:
+const palette2 = {
+  red: [255, 0, 0],
+  green: '#00ff00',
+  blue: [0, 0, 255],
+} satisfies Palette;
+
+// TypeScript INFERS the concrete types AND validates against Palette:
+palette2.red.map(v => v * 2);     // OK — red is [number, number, number]
+palette2.green.toUpperCase();     // OK — green is string
+palette2.blue[0].toFixed(2);      // OK — blue is [number, number, number]
+```
+
+---
+
+## Literal Types
+
+TypeScript can narrow a type to a specific **literal value**:
+
+```ts
+// String literal types
+type Direction = 'north' | 'south' | 'east' | 'west';
+type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+
+// Numeric literal types
+type DiceRoll = 1 | 2 | 3 | 4 | 5 | 6;
+type ZeroOrOne = 0 | 1;
+
+// Boolean literal type (rarely used — boolean = true | false)
+type True = true;
+
+function move(direction: Direction, steps: number): void {
+  console.log(`Moving ${direction} by ${steps} steps`);
+}
+
+move('north', 5); // OK
+move('up', 5);    // Error: Argument of type '"up"' is not assignable
+                  //        to parameter of type 'Direction'.
+
+// Template literal types
+type EventName = `on${Capitalize<string>}`;
+type CSSUnit = `${number}px` | `${number}em` | `${number}rem`;
+```
+
+---
+
+## Union Types
+
+A **union type** allows a value to be one of several types:
+
+```ts
+type StringOrNumber = string | number;
+type Status = 'loading' | 'success' | 'error';
+type NullableString = string | null;
+
+function formatId(id: string | number): string {
+  // Must handle both branches
+  if (typeof id === 'string') {
+    return id.toUpperCase(); // id is string here
+  }
+  return id.toFixed(0);     // id is number here
+}
+
+// Union in interface
+interface ApiResponse<T> {
+  data: T | null;
+  error: string | null;
+  status: 'loading' | 'success' | 'error';
+}
+```
+
+---
+
+## Intersection Types
+
+An **intersection type** combines multiple types into one, requiring all properties:
+
+```ts
+type Named = { name: string };
+type Aged = { age: number };
+type Person = Named & Aged; // has BOTH name and age
+
+const alice: Person = {
+  name: 'Alice',
+  age: 30,
+};
+
+// Useful for mixins and extending existing types
+type AdminUser = Person & {
+  role: 'admin';
+  permissions: string[];
+};
+
+// Merging two interfaces
+interface Serializable {
+  serialize(): string;
+}
+interface Loggable {
+  log(): void;
+}
+type Entity = Serializable & Loggable;
+```
+
+---
+
+## Discriminated Unions
+
+A **discriminated union** is a union type where each member has a **common literal property** (the discriminant) used to distinguish them:
+
+```ts
+// Each variant has a discriminant: 'kind'
+type Circle = {
+  kind: 'circle';
+  radius: number;
+};
+
+type Rectangle = {
+  kind: 'rectangle';
+  width: number;
+  height: number;
+};
+
+type Triangle = {
+  kind: 'triangle';
+  base: number;
+  height: number;
+};
+
+type Shape = Circle | Rectangle | Triangle;
+
+function area(shape: Shape): number {
+  switch (shape.kind) {
+    case 'circle':
+      // shape is narrowed to Circle here
+      return Math.PI * shape.radius ** 2;
+    case 'rectangle':
+      // shape is narrowed to Rectangle here
+      return shape.width * shape.height;
+    case 'triangle':
+      // shape is narrowed to Triangle here
+      return (shape.base * shape.height) / 2;
+  }
+  // TypeScript knows all cases are covered — no default needed
+}
+
+console.log(area({ kind: 'circle', radius: 5 })); // 78.53...
+```
+
+---
+
+## Exhaustive Checks with `never`
+
+Use `never` to ensure a switch/if-else handles **every case** in a discriminated union:
+
+```ts
+type Action =
+  | { type: 'INCREMENT'; amount: number }
+  | { type: 'DECREMENT'; amount: number }
+  | { type: 'RESET' };
+
+function assertNever(value: never): never {
+  throw new Error(`Unhandled action: ${JSON.stringify(value)}`);
+}
+
+function reducer(state: number, action: Action): number {
+  switch (action.type) {
+    case 'INCREMENT':
+      return state + action.amount;
+    case 'DECREMENT':
+      return state - action.amount;
+    case 'RESET':
+      return 0;
+    default:
+      // If we add a new Action variant and forget to handle it here,
+      // TypeScript will error: Argument of type '...' is not assignable
+      // to parameter of type 'never'.
+      return assertNever(action);
+  }
+}
+
+// Add 'MULTIPLY' to Action without updating reducer:
+// Error: Argument of type '{ type: "MULTIPLY"; factor: number; }' is
+//        not assignable to parameter of type 'never'.
+```
+
+---
+
+## `unknown` vs `any` vs `never`
+
+```ts
+// any — disables type checking (avoid)
+let x: any = 42;
+x.foo.bar.baz;  // No error — completely unsafe
+x();            // No error
+
+// unknown — type-safe top type (prefer over any)
+let y: unknown = 42;
+y.foo;          // Error: Object is of type 'unknown'.
+y();            // Error: Object is of type 'unknown'.
+// Must narrow before use:
+if (typeof y === 'number') {
+  y.toFixed(2); // OK — y is number inside this block
+}
+
+// never — bottom type, no value is assignable
+function fail(message: string): never {
+  throw new Error(message);
+  // Code after this is unreachable
+}
+
+type Impossible = string & number; // never — cannot be both simultaneously
+```
+
+| Type | Assignable from | Assignable to | Use case |
+|---|---|---|---|
+| `any` | Everything | Everything | Gradual migration, escape hatch |
+| `unknown` | Everything | Only `any` / `unknown` | Type-safe unknown inputs |
+| `never` | Nothing | Everything | Unreachable code, exhaustive checks |

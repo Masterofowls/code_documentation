@@ -1,0 +1,574 @@
+---
+title: Docker in Production
+description: Harden containers for production with resource limits, logging drivers, restart policies, secrets management, health checks, and security profiles.
+sidebar:
+  order: 8
+tags: [devops, docker]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Docker in Production
+
+Running containers in production requires hardening beyond what is needed for development. This guide covers resource limits, logging, secrets management, health checks, security profiles, and graceful shutdown.
+
+---
+
+## Production Dockerfile Checklist
+
+```dockerfile
+# syntax=docker/dockerfile:1
+
+# 1. Pin exact version tags — never :latest
+FROM node:20.11.0-alpine3.19 AS runtime
+
+# 2. Use a non-root user
+RUN addgroup -S -g 1001 app && adduser -S -u 1001 -G app app
+
+WORKDIR /app
+
+# 3. OCI labels for provenance
+LABEL org.opencontainers.image.source="https://github.com/myorg/myapp"
+LABEL org.opencontainers.image.revision="${GIT_SHA}"
+
+# 4. Copy only production artifacts (from a build stage)
+COPY --from=builder --chown=app:app /app/dist ./dist
+COPY --from=builder --chown=app:app /app/node_modules ./node_modules
+
+# 5. No secrets in the image (use runtime injection or --secret)
+
+# 6. Use tini as PID 1 for signal handling
+RUN apk add --no-cache tini
+
+# 7. Switch to non-root
+USER app
+
+# 8. HEALTHCHECK — mandatory for production
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD wget -qO- http://localhost:3000/health || exit 1
+
+# 9. Expose the correct port
+EXPOSE 3000
+
+# 10. Use exec form for ENTRYPOINT
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "dist/server.js"]
+```
+
+---
+
+## Resource Limits
+
+Without resource limits, a single misbehaving container can exhaust all host resources.
+
+### Memory Limits
+
+```bash
+# Hard memory limit (container OOM-killed if exceeded)
+docker run -d --memory="512m" myapp
+
+# Soft limit (can exceed if host has free memory)
+docker run -d --memory="512m" --memory-reservation="256m" myapp
+
+# Disable OOM killer (not recommended — can hang the host)
+docker run -d --memory="512m" --oom-kill-disable myapp
+
+# Check memory usage
+docker stats --no-stream --format "table {{.Name}}\t{{.MemUsage}}\t{{.MemPerc}}"
+```
+
+### CPU Limits
+
+```bash
+# Limit to 0.5 CPU cores
+docker run -d --cpus="0.5" myapp
+
+# Limit to 2 CPU cores
+docker run -d --cpus="2" myapp
+
+# CPU shares (relative weight, default 1024)
+docker run -d --cpu-shares=512 myapp   # Gets half the CPU time of default
+
+# Pin to specific CPUs (NUMA awareness)
+docker run -d --cpuset-cpus="0,1" myapp
+```
+
+### PID Limits
+
+```bash
+# Limit number of processes (fork bomb protection)
+docker run -d --pids-limit=100 myapp
+```
+
+### In Docker Compose
+
+```yaml
+services:
+  api:
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+          pids: 100
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+```
+
+:::caution[deploy.resources in standalone Compose]
+The `deploy.resources` key is respected by standalone `docker compose` as of Compose v2. It does NOT require Docker Swarm.
+:::
+
+---
+
+## Logging Drivers
+
+Docker supports multiple logging drivers. Configure them globally in `/etc/docker/daemon.json` or per-container.
+
+### json-file (Default)
+
+The default driver. Logs are stored as JSON files on the host.
+
+```bash
+# Run with size limits (essential for production)
+docker run -d \
+  --log-driver json-file \
+  --log-opt max-size=10m \
+  --log-opt max-file=3 \
+  --log-opt compress=true \
+  myapp
+```
+
+Configure globally in `/etc/docker/daemon.json`:
+
+```json
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3",
+    "compress": "true"
+  }
+}
+```
+
+### syslog
+
+```bash
+docker run -d \
+  --log-driver syslog \
+  --log-opt syslog-address=tcp://192.168.1.100:514 \
+  --log-opt syslog-facility=daemon \
+  --log-opt tag="myapp" \
+  myapp
+```
+
+### fluentd / fluentbit
+
+```bash
+docker run -d \
+  --log-driver fluentd \
+  --log-opt fluentd-address=localhost:24224 \
+  --log-opt tag="docker.{{.Name}}" \
+  myapp
+```
+
+### AWS CloudWatch Logs (awslogs)
+
+```bash
+docker run -d \
+  --log-driver awslogs \
+  --log-opt awslogs-region=us-east-1 \
+  --log-opt awslogs-group=/myapp/production \
+  --log-opt awslogs-stream=api-$(hostname) \
+  --log-opt awslogs-create-group=true \
+  myapp
+```
+
+In Compose:
+
+```yaml
+services:
+  api:
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: us-east-1
+        awslogs-group: /myapp/production
+        awslogs-stream: api
+        awslogs-create-group: "true"
+```
+
+:::tip[none driver for sensitive containers]
+Use `--log-driver none` for containers that handle sensitive data to prevent any output from being captured in host-side log files.
+:::
+
+---
+
+## Restart Policies
+
+Restart policies control whether Docker automatically restarts containers when they exit.
+
+| Policy | Behavior |
+|---|---|
+| `no` (default) | Never restart |
+| `always` | Always restart, even on clean exit |
+| `on-failure[:N]` | Restart only on non-zero exit, up to N times |
+| `unless-stopped` | Restart always unless explicitly stopped by the user |
+
+```bash
+# Recommended for production services
+docker run -d --restart unless-stopped myapp
+
+# Retry up to 5 times before giving up
+docker run -d --restart on-failure:5 myapp
+
+# Always restart (useful for daemons and system services)
+docker run -d --restart always myapp
+```
+
+In Compose:
+
+```yaml
+services:
+  api:
+    restart: unless-stopped   # Recommended
+
+  db:
+    restart: unless-stopped
+
+  migration:
+    restart: no               # One-shot jobs must not restart
+```
+
+---
+
+## Docker Secrets
+
+### Secrets in Docker Swarm
+
+```bash
+# Create a secret from stdin
+echo "supersecretpassword" | docker secret create db_password -
+
+# Create from a file
+docker secret create tls_cert ./cert.pem
+
+# List secrets
+docker secret ls
+
+# Use in a Swarm service
+docker service create \
+  --name api \
+  --secret db_password \
+  myapp
+# Secret available at /run/secrets/db_password inside container
+```
+
+### Secrets in Docker Compose (File-Based)
+
+```yaml
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+
+  api:
+    secrets:
+      - db_password
+      - api_key
+    environment:
+      # Application reads from file, not env var
+      DB_PASSWORD_FILE: /run/secrets/db_password
+
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt   # Plain text file, not in git
+
+  api_key:
+    environment: API_KEY              # Read from host environment variable
+```
+
+Application reading secrets from files:
+
+```javascript
+// Read secret from file (more secure than environment variable)
+const fs = require('fs');
+const dbPassword = process.env.DB_PASSWORD_FILE
+  ? fs.readFileSync(process.env.DB_PASSWORD_FILE, 'utf8').trim()
+  : process.env.DB_PASSWORD;
+```
+
+:::caution[Never hardcode secrets in images]
+Secrets embedded in images via `ENV` or `ARG` are visible in `docker inspect` and `docker history`. Secrets in image layers persist even after you delete the Dockerfile. Always inject secrets at runtime via files, environment variables (from a secrets manager), or Docker secrets.
+:::
+
+---
+
+## Health Checks
+
+### HEALTHCHECK in Dockerfile
+
+```dockerfile
+# HTTP endpoint check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD curl -f http://localhost:3000/health || exit 1
+
+# wget (available in Alpine without installing curl)
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD wget -qO- http://localhost:8080/healthz || exit 1
+
+# Native application check (most reliable — no external dependency)
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+  CMD node healthcheck.js || exit 1
+
+# Database readiness
+HEALTHCHECK --interval=10s --timeout=5s --retries=5 --start-period=30s \
+  CMD pg_isready -U $POSTGRES_USER -d $POSTGRES_DB || exit 1
+```
+
+Health check option details:
+- `--interval` — How often to run the check (default: 30s)
+- `--timeout` — Seconds before the check times out (default: 30s)
+- `--start-period` — Grace period for startup before failures count (default: 0s)
+- `--retries` — Consecutive failures before marking unhealthy (default: 3)
+
+### Checking Health Status
+
+```bash
+# View health status
+docker ps
+# NAMES     STATUS
+# api       Up 2 minutes (healthy)
+# db        Up 2 minutes (unhealthy)
+
+# Inspect detailed health history
+docker inspect --format '{{json .State.Health}}' api | jq .
+
+# Watch health in real time
+watch docker ps
+```
+
+---
+
+## Container Security
+
+### Capabilities
+
+Linux capabilities divide the traditional root-user omnipotence into discrete units. Drop all capabilities and add back only what is needed.
+
+```bash
+# Drop ALL capabilities, then add only what's needed
+docker run -d \
+  --cap-drop ALL \
+  --cap-add NET_BIND_SERVICE \   # Bind ports < 1024
+  --security-opt no-new-privileges \
+  myapp
+
+# Common capabilities needed by application type
+# Web server on port 80: NET_BIND_SERVICE
+# Network tools: NET_ADMIN, NET_RAW
+# File capabilities: CHOWN, DAC_OVERRIDE, FOWNER
+```
+
+### Read-Only Filesystem
+
+```bash
+# Mount root filesystem as read-only
+docker run -d \
+  --read-only \
+  --tmpfs /tmp:size=50m \    # Allow writes to /tmp
+  --tmpfs /run:size=10m \    # Allow writes to /run
+  myapp
+```
+
+In Compose:
+
+```yaml
+services:
+  api:
+    read_only: true
+    tmpfs:
+      - /tmp:size=50m
+      - /run:size=10m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+```
+
+### seccomp Profiles
+
+seccomp (Secure Computing Mode) restricts which system calls a container can make.
+
+```bash
+# Apply a custom seccomp profile
+docker run -d \
+  --security-opt seccomp=/etc/docker/seccomp/default.json \
+  myapp
+
+# Disable seccomp (not recommended — only for debugging)
+docker run -d --security-opt seccomp=unconfined myapp
+```
+
+Custom seccomp profile (allow only necessary syscalls):
+
+```json
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "syscalls": [
+    {
+      "names": ["read", "write", "open", "close", "stat", "fstat",
+                "mmap", "mprotect", "exit", "exit_group", "futex",
+                "nanosleep", "socket", "connect", "accept", "send",
+                "recv", "bind", "listen", "epoll_wait", "epoll_ctl"],
+      "action": "SCMP_ACT_ALLOW"
+    }
+  ]
+}
+```
+
+### AppArmor
+
+```bash
+# Apply a custom AppArmor profile
+docker run -d --security-opt apparmor=myapp-profile myapp
+
+# Disable AppArmor (not recommended)
+docker run -d --security-opt apparmor=unconfined myapp
+```
+
+---
+
+## Monitoring
+
+### cAdvisor (Container Advisor)
+
+```bash
+docker run -d \
+  --name cadvisor \
+  --volume /:/rootfs:ro \
+  --volume /var/run:/var/run:ro \
+  --volume /sys:/sys:ro \
+  --volume /var/lib/docker/:/var/lib/docker:ro \
+  --publish 8080:8080 \
+  --detach \
+  gcr.io/cadvisor/cadvisor:latest
+```
+
+### Docker Engine Prometheus Metrics
+
+Enable in `/etc/docker/daemon.json`:
+
+```json
+{
+  "metrics-addr": "127.0.0.1:9323"
+}
+```
+
+```bash
+# Scrape metrics
+curl http://localhost:9323/metrics | grep container_
+
+# Prometheus scrape config
+# scrape_configs:
+#   - job_name: docker
+#     static_configs:
+#       - targets: ['localhost:9323']
+```
+
+---
+
+## Graceful Shutdown
+
+Containers receive `SIGTERM` when `docker stop` is called. The default timeout before `SIGKILL` is 10 seconds. Handle `SIGTERM` properly to finish in-flight requests.
+
+```bash
+# Custom stop timeout (seconds before SIGKILL)
+docker run -d --stop-timeout 30 myapp
+docker stop --time 30 my-container
+```
+
+In Compose:
+
+```yaml
+services:
+  api:
+    stop_grace_period: 30s   # Wait 30s before SIGKILL (default 10s)
+    stop_signal: SIGTERM
+```
+
+Application-side graceful shutdown (Node.js):
+
+```javascript
+const server = app.listen(3000);
+
+// Handle SIGTERM from Docker
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received: closing HTTP server');
+  server.close(() => {
+    console.log('HTTP server closed');
+    process.exit(0);
+  });
+  // Force exit if drain takes too long
+  setTimeout(() => process.exit(1), 25000);
+});
+```
+
+Python (FastAPI with uvicorn):
+
+```python
+import signal
+import sys
+
+def handle_sigterm(signum, frame):
+    # Perform cleanup
+    db.disconnect()
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, handle_sigterm)
+```
+
+---
+
+## daemon.json Production Configuration
+
+```json
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  },
+  "default-ulimits": {
+    "nofile": {
+      "Name": "nofile",
+      "Hard": 64000,
+      "Soft": 64000
+    }
+  },
+  "metrics-addr": "127.0.0.1:9323",
+  "experimental": false,
+  "live-restore": true,
+  "userland-proxy": false,
+  "no-new-privileges": true
+}
+```
+
+Key settings:
+- `live-restore: true` — Keep containers running when the daemon restarts (zero downtime daemon upgrades)
+- `userland-proxy: false` — Use iptables rules instead of userland proxy (better performance)
+- `no-new-privileges: true` — Global default for all containers
+
+:::tip[Validate daemon.json]
+Before restarting dockerd, validate the config:
+```bash
+dockerd --validate --config-file /etc/docker/daemon.json
+```
+:::

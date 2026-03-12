@@ -1,0 +1,335 @@
+---
+title: Playwright Locators
+description: Find elements reliably with Playwright's auto-waiting locators — getByRole, getByText, getByLabel, chaining, filtering, frames, and accessibility-first query philosophy.
+sidebar:
+  order: 3
+tags: [testing, javascript]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Locators are the core of Playwright's element interaction system. Unlike CSS selectors that are evaluated once, a Playwright locator describes how to find an element and re-evaluates it on every action — enabling built-in auto-waiting and retry logic.
+
+## Locator Philosophy
+
+A Playwright locator is **lazy and strict**:
+
+- **Lazy**: it does not find the element until an action is performed
+- **Strict**: it throws if more than one element matches (unless you explicitly request all)
+- **Auto-waiting**: every action retries until the element is in the expected state or the timeout expires
+
+```typescript
+// The locator does NOT query the DOM here
+const submitButton = page.getByRole('button', { name: 'Submit' });
+
+// The DOM is queried here, and Playwright waits for the element to be:
+// - attached to the DOM
+// - visible
+// - enabled
+// - stable (not animating)
+await submitButton.click();
+```
+
+This means you can define locators at the top of a test and reuse them without the "stale element reference" errors common in Selenium.
+
+## getByRole (Recommended)
+
+`getByRole()` queries elements by their ARIA role — the most accessible and resilient way to find elements. It is preferred because it mirrors how screen readers and assistive technologies perceive the page.
+
+```typescript
+// Buttons
+page.getByRole('button', { name: 'Submit' });
+page.getByRole('button', { name: /submit/i });  // regex, case-insensitive
+
+// Links
+page.getByRole('link', { name: 'Learn more' });
+page.getByRole('link', { name: 'Home', exact: true });
+
+// Headings
+page.getByRole('heading', { name: 'Dashboard' });
+page.getByRole('heading', { name: 'Profile', level: 2 }); // h2 specifically
+
+// Form elements
+page.getByRole('textbox', { name: 'Email address' });
+page.getByRole('textbox', { name: /username/i });
+page.getByRole('checkbox', { name: 'Remember me' });
+page.getByRole('radio', { name: 'Credit card' });
+page.getByRole('combobox', { name: 'Country' });       // <select>
+page.getByRole('spinbutton', { name: 'Quantity' });    // <input type="number">
+page.getByRole('searchbox', { name: 'Search' });       // <input type="search">
+
+// Content elements
+page.getByRole('img', { name: 'Company logo' });       // checks alt attribute
+page.getByRole('alert');                                // role="alert" or <dialog>
+page.getByRole('dialog', { name: 'Confirm deletion' });
+page.getByRole('status');                               // live region
+page.getByRole('progressbar');
+
+// Lists
+page.getByRole('list');
+page.getByRole('listitem');
+
+// Tables
+page.getByRole('table');
+page.getByRole('row', { name: /Alice/ });
+page.getByRole('cell', { name: '$9.99' });
+page.getByRole('columnheader', { name: 'Price' });
+
+// Navigation
+page.getByRole('navigation');
+page.getByRole('main');
+page.getByRole('banner');
+page.getByRole('contentinfo');
+page.getByRole('region', { name: 'Recent orders' });
+```
+
+### Common ARIA Roles Quick Reference
+
+| Role | HTML elements | Notes |
+|---|---|---|
+| `button` | `<button>`, `[role="button"]` | Also matches `<input type="submit">` |
+| `link` | `<a href>` | Must have an href to be a link role |
+| `heading` | `<h1>`–`<h6>` | Use `level` option for specific depth |
+| `textbox` | `<input type="text">`, `<textarea>` | Matched by label |
+| `checkbox` | `<input type="checkbox">` | |
+| `radio` | `<input type="radio">` | |
+| `combobox` | `<select>`, custom dropdowns | |
+| `img` | `<img>` | Matched by `alt` attribute |
+| `list` | `<ul>`, `<ol>` | |
+| `listitem` | `<li>` | |
+| `table` | `<table>` | |
+| `row` | `<tr>` | |
+| `cell` | `<td>` | |
+| `dialog` | `<dialog>`, `[role="dialog"]` | |
+| `alert` | `[role="alert"]` | |
+| `navigation` | `<nav>` | |
+| `main` | `<main>` | |
+
+:::tip[How Roles Are Determined]
+Playwright uses the browser's accessibility tree to determine roles — the same source used by screen readers. This means `getByRole('button')` matches `<button>`, `<input type="submit">`, and any element with `role="button"` attribute.
+:::
+
+## getByText
+
+Find elements by their visible text content:
+
+```typescript
+// Exact match (default)
+page.getByText('Welcome back, Alice!');
+
+// Case-insensitive (use regex)
+page.getByText(/welcome back/i);
+
+// Substring match (use regex or exact: false)
+page.getByText('Welcome back', { exact: false });
+
+// Match specific element type
+page.locator('p').getByText('Loading...');
+page.locator('td').getByText('$9.99');
+
+// Multiple text nodes — matches if any child contains text
+page.getByText('Order confirmed');
+```
+
+:::caution[getByText Matches Partial Containers]
+`getByText` returns the deepest element containing the text. If you have `<div><span>Hello</span></div>`, `getByText('Hello')` returns the `<span>`, not the `<div>`. This is usually what you want, but be aware when asserting on parent containers.
+:::
+
+## getByLabel
+
+The preferred query for form inputs — finds the input associated with a `<label>`:
+
+```typescript
+// Matches input associated with a label element
+page.getByLabel('Email address');
+page.getByLabel('Email address', { exact: false }); // substring
+
+// Works with:
+// <label>Email address <input /></label>          (wrapped)
+// <label for="email">Email address</label>        (for/id)
+// <input aria-label="Email address" />            (aria-label)
+// <input aria-labelledby="email-label" />         (aria-labelledby)
+```
+
+## getByPlaceholder
+
+```typescript
+page.getByPlaceholder('Enter your email');
+page.getByPlaceholder(/search/i);
+page.getByPlaceholder('DD/MM/YYYY', { exact: true });
+```
+
+## getByAltText
+
+For images with alt text:
+
+```typescript
+page.getByAltText('Company logo');
+page.getByAltText(/product image/i);
+```
+
+## getByTitle
+
+For elements with a title attribute:
+
+```typescript
+page.getByTitle('Close dialog');
+page.getByTitle('Required field');
+```
+
+## getByTestId
+
+Use `data-testid` as a last resort when semantic queries are not practical:
+
+```typescript
+page.getByTestId('user-avatar');
+page.getByTestId('price-display');
+
+// Custom testid attribute (configure in playwright.config.ts)
+// use: { testIdAttribute: 'data-cy' }
+page.getByTestId('checkout-button'); // matches data-cy="checkout-button"
+```
+
+:::caution[Prefer Semantic Locators Over TestId]
+`data-testid` attributes make tests brittle and don't verify accessibility. A test passing with `getByTestId('submit-btn')` will not catch if the submit button loses its accessible name or becomes disabled. Reserve `getByTestId` for dynamic content where stable semantic queries are not possible.
+:::
+
+## CSS and XPath Locators (Last Resort)
+
+Use these only when semantic queries are genuinely not possible:
+
+```typescript
+// CSS selector
+page.locator('button.submit-btn');
+page.locator('#user-form input[name="email"]');
+page.locator('[data-status="active"]');
+
+// XPath
+page.locator('xpath=//button[@type="submit"]');
+page.locator('//table/tbody/tr[1]/td[2]');
+
+// :has-text pseudo-class (Playwright extension)
+page.locator('button:has-text("Submit")');
+page.locator('.card:has-text("Premium")');
+
+// :has pseudo-class
+page.locator('.product:has(.badge)'); // products with a badge child
+```
+
+## Chaining Locators
+
+Chain locators to narrow searches to a specific subtree:
+
+```typescript
+// Find a button inside a specific dialog
+const dialog = page.getByRole('dialog', { name: 'Confirm deletion' });
+const confirmBtn = dialog.getByRole('button', { name: 'Delete' });
+await confirmBtn.click();
+
+// Find input inside a form section
+const shippingForm = page.getByRole('region', { name: 'Shipping address' });
+await shippingForm.getByLabel('Street address').fill('123 Main St');
+await shippingForm.getByLabel('City').fill('Springfield');
+
+// Nested chaining
+const table = page.getByRole('table');
+const firstRow = table.getByRole('row').first();
+const priceCell = firstRow.getByRole('cell').nth(2);
+await expect(priceCell).toHaveText('$9.99');
+```
+
+## Filtering Locators
+
+Filter a locator's results without changing the query:
+
+```typescript
+// Filter by visible text (locator + text)
+page.getByRole('listitem').filter({ hasText: 'Premium' });
+page.getByRole('listitem').filter({ hasText: /active/i });
+
+// Filter by containing a child element
+page.getByRole('listitem').filter({ has: page.getByRole('img') });
+
+// Filter by NOT containing text
+page.getByRole('listitem').filter({ hasNotText: 'Disabled' });
+
+// Combine filters
+page.getByRole('row')
+  .filter({ hasText: 'Alice' })
+  .filter({ has: page.getByRole('checkbox', { checked: true }) });
+```
+
+## nth(), first(), and last()
+
+Select specific items from a list of matching elements:
+
+```typescript
+const rows = page.getByRole('row');
+
+await rows.first().click();           // first matching element
+await rows.last().click();            // last matching element
+await rows.nth(2).click();            // zero-indexed: 3rd element
+
+// Practical examples
+const notifications = page.getByRole('listitem').filter({ hasText: 'unread' });
+await notifications.first().click(); // open first unread notification
+
+const menuItems = page.getByRole('menuitem');
+await menuItems.last().click();      // click last menu item
+```
+
+:::caution[Avoid nth() for Stable Tests]
+Positional selectors like `nth(2)` are fragile — adding or removing items breaks the test. Prefer filtering by unique text or attributes: `.filter({ hasText: 'Billing' })` is more resilient than `.nth(3)`.
+:::
+
+## frameLocator — Working with iframes
+
+```typescript
+// Locate elements inside an iframe
+const frame = page.frameLocator('iframe[title="Payment form"]');
+await frame.getByLabel('Card number').fill('4242 4242 4242 4242');
+await frame.getByLabel('Expiry date').fill('12/28');
+await frame.getByLabel('CVC').fill('123');
+
+// Stripe payment form example
+const stripeFrame = page.frameLocator('[name="stripe-payment-element-mount-point"]');
+await stripeFrame.getByRole('textbox', { name: 'Card number' }).fill('4242424242424242');
+```
+
+## locator.all() — Working with Multiple Elements
+
+```typescript
+// Get all matching elements as an array
+const items = await page.getByRole('listitem').all();
+expect(items).toHaveLength(5);
+
+// Iterate and assert on each
+for (const item of items) {
+  await expect(item).toBeVisible();
+}
+
+// Collect all text values
+const texts = await page.getByRole('cell').allTextContents();
+expect(texts).toContain('$9.99');
+expect(texts).toEqual(['Item', 'Qty', 'Price', 'Widget', '2', '$19.98']);
+
+// Get inner text of all matching elements
+const labels = await page.getByRole('listitem').allInnerTexts();
+```
+
+## Inspecting the Accessibility Tree
+
+Use Playwright's built-in accessibility tree inspection to understand what roles are available:
+
+```typescript
+// Print the accessibility tree (useful for debugging)
+const snapshot = await page.accessibility.snapshot();
+console.log(JSON.stringify(snapshot, null, 2));
+
+// Check a specific element's accessibility info
+const button = page.getByRole('button', { name: 'Submit' });
+const ariaLabel = await button.getAttribute('aria-label');
+const isDisabled = await button.isDisabled();
+```
+
+You can also use the Playwright Inspector's "Pick locator" tool to visually identify the best locator for any element on the page.

@@ -1,0 +1,532 @@
+---
+title: Controllers
+description: Handle incoming HTTP requests and return responses using NestJS controllers, decorators, and route configuration.
+sidebar:
+  order: 3
+tags: [typescript, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Controllers
+
+Controllers are responsible for handling incoming requests and returning responses to the client.
+A controller's purpose is to receive specific requests for the application. The routing mechanism controls
+which controller receives which requests.
+
+## @Controller() Decorator
+
+The `@Controller()` decorator is required for every controller. You can pass a route prefix string to group
+related routes under a common path:
+
+```typescript
+import { Controller, Get } from '@nestjs/common';
+
+// All routes in this controller are prefixed with /users
+@Controller('users')
+export class UsersController {
+  @Get()
+  findAll(): string {
+    return 'Returns all users';
+  }
+
+  // Resolves to GET /users/profile
+  @Get('profile')
+  getProfile(): string {
+    return 'Returns user profile';
+  }
+}
+```
+
+## HTTP Method Decorators
+
+NestJS provides decorators for every standard HTTP method:
+
+```typescript
+import {
+  Controller,
+  Get,
+  Post,
+  Put,
+  Patch,
+  Delete,
+  Options,
+  Head,
+  All,
+} from '@nestjs/common';
+
+@Controller('resources')
+export class ResourcesController {
+  @Get()         // GET /resources
+  findAll() {}
+
+  @Get(':id')    // GET /resources/:id
+  findOne() {}
+
+  @Post()        // POST /resources
+  create() {}
+
+  @Put(':id')    // PUT /resources/:id (full replacement)
+  replace() {}
+
+  @Patch(':id')  // PATCH /resources/:id (partial update)
+  update() {}
+
+  @Delete(':id') // DELETE /resources/:id
+  remove() {}
+
+  @Options()     // OPTIONS /resources (CORS preflight)
+  options() {}
+
+  @Head()        // HEAD /resources (like GET without body)
+  head() {}
+
+  @All()         // Matches all HTTP verbs on this route
+  handleAll() {}
+}
+```
+
+## @Param() — Route Parameters
+
+Use `@Param()` to extract dynamic segments from the URL path:
+
+```typescript
+import { Controller, Get, Param, ParseIntPipe, ParseUUIDPipe } from '@nestjs/common';
+
+@Controller('users')
+export class UsersController {
+  // Extract and auto-parse :id as a number
+  @Get(':id')
+  findOne(@Param('id', ParseIntPipe) id: number) {
+    return { id };
+  }
+
+  // Multiple route parameters
+  @Get(':userId/posts/:postId')
+  findPost(
+    @Param('userId', ParseIntPipe) userId: number,
+    @Param('postId', ParseIntPipe) postId: number,
+  ) {
+    return { userId, postId };
+  }
+
+  // Get all params as an object
+  @Get(':category/:slug')
+  findBySlug(@Param() params: { category: string; slug: string }) {
+    return params;
+  }
+
+  // UUID validation
+  @Get('uuid/:id')
+  findByUuid(@Param('id', ParseUUIDPipe) id: string) {
+    return { id };
+  }
+}
+```
+
+:::tip[Always Validate Route Params]
+Use built-in pipes like `ParseIntPipe`, `ParseUUIDPipe`, or `ParseEnumPipe` on route params to reject
+invalid values early with a `400 Bad Request` before your handler runs.
+:::
+
+## @Query() — Query String Parameters
+
+```typescript
+import { Controller, Get, Query } from '@nestjs/common';
+
+class PaginationDto {
+  page?: number = 1;
+  limit?: number = 20;
+  sort?: 'asc' | 'desc' = 'asc';
+  search?: string;
+}
+
+@Controller('articles')
+export class ArticlesController {
+  // GET /articles?page=2&limit=10&sort=desc&search=nestjs
+  @Get()
+  findAll(@Query() query: PaginationDto) {
+    return query;
+  }
+
+  // Extract a single query param
+  @Get('search')
+  search(@Query('q') searchTerm: string) {
+    return { searchTerm };
+  }
+}
+```
+
+## @Body() — Request Body with DTOs
+
+```typescript
+import { Controller, Post, Body } from '@nestjs/common';
+import { IsString, IsEmail, IsOptional, MinLength } from 'class-validator';
+
+export class CreateUserDto {
+  @IsString()
+  name: string;
+
+  @IsEmail()
+  email: string;
+
+  @IsString()
+  @MinLength(8)
+  password: string;
+
+  @IsOptional()
+  @IsString()
+  bio?: string;
+}
+
+@Controller('users')
+export class UsersController {
+  @Post()
+  create(@Body() createUserDto: CreateUserDto) {
+    return createUserDto;
+  }
+
+  // Extract a single body property
+  @Post('name-only')
+  getNameOnly(@Body('name') name: string) {
+    return { name };
+  }
+}
+```
+
+## @Headers() — Request Headers
+
+```typescript
+import { Controller, Get, Headers } from '@nestjs/common';
+
+@Controller('info')
+export class InfoController {
+  @Get()
+  getInfo(@Headers() headers: Record<string, string>) {
+    return {
+      userAgent: headers['user-agent'],
+      acceptLanguage: headers['accept-language'],
+    };
+  }
+
+  // Extract a single header
+  @Get('auth')
+  getAuth(@Headers('authorization') auth: string) {
+    return { auth };
+  }
+}
+```
+
+## @Req() and @Res() — Raw Request / Response
+
+:::caution[Avoid @Req/@Res When Possible]
+Injecting `@Req()` and `@Res()` tightly couples your controller to the underlying platform (Express or Fastify)
+and breaks NestJS features like interceptors and the standard response lifecycle. Use them only when absolutely
+necessary (e.g., streaming responses).
+:::
+
+```typescript
+import { Controller, Get, Req, Res } from '@nestjs/common';
+import { Request, Response } from 'express';
+
+@Controller('raw')
+export class RawController {
+  @Get()
+  getRaw(@Req() req: Request, @Res() res: Response) {
+    // When using @Res(), you must call res.send() / res.json() yourself
+    res.status(200).json({ path: req.path });
+  }
+
+  // Use passthrough to keep interceptors active
+  @Get('passthrough')
+  withPassthrough(@Res({ passthrough: true }) res: Response) {
+    res.setHeader('X-Custom', 'value');
+    return { message: 'Interceptors still work here' };
+  }
+}
+```
+
+## @HttpCode() — Custom Status Codes
+
+```typescript
+import { Controller, Post, Delete, HttpCode, HttpStatus } from '@nestjs/common';
+
+@Controller('items')
+export class ItemsController {
+  // Default POST returns 201; override to 200
+  @Post()
+  @HttpCode(HttpStatus.OK)
+  create() {
+    return { created: true };
+  }
+
+  // Default DELETE returns 200; override to 204 No Content
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  remove() {
+    // No return value needed for 204
+  }
+}
+```
+
+## @Header() — Response Headers
+
+```typescript
+import { Controller, Get, Header } from '@nestjs/common';
+
+@Controller('cached')
+export class CachedController {
+  @Get()
+  @Header('Cache-Control', 'max-age=3600')
+  @Header('X-Powered-By', 'NestJS')
+  getCached() {
+    return { data: 'cached response' };
+  }
+}
+```
+
+## @Redirect() — Redirects
+
+```typescript
+import { Controller, Get, Redirect, Query } from '@nestjs/common';
+
+@Controller()
+export class AppController {
+  @Get('docs')
+  @Redirect('https://docs.nestjs.com', 302)
+  getDocs() {
+    // Return a different URL/status code dynamically
+  }
+
+  @Get('version')
+  @Redirect('https://docs.nestjs.com', 302)
+  getVersion(@Query('version') version: string) {
+    // Returning an object overrides the decorator values
+    if (version && version === 'v5') {
+      return { url: 'https://docs.nestjs.com/v5/' };
+    }
+    // No return = use decorator values
+  }
+}
+```
+
+## Route Wildcards
+
+NestJS supports pattern-based route matching using wildcard characters:
+
+```typescript
+@Controller()
+export class WildcardController {
+  // Matches /ab, /abcd, /ab_123cd, etc.
+  @Get('ab*cd')
+  wildcardRoute() {
+    return 'This route uses a wildcard';
+  }
+
+  // Matches /abcd, /ab_cd, /abecd
+  @Get('ab?cd')
+  optionalChar() {}
+
+  // Matches /abcd, /abecd, /abeecd
+  @Get('ab+cd')
+  oneOrMore() {}
+}
+```
+
+## @HostParam() — Sub-Domain Routing
+
+```typescript
+import { Controller, Get, HostParam } from '@nestjs/common';
+
+// Match requests where host is account.{account}.example.com
+@Controller({ host: ':account.example.com' })
+export class AccountController {
+  @Get()
+  getInfo(@HostParam('account') account: string) {
+    return { account };
+  }
+}
+```
+
+## Async Controllers
+
+All route handlers support `async/await` and Observable returns natively:
+
+```typescript
+import { Controller, Get, Param, ParseIntPipe } from '@nestjs/common';
+import { Observable, of } from 'rxjs';
+import { UsersService } from './users.service';
+import { User } from './entities/user.entity';
+
+@Controller('users')
+export class UsersController {
+  constructor(private readonly usersService: UsersService) {}
+
+  // async/await
+  @Get()
+  async findAll(): Promise<User[]> {
+    return this.usersService.findAll();
+  }
+
+  // RxJS Observable (NestJS subscribes automatically)
+  @Get('stream')
+  streamData(): Observable<string[]> {
+    return of(['item1', 'item2', 'item3']);
+  }
+}
+```
+
+## Request / Response Lifecycle
+
+Understanding the order of execution in NestJS is crucial for debugging:
+
+```
+Incoming Request
+       ↓
+  Middleware          (global → module-level)
+       ↓
+   Guards             (global → controller → route)
+       ↓
+  Interceptors        (global → controller → route — pre-handler)
+       ↓
+    Pipes             (global → controller → route → param)
+       ↓
+ Route Handler        (your controller method)
+       ↓
+  Interceptors        (route → controller → global — post-handler)
+       ↓
+Exception Filters     (route → controller → global — only on error)
+       ↓
+ Outgoing Response
+```
+
+## API Versioning
+
+NestJS supports four versioning strategies. Enable it in `main.ts`:
+
+<Tabs>
+  <TabItem label="URI Versioning">
+    ```typescript
+    // main.ts
+    import { VersioningType } from '@nestjs/common';
+
+    app.enableVersioning({
+      type: VersioningType.URI,
+      // Routes become /v1/users, /v2/users
+    });
+    ```
+
+    ```typescript
+    // users.controller.ts
+    import { Controller, Get, Version } from '@nestjs/common';
+
+    @Controller('users')
+    export class UsersController {
+      @Version('1')
+      @Get()
+      findAllV1() {
+        return { version: 1 };
+      }
+
+      @Version('2')
+      @Get()
+      findAllV2() {
+        return { version: 2 };
+      }
+    }
+    ```
+  </TabItem>
+  <TabItem label="Header Versioning">
+    ```typescript
+    // main.ts
+    app.enableVersioning({
+      type: VersioningType.HEADER,
+      header: 'X-API-Version',
+    });
+    ```
+
+    ```typescript
+    // Requests must include: X-API-Version: 1
+    @Controller({ version: '1', path: 'users' })
+    export class UsersV1Controller {
+      @Get()
+      findAll() { return { version: 1 }; }
+    }
+    ```
+  </TabItem>
+  <TabItem label="Media Type Versioning">
+    ```typescript
+    // main.ts
+    app.enableVersioning({
+      type: VersioningType.MEDIA_TYPE,
+      key: 'v=',
+    });
+    // Request: Accept: application/json;v=2
+    ```
+  </TabItem>
+  <TabItem label="Custom Versioning">
+    ```typescript
+    // main.ts
+    app.enableVersioning({
+      type: VersioningType.CUSTOM,
+      extractor: (request: Request) => {
+        return request.headers['x-custom-version'] as string ?? '1';
+      },
+    });
+    ```
+  </TabItem>
+</Tabs>
+
+### Version on the Controller Level
+
+```typescript
+// Apply version to the whole controller
+@Controller({
+  version: '2',
+  path: 'users',
+})
+export class UsersV2Controller {
+  @Get() findAll() { return []; }
+  @Get(':id') findOne() { return {}; }
+  // All routes here are version 2
+}
+```
+
+## Controller-Level Decorators
+
+Decorators like `@UseGuards()`, `@UseInterceptors()`, `@UsePipes()`, and `@UseFilters()` can be applied at
+the controller class level to affect all handlers in that controller:
+
+```typescript
+import {
+  Controller,
+  Get,
+  UseGuards,
+  UseInterceptors,
+  UsePipes,
+  ValidationPipe,
+} from '@nestjs/common';
+import { AuthGuard } from '../auth/auth.guard';
+import { LoggingInterceptor } from '../common/interceptors/logging.interceptor';
+
+@Controller('admin')
+@UseGuards(AuthGuard)
+@UseInterceptors(LoggingInterceptor)
+@UsePipes(new ValidationPipe({ whitelist: true }))
+export class AdminController {
+  @Get('dashboard')
+  getDashboard() {
+    return { stats: [] };
+  }
+
+  @Get('users')
+  getUsers() {
+    return [];
+  }
+}
+```
+
+:::tip[Controller vs Route Decorators]
+Decorators applied at the controller class level affect all routes. Decorators applied directly to a route
+method override or add to the controller-level configuration. Route-level always takes precedence.
+:::

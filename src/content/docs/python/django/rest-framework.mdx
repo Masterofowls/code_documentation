@@ -1,0 +1,782 @@
+---
+title: Django REST Framework
+description: Build production-ready REST APIs with Django REST Framework including serializers, ViewSets, routers, authentication, permissions, pagination, filtering, and OpenAPI docs.
+sidebar:
+  order: 8
+tags: [python, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Django REST Framework (DRF) is the de-facto standard for building REST APIs with Django. It provides serializers, authentication, permissions, throttling, pagination, browsable API, and much more.
+
+---
+
+## Installation & Setup
+
+```bash
+pip install djangorestframework
+pip install markdown       # Browsable API support
+pip install django-filter  # Filtering support
+```
+
+```python
+# settings.py
+INSTALLED_APPS = [
+    ...
+    "rest_framework",
+    "django_filters",
+]
+
+REST_FRAMEWORK = {
+    # Authentication
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.SessionAuthentication",
+        "rest_framework.authentication.TokenAuthentication",
+    ],
+    # Permissions
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticatedOrReadOnly",
+    ],
+    # Pagination
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "PAGE_SIZE": 20,
+    # Filtering
+    "DEFAULT_FILTER_BACKENDS": [
+        "django_filters.rest_framework.DjangoFilterBackend",
+        "rest_framework.filters.SearchFilter",
+        "rest_framework.filters.OrderingFilter",
+    ],
+    # Throttling
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "100/day",
+        "user": "1000/day",
+    },
+    # Versioning
+    "DEFAULT_VERSIONING_CLASS": "rest_framework.versioning.NamespaceVersioning",
+    # Renderer
+    "DEFAULT_RENDERER_CLASSES": [
+        "rest_framework.renderers.JSONRenderer",
+        "rest_framework.renderers.BrowsableAPIRenderer",
+    ],
+}
+```
+
+---
+
+## Serializers
+
+Serializers convert complex Python objects (model instances, querysets) to JSON and back.
+
+### ModelSerializer
+
+```python
+# blog/serializers.py
+from rest_framework import serializers
+from django.contrib.auth import get_user_model
+from .models import Post, Category, Tag, Comment
+
+User = get_user_model()
+
+
+class TagSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Tag
+        fields = ["id", "name", "slug"]
+        read_only_fields = ["slug"]
+
+
+class CategorySerializer(serializers.ModelSerializer):
+    post_count = serializers.IntegerField(source="posts.count", read_only=True)
+
+    class Meta:
+        model = Category
+        fields = ["id", "name", "slug", "post_count"]
+
+
+class AuthorSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ["id", "username", "full_name", "avatar"]
+
+    def get_full_name(self, obj) -> str:
+        return obj.get_full_name() or obj.username
+
+
+class PostListSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for list views."""
+    author = AuthorSerializer(read_only=True)
+    category = CategorySerializer(read_only=True)
+    tags = TagSerializer(many=True, read_only=True)
+    url = serializers.HyperlinkedIdentityField(
+        view_name="api:post-detail",
+        lookup_field="slug",
+    )
+
+    class Meta:
+        model = Post
+        fields = [
+            "id", "url", "title", "slug", "excerpt",
+            "author", "category", "tags",
+            "status", "publish_date", "views_count",
+        ]
+
+
+class PostDetailSerializer(serializers.ModelSerializer):
+    """Full serializer for detail views — includes body."""
+    author = AuthorSerializer(read_only=True)
+    category_id = serializers.PrimaryKeyRelatedField(
+        queryset=Category.objects.all(),
+        source="category",
+        write_only=True,
+        required=False,
+    )
+    category = CategorySerializer(read_only=True)
+    tag_ids = serializers.PrimaryKeyRelatedField(
+        queryset=Tag.objects.all(),
+        source="tags",
+        many=True,
+        write_only=True,
+        required=False,
+    )
+    tags = TagSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Post
+        fields = [
+            "id", "title", "slug", "body", "excerpt", "cover_image",
+            "author", "category", "category_id", "tags", "tag_ids",
+            "status", "publish_date", "created_at", "updated_at", "views_count",
+        ]
+        read_only_fields = ["slug", "author", "created_at", "updated_at", "views_count"]
+
+    def validate_title(self, value: str) -> str:
+        if len(value.strip()) < 5:
+            raise serializers.ValidationError("Title must be at least 5 characters.")
+        return value.strip()
+
+    def validate(self, attrs):
+        """Cross-field validation."""
+        status = attrs.get("status", self.instance.status if self.instance else "draft")
+        excerpt = attrs.get("excerpt", "")
+        if status == Post.STATUS_PUBLISHED and not excerpt:
+            raise serializers.ValidationError({"excerpt": "Required when publishing."})
+        return attrs
+
+    def create(self, validated_data):
+        tags = validated_data.pop("tags", [])
+        post = Post.objects.create(**validated_data)
+        post.tags.set(tags)
+        return post
+
+    def update(self, instance, validated_data):
+        tags = validated_data.pop("tags", None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        if tags is not None:
+            instance.tags.set(tags)
+        return instance
+```
+
+### Base Serializer (Non-Model)
+
+```python
+class PostSearchSerializer(serializers.Serializer):
+    """Serializer for search query parameters."""
+    q = serializers.CharField(required=True, min_length=2)
+    category = serializers.SlugRelatedField(
+        queryset=Category.objects.all(),
+        slug_field="slug",
+        required=False,
+    )
+    status = serializers.ChoiceField(
+        choices=Post.STATUS_CHOICES,
+        default=Post.STATUS_PUBLISHED,
+    )
+    ordering = serializers.ChoiceField(
+        choices=["-publish_date", "publish_date", "-views_count", "title"],
+        default="-publish_date",
+    )
+```
+
+---
+
+## APIView
+
+`APIView` is the DRF equivalent of Django's `View`. Full manual control.
+
+```python
+# blog/api/views.py
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticatedOrReadOnly
+from django.shortcuts import get_object_or_404
+from blog.models import Post
+from blog.serializers import PostListSerializer, PostDetailSerializer
+
+
+class PostListAPIView(APIView):
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get(self, request):
+        posts = Post.published.select_related("author", "category").prefetch_related("tags")
+        serializer = PostListSerializer(posts, many=True, context={"request": request})
+        return Response(serializer.data)
+
+    def post(self, request):
+        serializer = PostDetailSerializer(data=request.data, context={"request": request})
+        if serializer.is_valid():
+            serializer.save(author=request.user)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class PostDetailAPIView(APIView):
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get_object(self, slug):
+        return get_object_or_404(Post, slug=slug, status=Post.STATUS_PUBLISHED)
+
+    def get(self, request, slug):
+        post = self.get_object(slug)
+        Post.objects.filter(pk=post.pk).update(views_count=post.views_count + 1)
+        serializer = PostDetailSerializer(post, context={"request": request})
+        return Response(serializer.data)
+
+    def put(self, request, slug):
+        post = self.get_object(slug)
+        self.check_object_permissions(request, post)
+        serializer = PostDetailSerializer(post, data=request.data, context={"request": request})
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def patch(self, request, slug):
+        post = self.get_object(slug)
+        serializer = PostDetailSerializer(
+            post, data=request.data, partial=True, context={"request": request}
+        )
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, slug):
+        post = self.get_object(slug)
+        post.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+```
+
+---
+
+## ViewSets and Routers
+
+ViewSets combine related views into a single class. Routers auto-generate URL patterns.
+
+```python
+# blog/api/viewsets.py
+from rest_framework import viewsets, mixins, filters
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
+from django_filters.rest_framework import DjangoFilterBackend
+from blog.models import Post, Category, Tag
+from blog.serializers import PostListSerializer, PostDetailSerializer, CategorySerializer
+
+
+class PostViewSet(viewsets.ModelViewSet):
+    """
+    Full CRUD ViewSet for Posts.
+    
+    Provides: list, create, retrieve, update, partial_update, destroy
+    """
+    queryset = Post.objects.select_related("author", "category").prefetch_related("tags")
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    # Filtering
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ["status", "category__slug", "author__username"]
+    search_fields = ["title", "body", "excerpt", "author__username"]
+    ordering_fields = ["publish_date", "views_count", "title", "created_at"]
+    ordering = ["-publish_date"]
+
+    def get_serializer_class(self):
+        """Use different serializers for list vs detail."""
+        if self.action == "list":
+            return PostListSerializer
+        return PostDetailSerializer
+
+    def get_queryset(self):
+        """Filter based on action."""
+        qs = super().get_queryset()
+        if self.action == "list":
+            qs = qs.filter(status=Post.STATUS_PUBLISHED)
+        elif self.action in ("update", "partial_update", "destroy"):
+            if not self.request.user.is_staff:
+                qs = qs.filter(author=self.request.user)
+        return qs
+
+    def perform_create(self, serializer):
+        """Set author on creation."""
+        serializer.save(author=self.request.user)
+
+    def retrieve(self, request, *args, **kwargs):
+        """Override to increment view count."""
+        instance = self.get_object()
+        Post.objects.filter(pk=instance.pk).update(views_count=instance.views_count + 1)
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+
+    # Custom action: POST /api/posts/{slug}/publish/
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated])
+    def publish(self, request, pk=None):
+        post = self.get_object()
+        if post.author != request.user and not request.user.is_staff:
+            return Response(
+                {"detail": "You may not publish this post."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        post.status = Post.STATUS_PUBLISHED
+        post.save(update_fields=["status", "updated_at"])
+        return Response({"status": "published"})
+
+    # Custom action: GET /api/posts/popular/
+    @action(detail=False, methods=["get"])
+    def popular(self, request):
+        popular = self.get_queryset().order_by("-views_count")[:10]
+        serializer = PostListSerializer(popular, many=True, context={"request": request})
+        return Response(serializer.data)
+
+
+class CategoryViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    viewsets.GenericViewSet,
+):
+    """Read-only ViewSet — only list and retrieve."""
+    queryset = Category.objects.all()
+    serializer_class = CategorySerializer
+    lookup_field = "slug"
+    permission_classes = []  # Public — no auth required
+```
+
+### Wiring with Router
+
+```python
+# blog/api/urls.py
+from django.urls import path, include
+from rest_framework.routers import DefaultRouter
+from . import viewsets
+
+router = DefaultRouter()
+router.register("posts", viewsets.PostViewSet, basename="post")
+router.register("categories", viewsets.CategoryViewSet, basename="category")
+
+urlpatterns = [
+    path("", include(router.urls)),
+]
+
+# mysite/urls.py
+urlpatterns = [
+    path("api/v1/", include("blog.api.urls", namespace="api")),
+]
+```
+
+The router generates these URLs automatically:
+
+| URL | Method | Action | Name |
+|-----|--------|--------|------|
+| `/api/v1/posts/` | GET | `list` | `api:post-list` |
+| `/api/v1/posts/` | POST | `create` | `api:post-list` |
+| `/api/v1/posts/{pk}/` | GET | `retrieve` | `api:post-detail` |
+| `/api/v1/posts/{pk}/` | PUT | `update` | `api:post-detail` |
+| `/api/v1/posts/{pk}/` | PATCH | `partial_update` | `api:post-detail` |
+| `/api/v1/posts/{pk}/` | DELETE | `destroy` | `api:post-detail` |
+| `/api/v1/posts/{pk}/publish/` | POST | `publish` (custom) | `api:post-publish` |
+| `/api/v1/posts/popular/` | GET | `popular` (custom) | `api:post-popular` |
+
+---
+
+## Authentication
+
+<Tabs>
+<TabItem label="Token Authentication">
+```bash
+pip install djangorestframework
+```
+
+```python
+# settings.py
+INSTALLED_APPS = [
+    ...
+    "rest_framework.authtoken",
+]
+
+# Migrate to create the Token table
+# python manage.py migrate
+```
+
+```python
+# Create a token for a user
+from rest_framework.authtoken.models import Token
+
+token, created = Token.objects.get_or_create(user=user)
+print(token.key)
+# 9944b09199c62bcf9418ad846dd0e4bbdfc6ee4b
+```
+
+```python
+# views.py — token login endpoint
+from rest_framework.authtoken.views import obtain_auth_token
+
+urlpatterns = [
+    path("api/auth/token/", obtain_auth_token, name="api-token-auth"),
+]
+```
+
+```bash
+# Get a token
+curl -X POST http://localhost:8000/api/auth/token/ \
+  -d '{"username": "alice", "password": "secret"}' \
+  -H "Content-Type: application/json"
+
+# Response:
+# {"token": "9944b09199c62bcf9418ad846dd0e4bbdfc6ee4b"}
+
+# Use the token
+curl http://localhost:8000/api/v1/posts/ \
+  -H "Authorization: Token 9944b09199c62bcf9418ad846dd0e4bbdfc6ee4b"
+```
+</TabItem>
+<TabItem label="JWT (simplejwt)">
+```bash
+pip install djangorestframework-simplejwt
+```
+
+```python
+# settings.py
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+    ],
+}
+
+from datetime import timedelta
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=60),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
+    "ALGORITHM": "HS256",
+    "AUTH_HEADER_TYPES": ("Bearer",),
+}
+```
+
+```python
+# urls.py
+from rest_framework_simplejwt.views import (
+    TokenObtainPairView,
+    TokenRefreshView,
+    TokenVerifyView,
+)
+
+urlpatterns = [
+    path("api/auth/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
+    path("api/auth/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
+    path("api/auth/token/verify/", TokenVerifyView.as_view(), name="token_verify"),
+]
+```
+
+```bash
+# Get tokens
+curl -X POST http://localhost:8000/api/auth/token/ \
+  -H "Content-Type: application/json" \
+  -d '{"username": "alice", "password": "secret"}'
+
+# Response:
+# {
+#   "access": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+#   "refresh": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+# }
+
+# Use the access token
+curl http://localhost:8000/api/v1/posts/ \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+</TabItem>
+</Tabs>
+
+---
+
+## Permissions
+
+```python
+# blog/api/permissions.py
+from rest_framework import permissions
+
+
+class IsAuthorOrReadOnly(permissions.BasePermission):
+    """Object-level permission: only the author can modify the post."""
+
+    def has_permission(self, request, view):
+        # Allow read access to anyone
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        # Write access requires authentication
+        return request.user and request.user.is_authenticated
+
+    def has_object_permission(self, request, view, obj):
+        # Read permissions for any request
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        # Write permissions only for the author or staff
+        return obj.author == request.user or request.user.is_staff
+
+
+class IsAdminOrReadOnly(permissions.BasePermission):
+    """Staff/admin can write; everyone else can only read."""
+
+    def has_permission(self, request, view):
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        return request.user and request.user.is_staff
+```
+
+---
+
+## Pagination
+
+```python
+# Customize in settings.py or per-view
+REST_FRAMEWORK = {
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "PAGE_SIZE": 20,
+}
+
+# Custom pagination class
+from rest_framework.pagination import PageNumberPagination, CursorPagination
+
+
+class StandardPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = "per_page"  # Allow client to override
+    max_page_size = 100
+    page_query_param = "page"
+
+
+class PostCursorPagination(CursorPagination):
+    """Cursor-based pagination for large, frequently-updated datasets."""
+    page_size = 20
+    ordering = "-publish_date"
+    cursor_query_param = "cursor"
+
+
+# Apply to a specific ViewSet
+class PostViewSet(viewsets.ModelViewSet):
+    pagination_class = StandardPagination
+    ...
+```
+
+Paginated response structure:
+
+```json
+{
+  "count": 143,
+  "next": "http://localhost:8000/api/v1/posts/?page=3",
+  "previous": "http://localhost:8000/api/v1/posts/?page=1",
+  "results": [
+    { "id": 21, "title": "Post Title", ... },
+    ...
+  ]
+}
+```
+
+---
+
+## Filtering
+
+```python
+# blog/api/filters.py
+import django_filters
+from blog.models import Post
+
+
+class PostFilter(django_filters.FilterSet):
+    title = django_filters.CharFilter(lookup_expr="icontains")
+    author = django_filters.CharFilter(field_name="author__username")
+    category = django_filters.CharFilter(field_name="category__slug")
+    tags = django_filters.CharFilter(field_name="tags__slug")
+    min_views = django_filters.NumberFilter(field_name="views_count", lookup_expr="gte")
+    published_after = django_filters.DateTimeFilter(
+        field_name="publish_date", lookup_expr="gte"
+    )
+    published_before = django_filters.DateTimeFilter(
+        field_name="publish_date", lookup_expr="lte"
+    )
+
+    class Meta:
+        model = Post
+        fields = ["status", "author", "category", "tags"]
+
+
+# In ViewSet
+class PostViewSet(viewsets.ModelViewSet):
+    filterset_class = PostFilter
+    search_fields = ["title", "body"]          # ?search=django
+    ordering_fields = ["publish_date", "views_count"]  # ?ordering=-views_count
+```
+
+Example API calls:
+
+```bash
+# Filter by status
+GET /api/v1/posts/?status=published
+
+# Search full text
+GET /api/v1/posts/?search=django+rest+framework
+
+# Filter by category + sort by views
+GET /api/v1/posts/?category=python&ordering=-views_count
+
+# Date range
+GET /api/v1/posts/?published_after=2024-01-01&published_before=2024-12-31
+
+# Pagination
+GET /api/v1/posts/?page=2&per_page=10
+```
+
+---
+
+## Full CRUD Example with Output
+
+```bash
+# LIST posts
+curl http://localhost:8000/api/v1/posts/
+# {
+#   "count": 42,
+#   "next": "http://localhost:8000/api/v1/posts/?page=2",
+#   "previous": null,
+#   "results": [
+#     {
+#       "id": 1,
+#       "title": "Getting Started with Django",
+#       "slug": "getting-started-with-django",
+#       "author": {"id": 1, "username": "alice", "full_name": "Alice Smith"},
+#       "category": {"id": 2, "name": "Python", "slug": "python"},
+#       "tags": [{"id": 1, "name": "django", "slug": "django"}],
+#       "status": "published",
+#       "publish_date": "2024-11-15T10:30:00Z",
+#       "views_count": 1247
+#     }
+#   ]
+# }
+
+# CREATE a post
+curl -X POST http://localhost:8000/api/v1/posts/ \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "My New Post",
+    "body": "Content goes here...",
+    "excerpt": "A brief summary.",
+    "status": "draft",
+    "category_id": 2,
+    "tag_ids": [1, 3]
+  }'
+# HTTP 201 Created
+# {"id": 43, "title": "My New Post", "slug": "my-new-post", ...}
+
+# RETRIEVE a post
+curl http://localhost:8000/api/v1/posts/my-new-post/
+# HTTP 200 OK
+# {"id": 43, "title": "My New Post", "body": "Content goes here...", ...}
+
+# UPDATE (partial)
+curl -X PATCH http://localhost:8000/api/v1/posts/my-new-post/ \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "published"}'
+# HTTP 200 OK
+
+# DELETE
+curl -X DELETE http://localhost:8000/api/v1/posts/my-new-post/ \
+  -H "Authorization: Bearer <token>"
+# HTTP 204 No Content
+```
+
+---
+
+## OpenAPI Documentation with drf-spectacular
+
+```bash
+pip install drf-spectacular
+```
+
+```python
+# settings.py
+INSTALLED_APPS = ["drf_spectacular", ...]
+
+REST_FRAMEWORK = {
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+}
+
+SPECTACULAR_SETTINGS = {
+    "TITLE": "Blog API",
+    "DESCRIPTION": "A RESTful API for the blog application.",
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "SWAGGER_UI_SETTINGS": {"persistAuthorization": True},
+}
+```
+
+```python
+# urls.py
+from drf_spectacular.views import (
+    SpectacularAPIView,
+    SpectacularSwaggerView,
+    SpectacularRedocView,
+)
+
+urlpatterns = [
+    path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
+    path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
+    path("api/redoc/", SpectacularRedocView.as_view(url_name="schema"), name="redoc"),
+]
+```
+
+Add schema metadata to your views:
+
+```python
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
+
+
+@extend_schema(
+    summary="List all published posts",
+    description="Returns a paginated list of published blog posts.",
+    parameters=[
+        OpenApiParameter("search", str, description="Search in title and body"),
+        OpenApiParameter("category", str, description="Filter by category slug"),
+        OpenApiParameter("ordering", str, description="Sort by: publish_date, views_count"),
+    ],
+    responses={200: PostListSerializer(many=True)},
+    examples=[
+        OpenApiExample(
+            "Successful response",
+            value={"count": 42, "results": [{"id": 1, "title": "Example Post"}]},
+        )
+    ],
+)
+def list(self, request, *args, **kwargs):
+    return super().list(request, *args, **kwargs)
+```
+
+Visit `http://localhost:8000/api/docs/` to see the interactive Swagger UI.

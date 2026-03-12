@@ -1,0 +1,351 @@
+---
+title: Blender Python (bpy) Overview
+description: Introduction to Python scripting in Blender using the bpy module — automation, add-ons, procedural generation, and the complete API structure.
+sidebar:
+  order: 1
+tags: [python, blender, 3d]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Blender ships with a fully embedded Python 3 interpreter, exposing almost every feature of the application through the `bpy` module. Whether you want to automate repetitive tasks, build custom tools, generate procedural geometry, or publish full-featured add-ons, Python is the primary extension language for Blender.
+
+## Why Use Python in Blender?
+
+<CardGrid>
+  <Card title="Automation" icon="setting">
+    Batch rename meshes, apply modifiers to hundreds of objects, export assets on a schedule, or clean up scene data — all without touching the UI.
+  </Card>
+  <Card title="Procedural Generation" icon="random">
+    Build geometry algorithmically: terrain heightmaps, city grids, fractals, or any shape defined by math rather than mouse clicks.
+  </Card>
+  <Card title="Add-ons" icon="puzzle">
+    Package scripts into installable add-ons that extend Blender's UI with custom panels, operators, menus, and properties.
+  </Card>
+  <Card title="Pipeline Integration" icon="seti:pipeline">
+    Connect Blender to external tools, asset databases, or render farms. Drive Blender completely headlessly from CI/CD pipelines.
+  </Card>
+</CardGrid>
+
+---
+
+## The bpy Module at a Glance
+
+`bpy` is the top-level namespace for everything Blender exposes to Python. It is organised into several focused sub-modules:
+
+| Sub-module | Purpose |
+|---|---|
+| `bpy.ops` | Operators — the same actions triggered by menus and keyboard shortcuts |
+| `bpy.data` | Direct access to all data-blocks (objects, meshes, materials, lights …) |
+| `bpy.context` | The current state of Blender: active object, selected objects, edit mode |
+| `bpy.types` | Base classes for all Blender types; required when building add-ons |
+| `bpy.props` | Property definitions for add-on UI widgets (float, int, enum, string …) |
+| `bpy.utils` | Utility functions: class registration, resource paths, preset management |
+| `bpy.app` | Application-level info: version, build hash, installed add-ons |
+| `bpy.path` | Path manipulation helpers aligned with Blender's internal `//` paths |
+
+---
+
+## bpy.ops — Operators
+
+Operators mirror every action available in the Blender UI. They run in a specific context and are stateless.
+
+```python
+import bpy
+
+# Add a UV Sphere at the world origin
+bpy.ops.mesh.primitive_uv_sphere_add(radius=1.0, location=(0, 0, 0))
+
+# Add a cube offset on the X axis
+bpy.ops.mesh.primitive_cube_add(size=2.0, location=(4, 0, 0))
+
+# Move the active object
+bpy.ops.transform.translate(value=(0, 0, 2))
+```
+
+> **Viewport result:** A UV Sphere (radius 1 m) appears at the world origin. A cube (2 m sides) appears 4 m along the X axis. The cube is then translated 2 m upward so it rests above the sphere.
+
+:::tip[Discover Operators via the Info Editor]
+Every action you perform through the Blender UI generates a Python equivalent logged in the **Info** editor (Header → Editor Type → Info). Copy-paste those log lines directly into the Text Editor to discover any operator call and its exact parameters.
+:::
+
+---
+
+## bpy.data — Data Blocks
+
+`bpy.data` gives you context-free, direct access to every data-block in the open `.blend` file. Unlike operators, it does not require an active selection.
+
+```python
+import bpy
+
+# List every mesh name in the file
+for mesh in bpy.data.meshes:
+    print(mesh.name)
+
+# Access a specific object by name
+obj = bpy.data.objects.get("Cube")
+if obj:
+    print(f"Found: {obj.name}")
+    print(f"Location: {obj.location.x:.2f}, {obj.location.y:.2f}, {obj.location.z:.2f}")
+    print(f"Vertices in mesh: {len(obj.data.vertices)}")
+else:
+    print("Object not found — check the name is correct.")
+```
+
+> **Console output (default Blender scene):**
+> ```
+> Cube
+> Found: Cube
+> Location: 0.00, 0.00, 0.00
+> Vertices in mesh: 8
+> ```
+
+---
+
+## bpy.context — Current State
+
+`bpy.context` reflects exactly what is currently active and selected in Blender's UI. Its attributes change as the user switches modes, selects objects, or changes workspaces.
+
+```python
+import bpy
+
+obj = bpy.context.active_object
+scene = bpy.context.scene
+mode = bpy.context.mode
+
+if obj:
+    print(f"Active object : {obj.name}")
+    print(f"Object type   : {obj.type}")
+    print(f"Current mode  : {mode}")
+    print(f"Selected count: {len(bpy.context.selected_objects)}")
+    print(f"Scene name    : {scene.name}")
+    print(f"Frame current : {scene.frame_current}")
+else:
+    print("No active object.")
+```
+
+> **Console output (Cube selected in Object Mode):**
+> ```
+> Active object : Cube
+> Object type   : MESH
+> Current mode  : OBJECT
+> Selected count: 1
+> Scene name    : Scene
+> Frame current : 1
+> ```
+
+---
+
+## bpy.types — The Type System
+
+`bpy.types` contains the base classes for every Blender type. You use it both for introspection and as the parent class when defining custom operators, panels, and menus in add-ons.
+
+```python
+import bpy
+
+obj = bpy.context.active_object
+
+# Runtime type inspection
+print(type(obj))                              # <class 'bpy_types.Object'>
+print(isinstance(obj, bpy.types.Object))      # True
+print(isinstance(obj.data, bpy.types.Mesh))   # True (if it's a mesh)
+
+# Inspect available RNA properties on Object
+for prop in bpy.types.Object.bl_rna.properties:
+    if not prop.identifier.startswith('_'):
+        print(prop.identifier, ':', prop.type)
+```
+
+> **Console output (abbreviated):**
+> ```
+> <class 'bpy_types.Object'>
+> True
+> True
+> name : STRING
+> type : ENUM
+> location : FLOAT
+> rotation_euler : FLOAT
+> scale : FLOAT
+> hide_viewport : BOOLEAN
+> ...
+> ```
+
+---
+
+## bpy.props — Properties
+
+`bpy.props` is used to declare typed, UI-aware properties on custom classes (operators, scene, world). Each property type maps to a UI widget automatically.
+
+```python
+import bpy
+
+class ScatterOperator(bpy.types.Operator):
+    bl_idname = "object.scatter_op"
+    bl_label  = "Scatter Objects"
+
+    count: bpy.props.IntProperty(
+        name="Count", default=10, min=1, max=1000
+    )
+    radius: bpy.props.FloatProperty(
+        name="Radius", default=5.0, min=0.1, max=100.0, unit='LENGTH'
+    )
+    seed: bpy.props.IntProperty(
+        name="Random Seed", default=42
+    )
+    use_gravity: bpy.props.BoolProperty(
+        name="Align to Ground", default=True
+    )
+
+    def execute(self, context):
+        print(f"Scattering {self.count} objects in radius {self.radius}")
+        return {'FINISHED'}
+```
+
+---
+
+## bpy.utils — Utilities
+
+```python
+import bpy
+
+# Register / unregister a custom class
+bpy.utils.register_class(ScatterOperator)
+bpy.utils.unregister_class(ScatterOperator)
+
+# Get all script directory paths Blender knows about
+for path in bpy.utils.script_paths():
+    print(path)
+
+# Get the user scripts directory (where add-ons live)
+print(bpy.utils.script_path_user())
+
+# Resolve a resource path for a bundled image
+icon_path = bpy.utils.resource_path('USER')
+print(icon_path)
+```
+
+> **Console output (Windows, Blender 4.1):**
+> ```
+> C:\Program Files\Blender Foundation\Blender 4.1\4.1\scripts
+> C:\Users\username\AppData\Roaming\Blender Foundation\Blender\4.1\scripts
+> C:\Users\username\AppData\Roaming\Blender Foundation\Blender\4.1\scripts
+> C:\Users\username\AppData\Roaming\Blender Foundation\Blender\4.1
+> ```
+
+---
+
+## Version Compatibility
+
+:::caution[API Changes Between Major Versions]
+The Blender Python API is not fully stable across major releases. Scripts written for Blender 3.x may require updates for 4.x — particularly around the depsgraph, render pipeline, and bone constraints. Always check the **Info** editor for deprecation warnings after running a script. The official change log lives at [developer.blender.org/docs/release-notes/](https://developer.blender.org/docs/release-notes/).
+:::
+
+Check the current version at runtime and branch accordingly:
+
+```python
+import bpy
+
+major, minor, patch = bpy.app.version
+print(f"Blender {major}.{minor}.{patch}")
+print(f"Build date : {bpy.app.build_date.decode()}")
+print(f"Build hash : {bpy.app.build_hash.decode()}")
+
+if bpy.app.version >= (4, 0, 0):
+    print("Using Blender 4.x API")
+elif bpy.app.version >= (3, 0, 0):
+    print("Using Blender 3.x API")
+else:
+    raise RuntimeError("Blender 3.0+ required — please upgrade.")
+```
+
+> **Console output (Blender 4.1.1):**
+> ```
+> Blender 4.1.1
+> Build date : 2024-04-16
+> Build hash : a2b578f70e86
+> Using Blender 4.x API
+> ```
+
+---
+
+## Official API Documentation
+
+The complete, version-specific API reference is generated from the source and updated with every release:
+
+**[https://docs.blender.org/api/current/](https://docs.blender.org/api/current/)**
+
+The reference includes every RNA property, every operator, every type, and code examples throughout. Bookmark the **bpy.ops**, **bpy.data**, and **bpy.types** sections for daily use.
+
+---
+
+## Quick Start: Your First Script
+
+Open the **Scripting** workspace (top tab bar), paste the following into the **Text Editor** on the right, and press **Run Script** (or Alt+P):
+
+```python
+import bpy
+import math
+
+# ── Clean the scene ──────────────────────────────────────────────
+bpy.ops.object.select_all(action='SELECT')
+bpy.ops.object.delete(use_global=False)
+
+# ── Create a cube ────────────────────────────────────────────────
+bpy.ops.mesh.primitive_cube_add(size=2.0, location=(0, 0, 1))
+cube = bpy.context.active_object
+cube.name = "MyCube"
+
+# ── Create a point light ─────────────────────────────────────────
+bpy.ops.object.light_add(type='POINT', location=(4, -4, 6))
+light = bpy.context.active_object
+light.data.energy = 1000.0
+
+# ── Create a camera ──────────────────────────────────────────────
+bpy.ops.object.camera_add(location=(7, -7, 5))
+cam = bpy.context.active_object
+cam.rotation_euler = (math.radians(60), 0, math.radians(45))
+bpy.context.scene.camera = cam
+
+print(f"Scene has {len(bpy.data.objects)} objects.")
+print("Objects:", [o.name for o in bpy.data.objects])
+```
+
+> **Viewport result:** The default scene is cleared. A 2 m cube sits with its base at Z=0 (centred at Z=1), a point light illuminates from upper-left, and a camera is aimed at the scene.
+>
+> **Console output:**
+> ```
+> Scene has 3 objects.
+> Objects: ['MyCube', 'Point', 'Camera']
+> ```
+
+---
+
+## Explore the Full Documentation
+
+<CardGrid>
+  <Card title="Getting Started" icon="rocket">
+    Set up your scripting environment, master the Scripting workspace and Python Console, and run scripts both interactively and headlessly.
+
+    [→ Getting Started](/python/blender-python/getting-started/)
+  </Card>
+  <Card title="bpy Basics" icon="open-book">
+    Deep dive into `bpy.context`, `bpy.data`, `bpy.ops`, and object properties. Learn to select, iterate, parent, and manage collections.
+
+    [→ bpy Basics](/python/blender-python/bpy-basics/)
+  </Card>
+  <Card title="Mesh Editing" icon="seti:code">
+    Create meshes from scratch, use bmesh for surgical edits, generate procedural geometry, and drive the full modifier stack.
+
+    [→ Mesh Editing](/python/blender-python/mesh-editing/)
+  </Card>
+  <Card title="Materials & Rendering" icon="seti:image">
+    Build node-based materials, load textures, configure render settings, and batch-render frames from the command line.
+
+    [→ Materials & Rendering](/python/blender-python/materials-rendering/)
+  </Card>
+  <Card title="Add-ons" icon="puzzle">
+    Build installable add-ons with operators, panels, and typed properties. Walk through a complete random scatter tool from scratch.
+
+    [→ Add-ons](/python/blender-python/addons/)
+  </Card>
+</CardGrid>

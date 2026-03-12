@@ -1,0 +1,471 @@
+---
+title: Modules
+description: Organize your NestJS application into cohesive, encapsulated feature modules, shared modules, and dynamic modules.
+sidebar:
+  order: 5
+tags: [typescript, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Modules
+
+Modules are the primary organizational building block of a NestJS application. Each application has at least one
+module — the **root module** — which NestJS uses as the starting point to build the internal application graph
+that manages provider relationships and dependencies.
+
+## @Module() Decorator
+
+The `@Module()` decorator takes a single metadata object with four optional properties:
+
+| Property | Description |
+|---|---|
+| `providers` | Providers instantiated by the NestJS injector, shared within this module |
+| `controllers` | Controllers defined in this module that must be instantiated |
+| `imports` | Other modules that export providers needed in this module |
+| `exports` | Providers from this module that should be available to other importing modules |
+
+```typescript
+import { Module } from '@nestjs/common';
+import { UsersController } from './users.controller';
+import { UsersService } from './users.service';
+import { UsersRepository } from './users.repository';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { User } from './entities/user.entity';
+
+@Module({
+  imports: [TypeOrmModule.forFeature([User])],
+  controllers: [UsersController],
+  providers: [UsersService, UsersRepository],
+  exports: [UsersService], // Only expose UsersService to other modules
+})
+export class UsersModule {}
+```
+
+## Feature Modules
+
+Feature modules organize code related to a specific feature of your application. Each feature module
+encapsulates its own controllers, services, and repositories:
+
+```typescript
+// orders/orders.module.ts
+import { Module } from '@nestjs/common';
+import { OrdersController } from './orders.controller';
+import { OrdersService } from './orders.service';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { Order } from './entities/order.entity';
+import { UsersModule } from '../users/users.module';  // Import for UsersService
+
+@Module({
+  imports: [
+    TypeOrmModule.forFeature([Order]),
+    UsersModule,  // UsersModule exports UsersService
+  ],
+  controllers: [OrdersController],
+  providers: [OrdersService],
+  exports: [OrdersService],
+})
+export class OrdersModule {}
+```
+
+```typescript
+// app.module.ts — Root module wires everything together
+import { Module } from '@nestjs/common';
+import { UsersModule } from './users/users.module';
+import { OrdersModule } from './orders/orders.module';
+import { AuthModule } from './auth/auth.module';
+import { DatabaseModule } from './database/database.module';
+
+@Module({
+  imports: [
+    DatabaseModule,
+    UsersModule,
+    OrdersModule,
+    AuthModule,
+  ],
+})
+export class AppModule {}
+```
+
+## Shared Modules
+
+In NestJS, modules are **singletons by default** — the same instance of a module is shared across the entire
+application. To share a provider across multiple modules, export it from a shared module:
+
+```typescript
+// shared/shared.module.ts
+import { Module } from '@nestjs/common';
+import { HashService } from './hash.service';
+import { SlugService } from './slug.service';
+import { DateService } from './date.service';
+
+@Module({
+  providers: [HashService, SlugService, DateService],
+  exports: [HashService, SlugService, DateService],
+})
+export class SharedModule {}
+```
+
+Any module that imports `SharedModule` gains access to all three exported services:
+
+```typescript
+@Module({
+  imports: [SharedModule],
+  controllers: [UsersController],
+  providers: [UsersService],
+})
+export class UsersModule {}
+```
+
+## Global Modules
+
+Use `@Global()` to make a module available application-wide without importing it in every consuming module:
+
+```typescript
+import { Global, Module } from '@nestjs/common';
+import { LogService } from './log.service';
+import { ConfigService } from '@nestjs/config';
+
+@Global()
+@Module({
+  providers: [LogService],
+  exports: [LogService],
+})
+export class CoreModule {}
+```
+
+Register the global module once in `AppModule`:
+
+```typescript
+@Module({
+  imports: [CoreModule], // Register once — available everywhere
+})
+export class AppModule {}
+```
+
+:::caution[Global Module Overuse]
+Use `@Global()` sparingly. Overusing it reduces encapsulation and makes your application harder to understand.
+Reserve it for truly cross-cutting concerns like logging, configuration, and database connections.
+:::
+
+## Dynamic Modules
+
+Dynamic modules allow you to create customizable modules using a `forRoot()` / `forRootAsync()` factory pattern.
+This is the backbone of `ConfigModule`, `TypeOrmModule`, `JwtModule`, and many others:
+
+### forRoot() Pattern
+
+```typescript
+// database/database.module.ts
+import { Module, DynamicModule } from '@nestjs/common';
+import { DatabaseService } from './database.service';
+
+export interface DatabaseModuleOptions {
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+  database: string;
+}
+
+@Module({})
+export class DatabaseModule {
+  static forRoot(options: DatabaseModuleOptions): DynamicModule {
+    return {
+      module: DatabaseModule,
+      providers: [
+        {
+          provide: 'DATABASE_OPTIONS',
+          useValue: options,
+        },
+        DatabaseService,
+      ],
+      exports: [DatabaseService],
+      global: true,  // Optionally mark as global from within the dynamic module
+    };
+  }
+}
+```
+
+```typescript
+// app.module.ts
+@Module({
+  imports: [
+    DatabaseModule.forRoot({
+      host: 'localhost',
+      port: 5432,
+      username: 'postgres',
+      password: 'secret',
+      database: 'myapp',
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+### forRootAsync() Pattern
+
+The async variant allows you to inject `ConfigService` or other providers to resolve configuration:
+
+```typescript
+// database/database.module.ts
+import { Module, DynamicModule } from '@nestjs/common';
+import { ModuleAsyncOptions } from './interfaces/module-async-options.interface';
+
+@Module({})
+export class DatabaseModule {
+  static forRootAsync(options: {
+    imports?: any[];
+    inject?: any[];
+    useFactory: (...args: any[]) => DatabaseModuleOptions | Promise<DatabaseModuleOptions>;
+  }): DynamicModule {
+    return {
+      module: DatabaseModule,
+      imports: options.imports ?? [],
+      providers: [
+        {
+          provide: 'DATABASE_OPTIONS',
+          inject: options.inject ?? [],
+          useFactory: options.useFactory,
+        },
+        DatabaseService,
+      ],
+      exports: [DatabaseService],
+    };
+  }
+}
+```
+
+```typescript
+// app.module.ts
+@Module({
+  imports: [
+    ConfigModule.forRoot({ isGlobal: true }),
+    DatabaseModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        host: configService.getOrThrow('DB_HOST'),
+        port: configService.getOrThrow<number>('DB_PORT'),
+        username: configService.getOrThrow('DB_USER'),
+        password: configService.getOrThrow('DB_PASS'),
+        database: configService.getOrThrow('DB_NAME'),
+      }),
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+### register() Pattern
+
+For modules used multiple times with different configs (per-feature configuration), use `register()`:
+
+```typescript
+@Module({})
+export class CacheModule {
+  static register(options: CacheOptions): DynamicModule {
+    return {
+      module: CacheModule,
+      providers: [
+        { provide: 'CACHE_OPTIONS', useValue: options },
+        CacheService,
+      ],
+      exports: [CacheService],
+    };
+  }
+}
+
+// Usage — each module gets its own CacheService instance with different config
+@Module({
+  imports: [CacheModule.register({ ttl: 3600, prefix: 'users:' })],
+})
+export class UsersModule {}
+
+@Module({
+  imports: [CacheModule.register({ ttl: 60, prefix: 'sessions:' })],
+})
+export class AuthModule {}
+```
+
+## ConfigModule.forRoot() — Real-World Example
+
+```typescript
+// app.module.ts
+import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { TypeOrmModule } from '@nestjs/typeorm';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: ['.env.local', '.env'],
+      cache: true,
+      expandVariables: true,
+    }),
+    TypeOrmModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        type: 'postgres' as const,
+        url: config.getOrThrow('DATABASE_URL'),
+        autoLoadEntities: true,
+        synchronize: config.get('NODE_ENV') !== 'production',
+        logging: config.get('NODE_ENV') === 'development',
+      }),
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+## Module Re-Exporting
+
+A module can re-export modules it imports, making them available to any module that imports it:
+
+```typescript
+// core.module.ts
+@Module({
+  imports: [CommonModule],
+  exports: [CommonModule],  // Re-export so importing CoreModule gives access to CommonModule's providers
+})
+export class CoreModule {}
+```
+
+This is useful when building a shared "barrel" module:
+
+```typescript
+// shared/index.module.ts
+@Module({
+  imports: [
+    HttpModule,
+    LogModule,
+    CacheModule,
+  ],
+  exports: [
+    HttpModule,
+    LogModule,
+    CacheModule,
+  ],
+})
+export class SharedModule {}
+```
+
+## Module Lifecycle Hooks
+
+NestJS modules can implement lifecycle hooks to execute code at specific points in the application lifecycle:
+
+```typescript
+import {
+  Module,
+  OnModuleInit,
+  OnModuleDestroy,
+  OnApplicationBootstrap,
+  OnApplicationShutdown,
+} from '@nestjs/common';
+
+@Injectable()
+export class AppService
+  implements OnModuleInit, OnModuleDestroy, OnApplicationBootstrap, OnApplicationShutdown
+{
+  // Called once the host module's dependencies have been resolved
+  async onModuleInit(): Promise<void> {
+    console.log('Module initialized — seeding database...');
+    await this.seedDatabase();
+  }
+
+  // Called when the application receives a shutdown signal
+  async onModuleDestroy(): Promise<void> {
+    console.log('Module destroying — closing connections...');
+    await this.closeConnections();
+  }
+
+  // Called once all modules have been initialized
+  onApplicationBootstrap(): void {
+    console.log('Application fully bootstrapped');
+  }
+
+  // Called when the process is about to exit
+  async onApplicationShutdown(signal?: string): Promise<void> {
+    console.log(`Application shutting down (signal: ${signal})...`);
+    await this.gracefulShutdown();
+  }
+
+  private async seedDatabase(): Promise<void> { /* ... */ }
+  private async closeConnections(): Promise<void> { /* ... */ }
+  private async gracefulShutdown(): Promise<void> { /* ... */ }
+}
+```
+
+Enable shutdown hooks in `main.ts` to respond to OS signals:
+
+```typescript
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  app.enableShutdownHooks(); // Listen for SIGTERM, SIGINT
+  await app.listen(3000);
+}
+```
+
+## ModuleRef — Dynamic Provider Lookup
+
+`ModuleRef` lets you resolve providers from the IoC container at runtime:
+
+```typescript
+import { Injectable, OnModuleInit } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
+
+@Injectable()
+export class CatsService implements OnModuleInit {
+  private cacheService: CacheService;
+
+  constructor(private readonly moduleRef: ModuleRef) {}
+
+  async onModuleInit(): Promise<void> {
+    // Retrieve a singleton provider by class reference
+    this.cacheService = this.moduleRef.get(CacheService, { strict: false });
+  }
+
+  async doWork(): Promise<void> {
+    // Resolve a request-scoped or transient provider
+    const contextId = ContextIdFactory.create();
+    this.moduleRef.registerRequestByContextId({ userId: 1 }, contextId);
+    const transient = await this.moduleRef.resolve(TransientService, contextId);
+    transient.execute();
+  }
+}
+```
+
+:::tip[Module Resolution Order]
+NestJS resolves and initializes modules bottom-up in the dependency tree. If Module A imports Module B,
+Module B is initialized first. The `onModuleInit` hook fires in the same order.
+:::
+
+## Lazy-Loaded Modules
+
+For large applications, use `LazyModuleLoader` to load modules on demand instead of at startup:
+
+```typescript
+import { Injectable } from '@nestjs/common';
+import { LazyModuleLoader } from '@nestjs/core';
+
+@Injectable()
+export class CatsService {
+  constructor(private lazyModuleLoader: LazyModuleLoader) {}
+
+  async loadReportModule(): Promise<void> {
+    // ReportModule is only loaded when this method is called
+    const { ReportModule } = await import('./report/report.module');
+    const moduleRef = await this.lazyModuleLoader.load(() => ReportModule);
+
+    const { ReportService } = await import('./report/report.service');
+    const reportService = moduleRef.get(ReportService);
+    await reportService.generate();
+  }
+}
+```
+
+:::caution[Lazy Module Limitations]
+Lazy-loaded modules cannot register global guards, pipes, interceptors, or filters because they are loaded
+after the application has already bootstrapped. Use lazy loading for compute-heavy modules activated rarely.
+:::

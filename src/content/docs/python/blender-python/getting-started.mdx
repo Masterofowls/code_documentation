@@ -1,0 +1,468 @@
+---
+title: Getting Started with Blender Python
+description: Set up your scripting environment in Blender — learn the Scripting workspace, Python Console, Text Editor, headless execution, error handling, and package installation.
+sidebar:
+  order: 2
+tags: [python, blender, 3d]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Blender bundles a complete Python 3 interpreter — no external installation required. This page walks through every tool and technique you need to write, test, and deploy scripts effectively.
+
+---
+
+## The Scripting Workspace
+
+Blender's **Scripting** workspace is pre-configured with every editor you need for Python development. Access it from the top tab bar labelled **Scripting**.
+
+The default layout contains:
+
+| Editor | Location | Purpose |
+|---|---|---|
+| **3D Viewport** | Top-left | See the results of your scripts live |
+| **Python Console** | Bottom-left | REPL for interactive exploration |
+| **Info** | Top-right (narrow) | Logs all UI actions as Python calls |
+| **Text Editor** | Centre-right | Write and run multi-line scripts |
+| **Properties** | Far-right | Inspect object/scene data |
+
+:::tip[Customise Your Layout]
+You can drag the borders between editors to resize them. A larger **Text Editor** and a smaller **3D Viewport** is a common preference for scripting-heavy sessions. Save the layout with **File → Defaults → Save Startup File**.
+:::
+
+---
+
+## The Python Console
+
+The **Python Console** is a live REPL (Read-Eval-Print Loop) with full tab-completion. Use it to explore the API interactively before writing a full script.
+
+```python
+# Type directly into the console — hit Enter to execute each line
+import bpy
+
+# Tab-complete bpy.data. to see all available collections
+bpy.data.objects          # <bpy_collection[3], BlendDataObjects>
+
+# Access the active object
+obj = bpy.context.active_object
+obj.name                  # 'Cube'
+obj.location              # <Vector (0.0, 0.0, 0.0)>
+obj.location.x = 3.0      # Immediately moves the cube in the viewport
+```
+
+> **Viewport result:** After setting `obj.location.x = 3.0`, the active cube jumps 3 m along the X axis in real time.
+
+:::tip[Tab Completion]
+Press **Tab** after any dot to see all available attributes and methods. For example, type `bpy.data.` and press Tab to list `objects`, `meshes`, `materials`, `lights`, `cameras`, and more.
+:::
+
+---
+
+## The Text Editor
+
+For scripts longer than a few lines, use the **Text Editor**. It supports syntax highlighting, line numbers, search/replace, and direct script execution.
+
+<Steps>
+1. Click **New** in the Text Editor header to create a new script buffer.
+2. Paste or type your Python code.
+3. Press **Alt+P** (or click the ▶ **Run Script** button in the header) to execute.
+4. Check the **Info** editor for any operator calls your script triggered, and the **System Console** for print output and errors.
+</Steps>
+
+```python
+import bpy
+
+# A simple script to report the scene contents
+scene = bpy.context.scene
+
+print(f"=== Scene: {scene.name} ===")
+print(f"Frame range : {scene.frame_start} – {scene.frame_end}")
+print(f"FPS         : {scene.render.fps}")
+print(f"Resolution  : {scene.render.resolution_x} x {scene.render.resolution_y}")
+print()
+print(f"{'Object':<20} {'Type':<12} {'Location'}")
+print("-" * 55)
+for obj in scene.objects:
+    loc = obj.location
+    print(f"{obj.name:<20} {obj.type:<12} ({loc.x:.2f}, {loc.y:.2f}, {loc.z:.2f})")
+```
+
+> **Console output (default scene):**
+> ```
+> === Scene: Scene ===
+> Frame range : 1 – 250
+> FPS         : 24
+> Resolution  : 1920 x 1080
+>
+> Object               Type         Location
+> -------------------------------------------------------
+> Camera               CAMERA       (7.36, -6.93, 4.96)
+> Cube                 MESH         (0.00, 0.00, 0.00)
+> Light                LIGHT        (4.08, 1.01, 5.90)
+> ```
+
+---
+
+## Checking the Blender Version
+
+Always guard scripts that rely on version-specific API features:
+
+```python
+import bpy
+import sys
+
+# Full version tuple
+print(f"Python  : {sys.version.split()[0]}")
+print(f"Blender : {bpy.app.version_string}")
+
+major, minor, patch = bpy.app.version
+
+# Guard against unsupported versions
+if bpy.app.version < (3, 6, 0):
+    raise RuntimeError(
+        f"This script requires Blender 3.6+. "
+        f"You are running {bpy.app.version_string}."
+    )
+
+# Version-specific code paths
+if major >= 4:
+    # Blender 4.x: use Light object's 'energy' directly
+    light_energy_attr = 'energy'
+else:
+    # Blender 3.x: same attribute, but some sub-properties differ
+    light_energy_attr = 'energy'
+
+print(f"Version check passed — using Blender {major}.{minor}.{patch}")
+```
+
+> **Console output (Blender 4.1.1, Python 3.11.7):**
+> ```
+> Python  : 3.11.7
+> Blender : 4.1.1
+> Version check passed — using Blender 4.1.1
+> ```
+
+---
+
+## Opening the System Console
+
+`print()` output goes to the **System Console**, not the Blender UI. Open it via:
+
+- **Windows:** Window → Toggle System Console
+- **macOS / Linux:** Launch Blender from a terminal — all print output appears there.
+
+```python
+import bpy
+import time
+
+print("Script started.")
+for i, obj in enumerate(bpy.data.objects):
+    print(f"  [{i+1}] {obj.name} ({obj.type})")
+print("Script finished.")
+```
+
+> **System Console output:**
+> ```
+> Script started.
+>   [1] Camera (CAMERA)
+>   [2] Cube (MESH)
+>   [3] Light (LIGHT)
+> Script finished.
+> ```
+
+---
+
+## Error Handling in Scripts
+
+Unhandled exceptions in Blender scripts print a full traceback to the System Console and abort execution. Use `try/except` to handle expected failures gracefully.
+
+```python
+import bpy
+
+def get_object_safe(name: str) -> bpy.types.Object | None:
+    """Return an object by name, or None if it does not exist."""
+    obj = bpy.data.objects.get(name)
+    if obj is None:
+        print(f"[WARNING] Object '{name}' not found in scene.")
+    return obj
+
+
+def set_location_safe(name: str, x: float, y: float, z: float) -> bool:
+    """Move an object by name. Returns True on success."""
+    try:
+        obj = bpy.data.objects[name]   # raises KeyError if missing
+        obj.location = (x, y, z)
+        print(f"Moved '{name}' to ({x}, {y}, {z})")
+        return True
+    except KeyError:
+        print(f"[ERROR] '{name}' does not exist.")
+        return False
+    except Exception as e:
+        print(f"[ERROR] Unexpected error moving '{name}': {e}")
+        return False
+
+
+# Usage
+get_object_safe("Cube")
+get_object_safe("DoesNotExist")
+set_location_safe("Cube", 2.0, 0.0, 0.0)
+set_location_safe("Ghost", 1.0, 1.0, 1.0)
+```
+
+> **Console output:**
+> ```
+> [WARNING] Object 'DoesNotExist' not found in scene.
+> Moved 'Cube' to (2.0, 0.0, 0.0)
+> [ERROR] 'Ghost' does not exist.
+> ```
+
+---
+
+## Undo Push Before Destructive Operations
+
+Always push an undo step before making changes users might want to reverse. Without this, your script's changes cannot be undone with Ctrl+Z.
+
+```python
+import bpy
+
+def delete_loose_meshes() -> int:
+    """Delete all mesh objects with zero vertices. Returns deleted count."""
+    # Register an undo step BEFORE making any changes
+    bpy.ops.ed.undo_push(message="Delete Loose Meshes")
+
+    to_delete = [
+        obj for obj in bpy.data.objects
+        if obj.type == 'MESH' and len(obj.data.vertices) == 0
+    ]
+
+    count = len(to_delete)
+    for obj in to_delete:
+        bpy.data.objects.remove(obj, do_unlink=True)
+        print(f"  Deleted empty mesh: {obj.name}")
+
+    return count
+
+
+deleted = delete_loose_meshes()
+print(f"Removed {deleted} empty mesh object(s).")
+```
+
+> **Console output (scene with 2 empty meshes):**
+> ```
+>   Deleted empty mesh: EmptyMesh.001
+>   Deleted empty mesh: EmptyMesh.002
+> Removed 2 empty mesh object(s).
+> ```
+
+:::caution[undo_push Must Come Before Changes]
+Call `bpy.ops.ed.undo_push()` *before* making any modifications. If you call it after, Blender will undo the push itself, not the changes you made.
+:::
+
+---
+
+## Installing External Python Packages
+
+Blender's Python interpreter is isolated from the system Python. To install third-party packages (e.g., `numpy`, `Pillow`, `scipy`), use Blender's own `pip`:
+
+<Tabs>
+  <TabItem label="From Blender Script">
+```python
+import subprocess
+import sys
+import importlib
+
+def ensure_package(package: str, import_name: str | None = None) -> None:
+    """Install a package into Blender's Python if not already present."""
+    name = import_name or package
+    try:
+        importlib.import_module(name)
+        print(f"'{package}' already installed.")
+    except ImportError:
+        print(f"Installing '{package}' ...")
+        subprocess.check_call([
+            sys.executable,
+            "-m", "pip", "install",
+            "--upgrade",
+            package
+        ])
+        print(f"'{package}' installed successfully.")
+
+# Example: ensure Pillow is available
+ensure_package("Pillow", "PIL")
+ensure_package("scipy")
+```
+  </TabItem>
+  <TabItem label="From System Terminal">
+```python
+# Replace <version> with your Blender version, e.g. 4.1
+# Windows
+"C:\Program Files\Blender Foundation\Blender 4.1\4.1\python\bin\python.exe" -m pip install Pillow
+
+# macOS
+/Applications/Blender.app/Contents/Resources/4.1/python/bin/python3.11 -m pip install Pillow
+
+# Linux
+/usr/share/blender/4.1/python/bin/python3.11 -m pip install Pillow
+```
+  </TabItem>
+</Tabs>
+
+:::caution[Package Location]
+Packages installed this way live inside the Blender application directory. They will be lost when you upgrade Blender. Re-run the install script after each major Blender update, or bundle dependencies inside your add-on's folder.
+:::
+
+> **Console output:**
+> ```
+> Installing 'Pillow' ...
+> Successfully installed Pillow-10.3.0
+> 'Pillow' installed successfully.
+> 'scipy' already installed.
+> ```
+
+---
+
+## Running Scripts Headlessly
+
+Run a `.blend` file or a standalone Python script without opening the Blender UI. This is essential for automated pipelines, CI rendering, and batch processing.
+
+```python
+# headless_example.py — run with:
+# blender --background --python headless_example.py
+# or with a specific blend file:
+# blender scene.blend --background --python headless_example.py
+
+import bpy
+import sys
+import os
+
+print("=== Headless Blender Script ===")
+print(f"Blend file: {bpy.data.filepath or '(no file loaded)'}")
+
+# Parse custom arguments passed after "--"
+# e.g.: blender --background --python script.py -- --output /tmp/render
+argv = sys.argv
+try:
+    separator = argv.index("--") + 1
+    custom_args = argv[separator:]
+except ValueError:
+    custom_args = []
+
+print(f"Custom args: {custom_args}")
+
+# Do some work
+bpy.ops.mesh.primitive_uv_sphere_add(radius=1.5, location=(0, 0, 0))
+sphere = bpy.context.active_object
+sphere.name = "HeadlessSphere"
+
+# Configure render output
+scene = bpy.context.scene
+scene.render.engine = 'CYCLES'
+scene.cycles.samples = 32
+scene.render.resolution_x = 1280
+scene.render.resolution_y = 720
+scene.render.filepath = "/tmp/headless_render.png"
+scene.render.image_settings.file_format = 'PNG'
+
+# Render a single frame
+print("Rendering frame 1 ...")
+bpy.ops.render.render(write_still=True)
+print(f"Saved to: {scene.render.filepath}")
+
+print("=== Done ===")
+```
+
+> **Terminal output:**
+> ```
+> Blender 4.1.1 (hash a2b578f70e86)
+> Read blend: (no file loaded)
+> =================================
+> === Headless Blender Script ===
+> Blend file: (no file loaded)
+> Custom args: []
+> Rendering frame 1 ...
+> Saved to: /tmp/headless_render.png
+> === Done ===
+> ```
+
+---
+
+## Passing Arguments to Headless Scripts
+
+Blender consumes all arguments before `--`. Put your custom flags after it:
+
+```python
+# argument_demo.py
+import bpy
+import sys
+import argparse
+
+def parse_args():
+    argv = sys.argv
+    if "--" in argv:
+        argv = argv[argv.index("--") + 1:]
+    else:
+        argv = []
+
+    parser = argparse.ArgumentParser(description="Blender headless renderer")
+    parser.add_argument("--output", "-o", default="/tmp/render.png",
+                        help="Output file path")
+    parser.add_argument("--samples", "-s", type=int, default=64,
+                        help="Render samples (Cycles)")
+    parser.add_argument("--engine", "-e", default="CYCLES",
+                        choices=["CYCLES", "BLENDER_EEVEE"],
+                        help="Render engine")
+    return parser.parse_args(argv)
+
+
+args = parse_args()
+print(f"Output  : {args.output}")
+print(f"Samples : {args.samples}")
+print(f"Engine  : {args.engine}")
+
+scene = bpy.context.scene
+scene.render.engine = args.engine
+scene.render.filepath = args.output
+if args.engine == 'CYCLES':
+    scene.cycles.samples = args.samples
+
+bpy.ops.render.render(write_still=True)
+print("Render complete.")
+```
+
+**Run from terminal:**
+```
+blender --background scene.blend --python argument_demo.py -- --output /renders/frame001.png --samples 128 --engine CYCLES
+```
+
+> **Terminal output:**
+> ```
+> Output  : /renders/frame001.png
+> Samples : 128
+> Engine  : CYCLES
+> Render complete.
+> ```
+
+---
+
+## Auto-Executing Scripts on Blend File Open
+
+Scripts embedded in a `.blend` file can auto-execute on open if **Auto Run Python Scripts** is enabled in **Edit → Preferences → Save & Load**. Useful for scene setup scripts, but be aware of the security implications of running untrusted scripts automatically.
+
+:::caution[Security Warning]
+Never enable Auto Run Python Scripts for `.blend` files from untrusted sources. A malicious blend file could execute arbitrary code on your system.
+:::
+
+---
+
+## Quick Reference
+
+| Task | Code |
+|---|---|
+| Get Blender version | `bpy.app.version` |
+| Get Python version | `import sys; sys.version` |
+| Run script in UI | Alt+P in Text Editor |
+| Run script headless | `blender --background --python script.py` |
+| Push undo step | `bpy.ops.ed.undo_push(message="...")` |
+| Print to System Console | `print(...)` |
+| Install a package | `subprocess.check_call([sys.executable, "-m", "pip", "install", "pkg"])` |
+| Open System Console (Win) | Window → Toggle System Console |

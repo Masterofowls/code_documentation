@@ -1,0 +1,612 @@
+---
+title: Authentication & Authorization
+description: Implement user authentication in Django including login, logout, registration, permissions, custom user models, password management, and session handling.
+sidebar:
+  order: 7
+tags: [python, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Django ships with a complete authentication system covering user accounts, permissions, groups, password hashing, and session management — all production-grade and battle-tested.
+
+---
+
+## The User Model
+
+By default, Django uses `django.contrib.auth.models.User` with these fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | AutoField | Primary key |
+| `username` | CharField | Required, unique (150 chars) |
+| `email` | EmailField | Optional by default |
+| `password` | CharField | Hashed password string |
+| `first_name` | CharField | Optional |
+| `last_name` | CharField | Optional |
+| `is_active` | BooleanField | Active account flag |
+| `is_staff` | BooleanField | Can access admin |
+| `is_superuser` | BooleanField | All permissions |
+| `date_joined` | DateTimeField | When account was created |
+| `last_login` | DateTimeField | Last successful login |
+| `groups` | M2M | Permission groups |
+| `user_permissions` | M2M | Individual permissions |
+
+:::caution[Define a Custom User Model at Project Start]
+Before writing your first migration, define a custom user model. Switching from the default `User` model later requires complex database operations. See the [Custom User Model](#custom-user-model) section below.
+:::
+
+---
+
+## Custom User Model
+
+Always substitute a custom user model from the beginning of any project.
+
+<Tabs>
+<TabItem label="AbstractUser (recommended)">
+```python
+# users/models.py
+from django.contrib.auth.models import AbstractUser
+from django.db import models
+
+
+class User(AbstractUser):
+    """Custom user model extending AbstractUser.
+    
+    Add custom fields here. All default auth fields are inherited.
+    """
+    email = models.EmailField(unique=True)  # Make email unique
+    bio = models.TextField(blank=True)
+    avatar = models.ImageField(upload_to="avatars/", blank=True, null=True)
+    website = models.URLField(blank=True)
+
+    # Use email as the login identifier instead of username (optional)
+    # USERNAME_FIELD = "email"
+    # REQUIRED_FIELDS = ["username"]
+
+    class Meta:
+        verbose_name = "user"
+        verbose_name_plural = "users"
+
+    def get_full_name(self):
+        full_name = f"{self.first_name} {self.last_name}".strip()
+        return full_name or self.username
+
+    def __str__(self):
+        return self.email or self.username
+```
+</TabItem>
+<TabItem label="AbstractBaseUser (full control)">
+```python
+# users/models.py
+from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from django.db import models
+
+
+class UserManager(BaseUserManager):
+    def create_user(self, email, password=None, **extra_fields):
+        if not email:
+            raise ValueError("Email is required.")
+        email = self.normalize_email(email)
+        user = self.model(email=email, **extra_fields)
+        user.set_password(password)
+        user.save(using=self._db)
+        return user
+
+    def create_superuser(self, email, password=None, **extra_fields):
+        extra_fields.setdefault("is_staff", True)
+        extra_fields.setdefault("is_superuser", True)
+        extra_fields.setdefault("is_active", True)
+        return self.create_user(email, password, **extra_fields)
+
+
+class User(AbstractBaseUser, PermissionsMixin):
+    email = models.EmailField(unique=True)
+    first_name = models.CharField(max_length=150, blank=True)
+    last_name = models.CharField(max_length=150, blank=True)
+    is_active = models.BooleanField(default=True)
+    is_staff = models.BooleanField(default=False)
+    date_joined = models.DateTimeField(auto_now_add=True)
+
+    # Custom fields
+    bio = models.TextField(blank=True)
+
+    USERNAME_FIELD = "email"     # Field used for login
+    REQUIRED_FIELDS = []         # Fields prompted by createsuperuser (excluding USERNAME_FIELD)
+
+    objects = UserManager()
+
+    def __str__(self):
+        return self.email
+```
+</TabItem>
+</Tabs>
+
+```python
+# settings.py — point to your custom user model
+AUTH_USER_MODEL = "users.User"
+```
+
+```python
+# Anywhere in your code — reference the user model safely
+from django.contrib.auth import get_user_model
+
+User = get_user_model()  # Returns your custom User class
+
+# In models — use settings.AUTH_USER_MODEL for FK relationships
+from django.conf import settings
+
+class Post(models.Model):
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+    )
+```
+
+---
+
+## Authentication Views
+
+Django ships with built-in views for login, logout, and password management.
+
+### Using Built-in Auth URLs
+
+```python
+# mysite/urls.py
+urlpatterns = [
+    # Includes: login, logout, password_change, password_reset, etc.
+    path("accounts/", include("django.contrib.auth.urls")),
+]
+```
+
+This registers these URL patterns:
+
+| URL | View | Name |
+|-----|------|------|
+| `accounts/login/` | `LoginView` | `login` |
+| `accounts/logout/` | `LogoutView` | `logout` |
+| `accounts/password_change/` | `PasswordChangeView` | `password_change` |
+| `accounts/password_change/done/` | `PasswordChangeDoneView` | `password_change_done` |
+| `accounts/password_reset/` | `PasswordResetView` | `password_reset` |
+| `accounts/password_reset/done/` | `PasswordResetDoneView` | `password_reset_done` |
+| `accounts/reset/<uidb64>/<token>/` | `PasswordResetConfirmView` | `password_reset_confirm` |
+| `accounts/reset/done/` | `PasswordResetCompleteView` | `password_reset_complete` |
+
+Create the required templates in `templates/registration/`:
+
+```html
+<!-- templates/registration/login.html -->
+{% extends "base.html" %}
+
+{% block title %}Sign In{% endblock %}
+
+{% block content %}
+<div class="auth-container">
+  <h1>Sign In</h1>
+
+  {% if form.errors %}
+    <div class="alert alert-danger">
+      Your username and password didn't match. Please try again.
+    </div>
+  {% endif %}
+
+  <form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <input type="hidden" name="next" value="{{ next }}">
+    <button type="submit" class="btn btn-primary">Sign In</button>
+  </form>
+
+  <p>Don't have an account? <a href="{% url 'register' %}">Sign up</a></p>
+  <p><a href="{% url 'password_reset' %}">Forgot password?</a></p>
+</div>
+{% endblock %}
+```
+
+### Custom Login / Registration Views
+
+```python
+# users/views.py
+from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth.views import LoginView, LogoutView
+from django.contrib.auth.forms import UserCreationForm, AuthenticationForm
+from django.shortcuts import render, redirect
+from django.contrib import messages
+from django.contrib.auth.decorators import login_required
+from django.views.generic import CreateView
+from django.urls import reverse_lazy
+from .forms import CustomUserCreationForm
+
+
+class CustomLoginView(LoginView):
+    """Custom login view with overridden template and redirect."""
+    template_name = "users/login.html"
+    redirect_authenticated_user = True  # Redirect already-logged-in users
+
+    def form_valid(self, form):
+        messages.success(self.request, f"Welcome back, {form.get_user().get_full_name()}!")
+        return super().form_valid(form)
+
+
+class RegisterView(CreateView):
+    """User registration."""
+    form_class = CustomUserCreationForm
+    template_name = "users/register.html"
+    success_url = reverse_lazy("login")
+
+    def form_valid(self, form):
+        response = super().form_valid(form)
+        # Auto-login after registration
+        user = form.save()
+        login(self.request, user)
+        messages.success(self.request, "Account created! Welcome!")
+        return redirect("dashboard")
+
+
+def manual_login(request):
+    """Manual login handling — lower level."""
+    if request.method == "POST":
+        username = request.POST.get("username")
+        password = request.POST.get("password")
+
+        user = authenticate(request, username=username, password=password)
+        if user is not None:
+            if user.is_active:
+                login(request, user)
+                # Respect the "next" parameter for redirect after login
+                next_url = request.POST.get("next") or request.GET.get("next") or "/"
+                return redirect(next_url)
+            else:
+                messages.error(request, "This account is inactive.")
+        else:
+            messages.error(request, "Invalid username or password.")
+
+    return render(request, "users/login.html", {"form": AuthenticationForm()})
+
+
+def manual_logout(request):
+    """Log out and redirect."""
+    logout(request)
+    messages.info(request, "You have been logged out.")
+    return redirect("login")
+```
+
+---
+
+## Protecting Views
+
+### `@login_required` Decorator
+
+```python
+from django.contrib.auth.decorators import login_required
+from django.contrib.auth.mixins import LoginRequiredMixin
+
+
+# FBV
+@login_required
+def dashboard(request):
+    return render(request, "dashboard.html")
+
+# With custom redirect
+@login_required(login_url="/accounts/signin/")
+def settings_page(request):
+    ...
+
+# CBV
+class DashboardView(LoginRequiredMixin, TemplateView):
+    template_name = "dashboard.html"
+    login_url = "/accounts/login/"
+    redirect_field_name = "next"
+```
+
+### Permission Decorators
+
+```python
+from django.contrib.auth.decorators import permission_required
+from django.contrib.auth.mixins import PermissionRequiredMixin
+
+
+# Require a specific permission
+@login_required
+@permission_required("blog.add_post", raise_exception=True)
+def post_create(request):
+    ...
+
+# Multiple permissions (all required)
+@permission_required(["blog.add_post", "blog.change_post"])
+def post_manage(request):
+    ...
+
+# CBV
+class PostCreateView(LoginRequiredMixin, PermissionRequiredMixin, CreateView):
+    permission_required = "blog.add_post"
+    # raise_exception = True  # Raises 403 instead of redirecting to login
+
+
+# Manual permission checks in views
+def post_edit(request, pk):
+    post = get_object_or_404(Post, pk=pk)
+    if not request.user.has_perm("blog.change_post"):
+        raise PermissionDenied  # 403
+    if post.author != request.user and not request.user.is_staff:
+        raise PermissionDenied
+    ...
+```
+
+### Template Permission Checks
+
+```html
+{% if user.is_authenticated %}
+  <p>Logged in as {{ user.username }}</p>
+{% endif %}
+
+{% if user.is_staff %}
+  <a href="{% url 'admin:index' %}">Admin</a>
+{% endif %}
+
+{% if perms.blog.add_post %}
+  <a href="{% url 'blog:post-create' %}">New Post</a>
+{% endif %}
+
+{% if perms.blog.change_post and post.author == user %}
+  <a href="{% url 'blog:post-update' slug=post.slug %}">Edit</a>
+{% endif %}
+```
+
+---
+
+## Groups and Permissions
+
+```python
+from django.contrib.auth.models import Group, Permission
+from django.contrib.contenttypes.models import ContentType
+from blog.models import Post
+
+
+# Create groups programmatically (or in a migration)
+editors_group, _ = Group.objects.get_or_create(name="Editors")
+moderators_group, _ = Group.objects.get_or_create(name="Moderators")
+
+# Get model permissions
+content_type = ContentType.objects.get_for_model(Post)
+can_publish = Permission.objects.get(
+    content_type=content_type,
+    codename="change_post",
+)
+
+# Assign permissions to group
+editors_group.permissions.add(can_publish)
+
+# Add user to group
+user.groups.add(editors_group)
+
+# Custom permission defined on a model
+class Post(models.Model):
+    ...
+
+    class Meta:
+        permissions = [
+            ("publish_post", "Can publish posts"),
+            ("feature_post", "Can feature posts on homepage"),
+        ]
+
+# Check custom permission
+request.user.has_perm("blog.publish_post")
+```
+
+---
+
+## Password Management
+
+```python
+from django.contrib.auth.hashers import make_password, check_password
+from django.contrib.auth import update_session_auth_hash
+
+
+# Hashing is automatic when using set_password()
+user.set_password("new_secure_password_123")
+user.save()
+
+# After changing password, keep user logged in
+update_session_auth_hash(request, user)  # ← Prevents logout after password change
+
+# Check a password against a hash
+check_password("raw_password", user.password)  # True or False
+
+# Manually hash a password
+hashed = make_password("my_password")
+# 'pbkdf2_sha256$390000$salt$hash'
+
+# Password validation (used in registration/reset flows)
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
+
+try:
+    validate_password("short", user=user)
+except ValidationError as e:
+    print(e.messages)
+    # ['This password is too short. It must contain at least 8 characters.']
+```
+
+Django uses **PBKDF2** with SHA-256 by default (configurable in `PASSWORD_HASHERS`).
+
+---
+
+## Password Reset Flow
+
+The built-in password reset flow uses email. Configure email settings:
+
+```python
+# settings.py
+
+# For development — print emails to console
+EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+
+# For production — use SMTP or a service like SendGrid
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST = config("EMAIL_HOST", default="smtp.gmail.com")
+EMAIL_PORT = config("EMAIL_PORT", default=587, cast=int)
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = config("EMAIL_HOST_USER")
+EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD")
+DEFAULT_FROM_EMAIL = "My Site <noreply@mysite.com>"
+```
+
+The reset flow uses these templates (create in `templates/registration/`):
+
+| Template | Purpose |
+|----------|---------|
+| `password_reset_form.html` | Enter email form |
+| `password_reset_email.html` | Email body (plain text) |
+| `password_reset_subject.txt` | Email subject line |
+| `password_reset_done.html` | "Email sent" confirmation |
+| `password_reset_confirm.html` | Enter new password form |
+| `password_reset_complete.html` | "Password changed" confirmation |
+
+---
+
+## Session Management
+
+```python
+# views.py — working with sessions
+def my_view(request):
+    # Set session data (any picklable Python object)
+    request.session["cart"] = [{"id": 1, "qty": 2}]
+    request.session["last_viewed"] = 42
+
+    # Get session data
+    cart = request.session.get("cart", [])
+
+    # Delete a specific key
+    try:
+        del request.session["cart"]
+    except KeyError:
+        pass
+
+    # Force session to be saved (for changes to mutable objects)
+    request.session.modified = True
+
+    # Get session key
+    session_key = request.session.session_key
+
+    # Flush session (log out)
+    request.session.flush()
+
+    # Set expiry
+    request.session.set_expiry(3600)     # Expires in 1 hour
+    request.session.set_expiry(0)        # Expires when browser closes
+    request.session.set_expiry(None)     # Use SESSION_COOKIE_AGE from settings
+```
+
+```python
+# settings.py — session configuration
+SESSION_ENGINE = "django.contrib.sessions.backends.db"       # Default
+# SESSION_ENGINE = "django.contrib.sessions.backends.cache"  # Faster (Redis)
+# SESSION_ENGINE = "django.contrib.sessions.backends.signed_cookies"  # No DB
+
+SESSION_COOKIE_AGE = 60 * 60 * 24 * 14  # 2 weeks (in seconds)
+SESSION_COOKIE_SECURE = True             # HTTPS only (set True in production)
+SESSION_COOKIE_HTTPONLY = True           # No JavaScript access
+SESSION_COOKIE_SAMESITE = "Lax"          # CSRF protection
+SESSION_EXPIRE_AT_BROWSER_CLOSE = False  # Session survives browser restart
+```
+
+---
+
+## User Registration Form
+
+```python
+# users/forms.py
+from django import forms
+from django.contrib.auth.forms import UserCreationForm, UserChangeForm
+from django.contrib.auth import get_user_model
+
+User = get_user_model()
+
+
+class CustomUserCreationForm(UserCreationForm):
+    """Extended registration form."""
+    email = forms.EmailField(required=True, help_text="Required. Enter a valid email address.")
+    first_name = forms.CharField(max_length=150, required=True)
+    last_name = forms.CharField(max_length=150, required=True)
+
+    class Meta(UserCreationForm.Meta):
+        model = User
+        fields = ("username", "email", "first_name", "last_name", "password1", "password2")
+
+    def clean_email(self):
+        email = self.cleaned_data.get("email", "").lower().strip()
+        if User.objects.filter(email=email).exists():
+            raise forms.ValidationError("A user with this email already exists.")
+        return email
+
+    def save(self, commit=True):
+        user = super().save(commit=False)
+        user.email = self.cleaned_data["email"]
+        user.first_name = self.cleaned_data["first_name"]
+        user.last_name = self.cleaned_data["last_name"]
+        if commit:
+            user.save()
+        return user
+
+
+class ProfileUpdateForm(forms.ModelForm):
+    """Form for updating user profile."""
+    class Meta:
+        model = User
+        fields = ["first_name", "last_name", "email", "bio", "avatar", "website"]
+```
+
+---
+
+## Third-Party Auth: django-allauth
+
+For OAuth/social login (Google, GitHub, etc.), use `django-allauth`:
+
+```bash
+pip install django-allauth
+```
+
+```python
+# settings.py
+INSTALLED_APPS = [
+    ...
+    "django.contrib.sites",
+    "allauth",
+    "allauth.account",
+    "allauth.socialaccount",
+    "allauth.socialaccount.providers.google",
+    "allauth.socialaccount.providers.github",
+]
+
+SITE_ID = 1
+
+AUTHENTICATION_BACKENDS = [
+    "django.contrib.auth.backends.ModelBackend",
+    "allauth.account.auth_backends.AuthenticationBackend",
+]
+
+# Allauth settings
+ACCOUNT_LOGIN_METHODS = {"email"}        # Login with email
+ACCOUNT_SIGNUP_FIELDS = ["email*", "password1*", "password2*"]
+ACCOUNT_EMAIL_VERIFICATION = "mandatory"
+ACCOUNT_UNIQUE_EMAIL = True
+LOGIN_REDIRECT_URL = "/"
+
+SOCIALACCOUNT_PROVIDERS = {
+    "google": {
+        "SCOPE": ["profile", "email"],
+        "AUTH_PARAMS": {"access_type": "online"},
+    },
+    "github": {
+        "SCOPE": ["user", "repo"],
+    },
+}
+```
+
+```python
+# urls.py
+urlpatterns = [
+    path("accounts/", include("allauth.urls")),
+]
+```

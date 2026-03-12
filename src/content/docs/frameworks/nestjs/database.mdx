@@ -1,0 +1,542 @@
+---
+title: Database Integration
+description: Connect NestJS to PostgreSQL, MySQL, or SQLite using TypeORM or Prisma, define entities, manage relationships, and run migrations.
+sidebar:
+  order: 7
+tags: [typescript, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Database Integration
+
+NestJS is database-agnostic and integrates cleanly with any SQL or NoSQL database. The two most popular
+choices for relational databases are **TypeORM** (the NestJS-native integration) and **Prisma** (a modern
+ORM with exceptional TypeScript support).
+
+## TypeORM Setup
+
+TypeORM is the most commonly used ORM with NestJS and has first-class integration via `@nestjs/typeorm`.
+
+### Installation
+
+```bash
+npm install @nestjs/typeorm typeorm pg
+# Replace 'pg' with 'mysql2', 'better-sqlite3', or 'mssql' as needed
+```
+
+### TypeOrmModule.forRoot()
+
+Configure the database connection in your root module:
+
+```typescript
+// app.module.ts
+import { Module } from '@nestjs/common';
+import { TypeOrmModule } from '@nestjs/typeorm';
+
+@Module({
+  imports: [
+    TypeOrmModule.forRoot({
+      type: 'postgres',
+      host: process.env.DB_HOST ?? 'localhost',
+      port: parseInt(process.env.DB_PORT ?? '5432', 10),
+      username: process.env.DB_USER ?? 'postgres',
+      password: process.env.DB_PASS ?? 'secret',
+      database: process.env.DB_NAME ?? 'myapp',
+      entities: [__dirname + '/**/*.entity{.ts,.js}'],
+      migrations: [__dirname + '/migrations/**/*{.ts,.js}'],
+      synchronize: false, // NEVER true in production
+      logging: process.env.NODE_ENV === 'development',
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+:::caution[synchronize: false in Production]
+Never set `synchronize: true` in production. It automatically runs schema alterations on every app start,
+which can cause irreversible data loss. Always use migrations in production environments.
+:::
+
+### Async Configuration
+
+```typescript
+TypeOrmModule.forRootAsync({
+  imports: [ConfigModule],
+  inject: [ConfigService],
+  useFactory: (configService: ConfigService) => ({
+    type: 'postgres',
+    url: configService.getOrThrow('DATABASE_URL'),
+    autoLoadEntities: true,   // Auto-registers entities added via forFeature()
+    synchronize: false,
+    logging: configService.get('NODE_ENV') === 'development',
+    extra: {
+      max: 20,   // Connection pool max size
+      idleTimeoutMillis: 30000,
+    },
+  }),
+}),
+```
+
+## Defining Entities
+
+Entities are TypeScript classes decorated with `@Entity()` that map directly to database tables:
+
+```typescript
+// users/entities/user.entity.ts
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+  DeleteDateColumn,
+  Index,
+  BeforeInsert,
+  BeforeUpdate,
+} from 'typeorm';
+import * as bcrypt from 'bcrypt';
+
+export enum UserRole {
+  Admin = 'admin',
+  User = 'user',
+  Moderator = 'moderator',
+}
+
+@Entity('users')
+@Index(['email'], { unique: true })
+export class User {
+  @PrimaryGeneratedColumn()
+  id: number;
+
+  @Column({ length: 100 })
+  name: string;
+
+  @Column({ unique: true, length: 255 })
+  email: string;
+
+  @Column({ select: false })  // Excluded from SELECT * by default
+  password: string;
+
+  @Column({
+    type: 'enum',
+    enum: UserRole,
+    default: UserRole.User,
+  })
+  role: UserRole;
+
+  @Column({ default: true })
+  isActive: boolean;
+
+  @Column({ type: 'text', nullable: true })
+  bio: string | null;
+
+  @CreateDateColumn()
+  createdAt: Date;
+
+  @UpdateDateColumn()
+  updatedAt: Date;
+
+  @DeleteDateColumn()  // Enables soft delete
+  deletedAt: Date | null;
+
+  @BeforeInsert()
+  @BeforeUpdate()
+  async hashPassword(): Promise<void> {
+    if (this.password) {
+      this.password = await bcrypt.hash(this.password, 12);
+    }
+  }
+}
+```
+
+## Relationships
+
+### One-to-One
+
+```typescript
+// profile.entity.ts
+import { Entity, PrimaryGeneratedColumn, Column, OneToOne, JoinColumn } from 'typeorm';
+import { User } from './user.entity';
+
+@Entity('profiles')
+export class Profile {
+  @PrimaryGeneratedColumn()
+  id: number;
+
+  @Column({ nullable: true })
+  avatarUrl: string;
+
+  @Column({ type: 'date', nullable: true })
+  dateOfBirth: Date;
+
+  @OneToOne(() => User, (user) => user.profile, { onDelete: 'CASCADE' })
+  @JoinColumn()  // Owns the foreign key column
+  user: User;
+}
+
+// user.entity.ts — add the inverse side
+@OneToOne(() => Profile, (profile) => profile.user, { eager: true, cascade: true })
+profile: Profile;
+```
+
+### One-to-Many / Many-to-One
+
+```typescript
+// post.entity.ts
+import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, OneToMany } from 'typeorm';
+
+@Entity('posts')
+export class Post {
+  @PrimaryGeneratedColumn()
+  id: number;
+
+  @Column()
+  title: string;
+
+  @Column('text')
+  content: string;
+
+  // Many posts belong to one user
+  @ManyToOne(() => User, (user) => user.posts, { nullable: false, onDelete: 'CASCADE' })
+  author: User;
+
+  // One post has many comments
+  @OneToMany(() => Comment, (comment) => comment.post, { cascade: true })
+  comments: Comment[];
+}
+
+// user.entity.ts — add the inverse side
+@OneToMany(() => Post, (post) => post.author)
+posts: Post[];
+```
+
+### Many-to-Many
+
+```typescript
+// tag.entity.ts
+import { Entity, PrimaryGeneratedColumn, Column, ManyToMany } from 'typeorm';
+
+@Entity('tags')
+export class Tag {
+  @PrimaryGeneratedColumn()
+  id: number;
+
+  @Column({ unique: true })
+  name: string;
+
+  @ManyToMany(() => Post, (post) => post.tags)
+  posts: Post[];
+}
+
+// post.entity.ts — owns the junction table
+@ManyToMany(() => Tag, (tag) => tag.posts, { eager: false, cascade: true })
+@JoinTable({
+  name: 'post_tags',
+  joinColumn: { name: 'post_id' },
+  inverseJoinColumn: { name: 'tag_id' },
+})
+tags: Tag[];
+```
+
+## TypeORM Repository Pattern
+
+### forFeature() and InjectRepository
+
+```typescript
+// users.module.ts
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { User } from './entities/user.entity';
+import { Profile } from './entities/profile.entity';
+
+@Module({
+  imports: [TypeOrmModule.forFeature([User, Profile])],
+  providers: [UsersService, UsersRepository],
+  exports: [UsersService],
+})
+export class UsersModule {}
+```
+
+### Repository Methods
+
+```typescript
+// users.service.ts
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository, ILike, Between } from 'typeorm';
+import { User } from './entities/user.entity';
+
+@Injectable()
+export class UsersService {
+  constructor(
+    @InjectRepository(User)
+    private readonly userRepository: Repository<User>,
+  ) {}
+
+  findAll(): Promise<User[]> {
+    return this.userRepository.find({
+      order: { createdAt: 'DESC' },
+      take: 50,
+    });
+  }
+
+  findOne(id: number): Promise<User | null> {
+    return this.userRepository.findOne({
+      where: { id },
+      relations: ['profile', 'posts'],
+    });
+  }
+
+  findByEmail(email: string): Promise<User | null> {
+    return this.userRepository.findOneBy({ email });
+  }
+
+  async create(email: string, name: string): Promise<User> {
+    const user = this.userRepository.create({ email, name });
+    return this.userRepository.save(user);
+  }
+
+  async update(id: number, attrs: Partial<User>): Promise<User> {
+    const user = await this.userRepository.findOneBy({ id });
+    if (!user) throw new NotFoundException(`User #${id} not found`);
+    Object.assign(user, attrs);
+    return this.userRepository.save(user);
+  }
+
+  async remove(id: number): Promise<void> {
+    await this.userRepository.delete(id);
+  }
+
+  async softRemove(id: number): Promise<void> {
+    await this.userRepository.softDelete(id);
+  }
+
+  searchByName(query: string): Promise<User[]> {
+    return this.userRepository.find({
+      where: { name: ILike(`%${query}%`) },
+    });
+  }
+}
+```
+
+### QueryBuilder
+
+For complex queries, use TypeORM's QueryBuilder:
+
+```typescript
+async findActiveWithPosts(minPosts: number): Promise<User[]> {
+  return this.userRepository
+    .createQueryBuilder('user')
+    .leftJoinAndSelect('user.posts', 'post')
+    .where('user.isActive = :isActive', { isActive: true })
+    .andWhere('user.deletedAt IS NULL')
+    .having('COUNT(post.id) >= :minPosts', { minPosts })
+    .groupBy('user.id')
+    .orderBy('user.createdAt', 'DESC')
+    .getMany();
+}
+
+async findByDateRange(start: Date, end: Date): Promise<User[]> {
+  return this.userRepository
+    .createQueryBuilder('user')
+    .where('user.createdAt BETWEEN :start AND :end', { start, end })
+    .getMany();
+}
+```
+
+## Transactions
+
+```typescript
+import { DataSource } from 'typeorm';
+
+@Injectable()
+export class UsersService {
+  constructor(
+    private readonly dataSource: DataSource,
+    @InjectRepository(User)
+    private readonly userRepository: Repository<User>,
+  ) {}
+
+  async transferCredits(fromId: number, toId: number, amount: number): Promise<void> {
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      await queryRunner.manager.decrement(User, { id: fromId }, 'credits', amount);
+      await queryRunner.manager.increment(User, { id: toId }, 'credits', amount);
+      await queryRunner.commitTransaction();
+    } catch (err) {
+      await queryRunner.rollbackTransaction();
+      throw err;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+}
+```
+
+## Migrations
+
+Migrations are the recommended approach for managing schema changes in production:
+
+```json
+// package.json
+{
+  "scripts": {
+    "migration:generate": "typeorm-ts-node-commonjs migration:generate -d src/data-source.ts",
+    "migration:run": "typeorm-ts-node-commonjs migration:run -d src/data-source.ts",
+    "migration:revert": "typeorm-ts-node-commonjs migration:revert -d src/data-source.ts",
+    "migration:create": "typeorm-ts-node-commonjs migration:create src/migrations/MigrationName"
+  }
+}
+```
+
+```typescript
+// src/data-source.ts
+import { DataSource } from 'typeorm';
+
+export const AppDataSource = new DataSource({
+  type: 'postgres',
+  url: process.env.DATABASE_URL,
+  entities: ['src/**/*.entity.ts'],
+  migrations: ['src/migrations/*.ts'],
+  synchronize: false,
+});
+```
+
+```bash
+# Generate a migration from entity changes
+npm run migration:generate src/migrations/AddUserBioColumn
+
+# Apply all pending migrations
+npm run migration:run
+
+# Revert the last applied migration
+npm run migration:revert
+```
+
+## Prisma Alternative
+
+Prisma offers an excellent developer experience with a type-safe query client and auto-generated types.
+
+### Installation and Setup
+
+```bash
+npm install @prisma/client
+npm install --save-dev prisma
+npx prisma init
+```
+
+```typescript
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        Int       @id @default(autoincrement())
+  email     String    @unique
+  name      String
+  role      Role      @default(USER)
+  posts     Post[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@map("users")
+}
+
+enum Role {
+  ADMIN
+  USER
+  MODERATOR
+}
+
+model Post {
+  id        Int      @id @default(autoincrement())
+  title     String
+  content   String
+  published Boolean  @default(false)
+  author    User     @relation(fields: [authorId], references: [id])
+  authorId  Int
+  createdAt DateTime @default(now())
+}
+```
+
+### PrismaService
+
+```typescript
+// prisma/prisma.service.ts
+import { Injectable, OnModuleInit } from '@nestjs/common';
+import { PrismaClient } from '@prisma/client';
+
+@Injectable()
+export class PrismaService extends PrismaClient implements OnModuleInit {
+  async onModuleInit(): Promise<void> {
+    await this.$connect();
+  }
+}
+```
+
+```typescript
+// prisma/prisma.module.ts
+import { Global, Module } from '@nestjs/common';
+import { PrismaService } from './prisma.service';
+
+@Global()
+@Module({
+  providers: [PrismaService],
+  exports: [PrismaService],
+})
+export class PrismaModule {}
+```
+
+### Using PrismaService
+
+```typescript
+@Injectable()
+export class UsersService {
+  constructor(private prisma: PrismaService) {}
+
+  findAll() {
+    return this.prisma.user.findMany({
+      where: { deletedAt: null },
+      include: { posts: true },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  findOne(id: number) {
+    return this.prisma.user.findUniqueOrThrow({ where: { id } });
+  }
+
+  create(email: string, name: string) {
+    return this.prisma.user.create({ data: { email, name } });
+  }
+
+  async update(id: number, data: { name?: string; email?: string }) {
+    return this.prisma.user.update({ where: { id }, data });
+  }
+
+  softDelete(id: number) {
+    return this.prisma.user.update({
+      where: { id },
+      data: { deletedAt: new Date() },
+    });
+  }
+}
+```
+
+:::tip[TypeORM vs Prisma]
+**TypeORM** integrates most naturally with NestJS decorators and Active Record patterns. **Prisma** provides
+superior TypeScript type safety (auto-generated types), a cleaner query API, and better migration tooling.
+For greenfield projects, Prisma is often the better choice. For projects already using TypeORM or needing
+complex ActiveRecord patterns, stick with TypeORM.
+:::

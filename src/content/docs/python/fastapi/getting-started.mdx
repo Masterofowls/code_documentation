@@ -1,0 +1,505 @@
+---
+title: Getting Started
+description: Install FastAPI, create your first application, configure settings with pydantic-settings, set up project structure, and understand the development workflow.
+sidebar:
+  order: 2
+tags: [python, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+This guide walks you through installing FastAPI, creating your first application, structuring a production-ready project, managing configuration with environment variables, and setting up logging.
+
+## Prerequisites
+
+- Python 3.10 or higher (3.12 recommended)
+- `pip` or `uv` package manager
+- A terminal / command prompt
+
+:::tip[Use uv for Speed]
+[uv](https://docs.astral.sh/uv/) is a fast Rust-based Python package manager that is 10–100× faster than pip. Install it with `pip install uv` and replace `pip install` with `uv pip install` throughout this guide.
+:::
+
+## Installation
+
+<Steps>
+1. **Create and activate a virtual environment**
+
+   ```bash
+   python -m venv .venv
+   # macOS / Linux
+   source .venv/bin/activate
+   # Windows
+   .venv\Scripts\activate
+   ```
+
+2. **Install FastAPI and Uvicorn**
+
+   ```bash
+   pip install "fastapi[standard]"
+   ```
+
+   The `[standard]` extra installs `uvicorn[standard]` (with performance extras like `uvloop` and `httptools`), `pydantic-settings`, `python-multipart`, and `email-validator` — everything you need to start building.
+
+3. **Verify the installation**
+
+   ```bash
+   python -c "import fastapi; print(fastapi.__version__)"
+   ```
+
+   ```bash
+   0.111.0
+   ```
+
+</Steps>
+
+## Your First Application
+
+Create `main.py` in your project root:
+
+```python
+# main.py
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+app = FastAPI(
+    title="My API",
+    description="A production-ready FastAPI application",
+    version="0.1.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
+
+
+class Item(BaseModel):
+    name: str
+    price: float
+    is_offer: bool = False
+
+
+@app.get("/")
+async def root():
+    """Health check / root endpoint."""
+    return {"status": "ok", "message": "Welcome to My API"}
+
+
+@app.get("/items/{item_id}")
+async def read_item(item_id: int):
+    """Retrieve a single item by ID."""
+    return {"item_id": item_id}
+
+
+@app.post("/items/", status_code=201)
+async def create_item(item: Item):
+    """Create a new item."""
+    return {"created": item.model_dump()}
+```
+
+## Running the Development Server
+
+```bash
+uvicorn main:app --reload --port 8000
+```
+
+You should see:
+
+```bash
+INFO:     Will watch for changes in these directories: ['/your/project']
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [12345] using WatchFiles
+INFO:     Started server process [12346]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+```
+
+The `--reload` flag watches for file changes and restarts automatically — never use it in production.
+
+Test your endpoints:
+
+```bash
+curl http://localhost:8000/
+```
+
+```json
+{"status": "ok", "message": "Welcome to My API"}
+```
+
+```bash
+curl -X POST http://localhost:8000/items/ \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Widget", "price": 9.99, "is_offer": true}'
+```
+
+```json
+{"created": {"name": "Widget", "price": 9.99, "is_offer": true}}
+```
+
+## Interactive API Documentation
+
+FastAPI automatically serves two interactive documentation UIs — no configuration required:
+
+<Tabs>
+  <TabItem label="Swagger UI (/docs)">
+
+Open [http://localhost:8000/docs](http://localhost:8000/docs) in your browser.
+
+Swagger UI provides:
+- A full list of all routes, grouped by tags
+- Inline request body schemas with example values
+- A **"Try it out"** button to execute requests directly in the browser
+- Response schema and example response documentation
+
+  </TabItem>
+  <TabItem label="ReDoc (/redoc)">
+
+Open [http://localhost:8000/redoc](http://localhost:8000/redoc) in your browser.
+
+ReDoc provides:
+- A clean, three-panel documentation layout popular in enterprise environments
+- Detailed schema viewer with nested model expansion
+- Search across all endpoints
+- Printable / share-friendly format
+
+  </TabItem>
+  <TabItem label="OpenAPI JSON (/openapi.json)">
+
+The raw OpenAPI 3.0 schema is available at `/openapi.json`:
+
+```bash
+curl http://localhost:8000/openapi.json | python -m json.tool
+```
+
+```json
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "My API",
+    "description": "A production-ready FastAPI application",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/": {
+      "get": {
+        "summary": "Root",
+        "description": "Health check / root endpoint.",
+        "operationId": "root__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {"application/json": {"schema": {}}}
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Use this endpoint to generate client SDKs with `openapi-generator-cli`.
+
+  </TabItem>
+</Tabs>
+
+## Recommended Project Structure
+
+As your application grows, a flat `main.py` becomes unmanageable. Here is the recommended layout for a production FastAPI project:
+
+```bash
+my_api/
+├── main.py                  # App entry point — creates FastAPI instance
+├── pyproject.toml           # Dependencies and project metadata
+├── .env                     # Local environment variables (never commit!)
+├── .env.example             # Template with all required keys
+├── alembic.ini              # Alembic migration config
+├── alembic/
+│   ├── env.py
+│   └── versions/
+├── app/
+│   ├── __init__.py
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── config.py        # Pydantic settings (reads .env)
+│   │   ├── security.py      # JWT helpers, password hashing
+│   │   └── logging.py       # Logging configuration
+│   ├── db/
+│   │   ├── __init__.py
+│   │   ├── base.py          # SQLAlchemy Base declarative base
+│   │   ├── session.py       # Async engine + sessionmaker
+│   │   └── models/          # SQLAlchemy ORM models
+│   │       ├── user.py
+│   │       └── item.py
+│   ├── schemas/             # Pydantic request/response schemas
+│   │   ├── user.py
+│   │   └── item.py
+│   ├── dependencies/        # Shared Depends() functions
+│   │   ├── __init__.py
+│   │   ├── auth.py          # get_current_user
+│   │   └── db.py            # get_async_db
+│   └── routers/             # APIRouter modules
+│       ├── __init__.py
+│       ├── users.py
+│       ├── items.py
+│       └── auth.py
+└── tests/
+    ├── conftest.py          # pytest fixtures
+    ├── test_users.py
+    └── test_items.py
+```
+
+## Configuration with pydantic-settings
+
+Manage all configuration through environment variables with type validation:
+
+```python
+# app/core/config.py
+from pydantic import AnyHttpUrl, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+    )
+
+    # Application
+    APP_NAME: str = "My API"
+    APP_VERSION: str = "0.1.0"
+    DEBUG: bool = False
+    ENVIRONMENT: str = "development"
+
+    # Server
+    HOST: str = "0.0.0.0"
+    PORT: int = 8000
+
+    # Database
+    DATABASE_URL: str = "sqlite+aiosqlite:///./dev.db"
+
+    # Security
+    SECRET_KEY: str = "change-me-in-production-use-openssl-rand-hex-32"
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
+    # CORS
+    ALLOWED_ORIGINS: list[str] = ["http://localhost:3000"]
+
+    @field_validator("ALLOWED_ORIGINS", mode="before")
+    @classmethod
+    def parse_origins(cls, v: str | list[str]) -> list[str]:
+        if isinstance(v, str):
+            return [origin.strip() for origin in v.split(",")]
+        return v
+
+
+# Singleton — import this everywhere instead of re-instantiating
+settings = Settings()
+```
+
+Create your `.env` file:
+
+```bash
+# .env — never commit this file
+APP_NAME="My Production API"
+ENVIRONMENT=development
+DEBUG=true
+DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/mydb
+SECRET_KEY=your-super-secret-key-generate-with-openssl
+ALLOWED_ORIGINS=http://localhost:3000,https://myfrontend.com
+```
+
+Create `.env.example` for teammates:
+
+```bash
+# .env.example — commit this file
+APP_NAME=My API
+ENVIRONMENT=development
+DEBUG=false
+DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/mydb
+SECRET_KEY=replace-with-openssl-rand-hex-32
+ALLOWED_ORIGINS=http://localhost:3000
+```
+
+:::caution[Never Commit .env]
+Always add `.env` to `.gitignore`. Committing secrets is a critical security vulnerability. Use `.env.example` to document required variables without values. In production, set environment variables directly in your hosting platform (Railway, Render, AWS ECS task definition, Kubernetes secrets, etc.).
+:::
+
+Use settings in your application:
+
+```python
+# main.py
+from app.core.config import settings
+
+app = FastAPI(
+    title=settings.APP_NAME,
+    version=settings.APP_VERSION,
+    docs_url="/docs" if settings.DEBUG else None,   # Disable docs in production
+    redoc_url="/redoc" if settings.DEBUG else None,
+)
+```
+
+## Lifespan Context Manager
+
+The `lifespan` context manager handles startup and shutdown events, replacing the deprecated `@app.on_event` decorators:
+
+```python
+# main.py
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
+
+import logging
+from fastapi import FastAPI
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from app.core.config import settings
+from app.db.session import engine
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Application lifespan — runs once on startup and shutdown."""
+    # ── Startup ──────────────────────────────────────────────────────────────
+    logger.info("Starting up %s v%s", settings.APP_NAME, settings.APP_VERSION)
+
+    # Verify database connectivity
+    async with engine.connect() as conn:
+        await conn.execute(text("SELECT 1"))
+    logger.info("Database connection verified")
+
+    # Warm up any connection pools, caches, or ML models here
+    yield
+
+    # ── Shutdown ─────────────────────────────────────────────────────────────
+    logger.info("Shutting down — closing database connections")
+    await engine.dispose()
+    logger.info("Shutdown complete")
+
+
+app = FastAPI(
+    title=settings.APP_NAME,
+    version=settings.APP_VERSION,
+    lifespan=lifespan,
+)
+```
+
+## Logging Configuration
+
+Set up structured logging early, before the app starts:
+
+```python
+# app/core/logging.py
+import logging
+import sys
+from app.core.config import settings
+
+
+def configure_logging() -> None:
+    """Configure root logger with appropriate level and format."""
+    log_level = logging.DEBUG if settings.DEBUG else logging.INFO
+
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s | %(levelname)-8s | %(name)s:%(lineno)d | %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
+    # Silence noisy third-party loggers
+    logging.getLogger("sqlalchemy.engine").setLevel(
+        logging.INFO if settings.DEBUG else logging.WARNING
+    )
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+```
+
+Call it at the top of `main.py`, before the app is created:
+
+```python
+# main.py
+from app.core.logging import configure_logging
+
+configure_logging()  # Must be called before anything else logs
+
+from app.main_app import app  # noqa: E402 — intentional late import
+
+__all__ = ["app"]
+```
+
+## Wiring Everything Together
+
+The complete `main.py` entry point:
+
+```python
+# main.py
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
+import logging
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
+
+from app.core.config import settings
+from app.core.logging import configure_logging
+from app.db.session import engine
+from app.routers import users, items, auth
+
+configure_logging()
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    logger.info("Startup: %s %s", settings.APP_NAME, settings.APP_VERSION)
+    async with engine.connect() as conn:
+        await conn.execute(text("SELECT 1"))
+    logger.info("Database connection OK")
+    yield
+    await engine.dispose()
+    logger.info("Shutdown complete")
+
+
+app = FastAPI(
+    title=settings.APP_NAME,
+    version=settings.APP_VERSION,
+    lifespan=lifespan,
+    docs_url="/docs" if settings.DEBUG else None,
+    redoc_url="/redoc" if settings.DEBUG else None,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(auth.router, prefix="/auth", tags=["auth"])
+app.include_router(users.router, prefix="/users", tags=["users"])
+app.include_router(items.router, prefix="/items", tags=["items"])
+
+
+@app.get("/health", tags=["system"])
+async def health_check():
+    return {"status": "healthy", "version": settings.APP_VERSION}
+```
+
+## Next Steps
+
+<CardGrid>
+  <Card title="Routing" icon="list-format">
+    Learn path operations, query parameters, APIRouter, response models, and background tasks.
+  </Card>
+  <Card title="Request & Response" icon="document">
+    Master Pydantic validation, file uploads, custom exceptions, and response formatting.
+  </Card>
+  <Card title="Dependency Injection" icon="puzzle">
+    Use `Depends()` for database sessions, auth, and shared logic across your routes.
+  </Card>
+  <Card title="Database" icon="setting">
+    Integrate SQLAlchemy 2.0 async and manage schema evolution with Alembic.
+  </Card>
+</CardGrid>

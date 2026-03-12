@@ -1,0 +1,494 @@
+---
+title: Deployment
+description: Deploy React Native apps to the App Store and Play Store using EAS Build, configure signing credentials, publish OTA updates, and set up CI/CD with environment variables.
+sidebar:
+  order: 8
+tags: [react, mobile]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Shipping a React Native app involves building native binaries, signing them with platform certificates, and submitting through the respective app stores. EAS (Expo Application Services) simplifies this dramatically.
+
+## EAS Build Setup
+
+<Steps>
+
+1. **Install EAS CLI**
+
+   ```bash
+   npm install -g eas-cli
+   eas login
+   ```
+
+2. **Initialize EAS in your project**
+
+   ```bash
+   eas build:configure
+   ```
+
+   This creates `eas.json` in your project root.
+
+3. **Configure your `eas.json`**
+
+   ```json
+   {
+     "cli": {
+       "version": ">= 10.0.0",
+       "appVersionSource": "remote"
+     },
+     "build": {
+       "development": {
+         "developmentClient": true,
+         "distribution": "internal",
+         "ios": {
+           "simulator": true
+         },
+         "android": {
+           "buildType": "apk",
+           "gradleCommand": ":app:assembleDebug"
+         },
+         "env": {
+           "EXPO_PUBLIC_API_URL": "https://dev-api.myapp.com"
+         }
+       },
+       "preview": {
+         "distribution": "internal",
+         "ios": {
+           "resourceClass": "m-medium"
+         },
+         "android": {
+           "buildType": "apk"
+         },
+         "env": {
+           "EXPO_PUBLIC_API_URL": "https://staging-api.myapp.com"
+         }
+       },
+       "production": {
+         "autoIncrement": true,
+         "ios": {
+           "resourceClass": "m-medium"
+         },
+         "android": {
+           "buildType": "app-bundle"
+         },
+         "env": {
+           "EXPO_PUBLIC_API_URL": "https://api.myapp.com"
+         }
+       }
+     },
+     "submit": {
+       "production": {
+         "ios": {
+           "appleId": "developer@myapp.com",
+           "ascAppId": "1234567890",
+           "appleTeamId": "ABCDE12345"
+         },
+         "android": {
+           "serviceAccountKeyPath": "./google-service-account.json",
+           "track": "internal"
+         }
+       }
+     }
+   }
+   ```
+
+4. **Build for all platforms**
+
+   ```bash
+   # Development build (with dev client)
+   eas build --profile development --platform all
+
+   # Preview / internal testing
+   eas build --profile preview --platform all
+
+   # Production
+   eas build --profile production --platform all
+   ```
+
+</Steps>
+
+## app.json / app.config.js Configuration
+
+```json
+{
+  "expo": {
+    "name": "My App",
+    "slug": "my-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.mycompany.myapp",
+      "buildNumber": "1",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Allow camera access to take profile photos.",
+        "NSLocationWhenInUseUsageDescription": "Allow location access to find nearby events.",
+        "NSPhotoLibraryUsageDescription": "Allow photo access to upload images."
+      },
+      "entitlements": {
+        "com.apple.developer.associated-domains": ["applinks:myapp.com"]
+      }
+    },
+    "android": {
+      "package": "com.mycompany.myapp",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0066FF"
+      },
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.VIBRATE"
+      ],
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [{ "scheme": "https", "host": "myapp.com" }],
+          "category": ["BROWSABLE", "DEFAULT"]
+        }
+      ]
+    },
+    "plugins": [
+      "expo-router",
+      "expo-camera",
+      "expo-location",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#0066FF",
+          "sounds": ["./assets/notification.wav"]
+        }
+      ]
+    ],
+    "extra": {
+      "eas": { "projectId": "your-eas-project-id" }
+    }
+  }
+}
+```
+
+### Dynamic Configuration (app.config.ts)
+
+```typescript
+// app.config.ts
+import type { ConfigContext, ExpoConfig } from 'expo/config';
+
+export default ({ config }: ConfigContext): ExpoConfig => ({
+  ...config,
+  name: process.env.APP_ENV === 'production' ? 'My App' : 'My App (Dev)',
+  ios: {
+    ...config.ios,
+    bundleIdentifier:
+      process.env.APP_ENV === 'production'
+        ? 'com.mycompany.myapp'
+        : 'com.mycompany.myapp.dev',
+  },
+  android: {
+    ...config.android,
+    package:
+      process.env.APP_ENV === 'production'
+        ? 'com.mycompany.myapp'
+        : 'com.mycompany.myapp.dev',
+  },
+});
+```
+
+## iOS Signing
+
+### Certificates and Profiles
+
+iOS apps require:
+- **Distribution Certificate** — identifies your developer account
+- **Provisioning Profile** — links the certificate to your app's bundle ID and devices
+
+EAS manages all of this automatically:
+
+```bash
+# EAS handles certificates automatically
+eas credentials
+
+# View and manage credentials
+eas credentials --platform ios
+```
+
+```bash
+# Build for TestFlight
+eas build --profile preview --platform ios
+
+# Submit to TestFlight
+eas submit --profile production --platform ios
+```
+
+:::tip[Let EAS Manage Credentials]
+Unless you have an existing CI setup that manages certificates manually, always let EAS handle iOS credentials. It stores them securely and renews them automatically.
+:::
+
+## Android Keystore
+
+Android apps must be signed with a keystore for release. Generate one:
+
+```bash
+# EAS generates and stores the keystore securely
+eas credentials --platform android
+
+# Or generate manually
+keytool -genkey -v \
+  -keystore my-app.keystore \
+  -alias my-app \
+  -keyalg RSA \
+  -keysize 2048 \
+  -validity 10000
+```
+
+:::caution[Never Lose Your Keystore]
+You cannot update an Android app if you lose its signing keystore. Store it securely in a password manager and back it up to multiple locations. EAS Credentials stores a copy for you.
+:::
+
+## OTA Updates with EAS Update
+
+EAS Update lets you push JavaScript/asset changes to users without going through the app stores.
+
+```bash
+npx expo install expo-updates
+eas update:configure
+```
+
+```json
+// eas.json — add update channels to build profiles
+{
+  "build": {
+    "development": {
+      "channel": "development"
+    },
+    "preview": {
+      "channel": "preview"
+    },
+    "production": {
+      "channel": "production"
+    }
+  }
+}
+```
+
+```bash
+# Publish an OTA update to the production channel
+eas update --branch production --message "Fix login screen crash"
+
+# Publish to preview (for testers)
+eas update --branch preview --message "New search feature"
+
+# Auto-update in CI after merge to main
+eas update --auto
+```
+
+```typescript
+// Check for and apply updates manually in your app
+import * as Updates from 'expo-updates';
+
+async function checkForUpdate() {
+  if (__DEV__) return; // Only check in production builds
+
+  try {
+    const update = await Updates.checkForUpdateAsync();
+    if (update.isAvailable) {
+      await Updates.fetchUpdateAsync();
+      await Updates.reloadAsync(); // Restart to apply
+    }
+  } catch (error) {
+    console.error('Update check failed:', error);
+  }
+}
+```
+
+## Environment Variables
+
+React Native / Expo handles environment variables differently from Node.js:
+
+```bash
+# .env.local (never commit to git)
+EXPO_PUBLIC_API_URL=https://api.myapp.com
+EXPO_PUBLIC_MAPS_KEY=your-maps-key
+SECRET_API_KEY=never-exposed-to-client
+```
+
+```typescript
+// EXPO_PUBLIC_ prefix = exposed to the app bundle (client-safe only)
+const apiUrl = process.env.EXPO_PUBLIC_API_URL;
+
+// Variables without EXPO_PUBLIC_ are only available during build time
+// Use them in app.config.ts, not in component code
+```
+
+```bash
+# Pass secrets via EAS Build secrets (stored encrypted, not in code)
+eas secret:create --name SECRET_API_KEY --value "my-secret"
+eas secret:list
+```
+
+## iOS App Store Submission Checklist
+
+Before submitting to App Store Connect:
+
+- [ ] App icon provided at all required resolutions (EAS generates these from `icon.png`)
+- [ ] Screenshots for iPhone 6.7", 6.5", 5.5" and iPad 12.9" (minimum)
+- [ ] Privacy policy URL provided
+- [ ] App description, keywords, category filled in
+- [ ] All usage description strings in `Info.plist` are user-friendly and accurate
+- [ ] Content rating questionnaire completed
+- [ ] In-app purchases set up (if applicable)
+- [ ] App Review information: demo account credentials if login is required
+- [ ] Export compliance: does app use encryption? (almost always yes — select standard encryption exemption)
+- [ ] Build uploaded via EAS or Transporter
+- [ ] TestFlight beta test passed with real users
+
+```bash
+# Build + submit in one command
+eas build --profile production --platform ios --auto-submit
+```
+
+## Play Store Submission Checklist
+
+Before submitting to Google Play Console:
+
+- [ ] Signed AAB (`.aab`) generated via EAS production build
+- [ ] Feature graphic (1024×500 px)
+- [ ] Screenshots for phone, 7" tablet, 10" tablet
+- [ ] Short description (80 chars) and full description
+- [ ] Content rating questionnaire completed
+- [ ] Privacy policy URL provided
+- [ ] Target audience and content settings configured
+- [ ] Data safety section completed (required)
+- [ ] Testing: internal → closed → open → production tracks
+- [ ] Review for policy compliance (ads, user data, etc.)
+
+```bash
+# Build + submit to Play Store internal track
+eas build --profile production --platform android --auto-submit
+```
+
+## CI/CD with GitHub Actions
+
+```yaml
+# .github/workflows/eas-build.yml
+name: EAS Build & Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup Expo
+        uses: expo/expo-github-action@v8
+        with:
+          expo-version: latest
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Publish OTA update (PR preview)
+        if: github.event_name == 'pull_request'
+        run: eas update --branch pr-${{ github.event.number }} --message "PR preview"
+
+      - name: Build and submit (production)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          eas build --profile production --platform all --non-interactive
+          eas update --branch production --message "${{ github.event.head_commit.message }}"
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+```
+
+## Fastlane Alternative
+
+For teams already using Fastlane (common in native iOS/Android shops):
+
+```ruby
+# Fastfile (iOS lane)
+lane :beta do
+  increment_build_number(xcodeproj: 'ios/MyApp.xcodeproj')
+  build_ios_app(
+    scheme: 'MyApp',
+    workspace: 'ios/MyApp.xcworkspace',
+    configuration: 'Release'
+  )
+  upload_to_testflight(
+    api_key_path: './fastlane/app_store_connect_api_key.json',
+    skip_waiting_for_build_processing: true
+  )
+end
+
+# Fastfile (Android lane)
+lane :deploy do
+  gradle(
+    task: 'bundle',
+    build_type: 'Release',
+    project_dir: 'android/'
+  )
+  upload_to_play_store(
+    track: 'internal',
+    json_key: './fastlane/google-play-key.json',
+    aab: 'android/app/build/outputs/bundle/release/app-release.aab'
+  )
+end
+```
+
+:::tip[Recommended Deployment Workflow]
+For most teams, the recommended workflow is:
+
+1. Development → EAS development builds on device
+2. PR → EAS preview build distributed via QR code
+3. Merge → EAS Update OTA push (instant, no store review)
+4. Release → EAS production build → App Store + Play Store
+
+Reserve full store releases for native code changes. Use OTA updates for JS/UI changes.
+:::
+
+## App Version Management
+
+```typescript
+// Automatically increment build numbers
+// eas.json: "autoIncrement": true in production profile
+
+// Read version info at runtime
+import * as Application from 'expo-application';
+
+const version = Application.nativeApplicationVersion;   // e.g., "1.2.0"
+const build = Application.nativeBuildVersion;           // e.g., "42"
+const bundleId = Application.applicationId;             // e.g., "com.mycompany.myapp"
+```
+
+```bash
+# Manually set version
+eas build:version:set --platform ios --version 1.2.0
+eas build:version:set --platform android --version-code 42
+```

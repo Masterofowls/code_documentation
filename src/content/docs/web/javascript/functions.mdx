@@ -1,0 +1,593 @@
+---
+title: JavaScript Functions
+description: Master JavaScript functions — declarations, expressions, arrow functions, closures, higher-order patterns, currying, memoization, generators, iterators, and tagged template literals.
+sidebar:
+  order: 4
+tags: [javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Functions are first-class citizens in JavaScript — they can be assigned to variables, passed as arguments, returned from other functions, and stored in data structures. This makes JavaScript a naturally functional language.
+
+## Function Declarations vs Expressions
+
+```js
+// Declaration — hoisted, callable anywhere in the scope
+console.log(square(5)); // output: 25 (called before declaration — works!)
+function square(n) {
+  return n * n;
+}
+
+// Expression — not hoisted
+console.log(cube(3)); // ReferenceError: Cannot access 'cube' before initialization
+const cube = function(n) {
+  return n * n * n;
+};
+
+// Named function expression — name is only available inside the function
+const factorial = function fact(n) {
+  return n <= 1 ? 1 : n * fact(n - 1); // 'fact' usable here
+};
+console.log(factorial(5)); // output: 120
+console.log(typeof fact);  // output: undefined — not in outer scope
+```
+
+## Arrow Functions
+
+Arrow functions provide a concise syntax and — crucially — **do not have their own `this` binding**.
+
+```js
+// Regular function
+const double = function(n) { return n * 2; };
+
+// Arrow function (concise body — single expression, implicit return)
+const double = n => n * 2;
+const add = (a, b) => a + b;
+const greet = () => 'Hello!';
+
+// Block body — explicit return required
+const clamp = (value, min, max) => {
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
+};
+
+// Return an object literal — wrap in parentheses to avoid parsing as block
+const makeUser = (name, age) => ({ name, age });
+console.log(makeUser('Alice', 30)); // output: { name: 'Alice', age: 30 }
+```
+
+### Arrow Functions and `this`
+
+This is the most important difference between arrow and regular functions:
+
+```js
+const timer = {
+  name: 'Countdown',
+  seconds: 3,
+
+  // Regular function — `this` is the object that calls the method
+  startRegular() {
+    setInterval(function() {
+      // `this` here is `undefined` (strict) or `window` (sloppy) — NOT the timer object
+      console.log(this?.name); // output: undefined
+    }, 1000);
+  },
+
+  // Arrow function — `this` is inherited from the enclosing lexical scope
+  startArrow() {
+    setInterval(() => {
+      // `this` here IS the timer object (captured from startArrow's scope)
+      console.log(this.name);  // output: Countdown
+    }, 1000);
+  },
+};
+
+// Arrow functions as object methods — problematic!
+const obj = {
+  value: 42,
+  getValue: () => this.value, // `this` is the outer scope (module/window), NOT obj
+};
+console.log(obj.getValue()); // output: undefined — use regular function for methods!
+
+// Class methods vs arrow functions
+class Counter {
+  count = 0;
+
+  // Regular method — `this` changes based on how it's called
+  incrementRegular() {
+    this.count++;
+  }
+
+  // Arrow function as class field — `this` is always the instance (useful for event handlers)
+  incrementArrow = () => {
+    this.count++;
+  };
+}
+
+const counter = new Counter();
+const fn = counter.incrementRegular;
+fn(); // `this` is undefined — won't work!
+
+const fn2 = counter.incrementArrow;
+fn2(); // `this` is still the counter instance — works!
+```
+
+:::tip[When to Use Arrow vs Regular]
+Use **arrow functions** for callbacks, array methods, and when you need to capture `this` from the surrounding scope.  
+Use **regular functions** for object methods, constructors, and when you need a dynamic `this`.
+:::
+
+## Default Parameters
+
+```js
+// Basic default values
+function greet(name = 'World', punctuation = '!') {
+  return `Hello, ${name}${punctuation}`;
+}
+console.log(greet());              // output: Hello, World!
+console.log(greet('Alice'));       // output: Hello, Alice!
+console.log(greet('Bob', '.'));    // output: Hello, Bob.
+console.log(greet(undefined, '?')); // output: Hello, World? (undefined triggers default)
+console.log(greet(null, '?'));      // output: Hello, null?  (null does NOT trigger default)
+
+// Defaults can reference earlier parameters
+function createRange(start = 0, end = start + 10) {
+  return { start, end };
+}
+console.log(createRange());     // output: { start: 0, end: 10 }
+console.log(createRange(5));    // output: { start: 5, end: 15 }
+
+// Defaults can be expressions or function calls
+function getId(id = crypto.randomUUID()) {
+  return id;
+}
+console.log(getId());  // output: 'a1b2c3d4-...' (random UUID each call)
+
+// Destructured parameters with defaults
+function createUser({ name = 'Anonymous', role = 'user', active = true } = {}) {
+  return { name, role, active };
+}
+console.log(createUser());                // output: { name: 'Anonymous', role: 'user', active: true }
+console.log(createUser({ name: 'Bob' })); // output: { name: 'Bob', role: 'user', active: true }
+```
+
+## Rest Parameters
+
+```js
+// Collect remaining arguments into an array
+function sum(...numbers) {
+  return numbers.reduce((total, n) => total + n, 0);
+}
+console.log(sum(1, 2, 3));         // output: 6
+console.log(sum(1, 2, 3, 4, 5));   // output: 15
+console.log(sum());                // output: 0
+
+// Rest must be the last parameter
+function log(level, ...messages) {
+  console.log(`[${level}]`, messages.join(' '));
+}
+log('INFO', 'Server', 'started', 'on', 'port', '3000');
+// output: [INFO] Server started on port 3000
+
+// arguments object vs rest (arguments is NOT available in arrow functions)
+function oldStyle() {
+  return Array.from(arguments).reduce((a, b) => a + b, 0);
+}
+const newStyle = (...args) => args.reduce((a, b) => a + b, 0);
+```
+
+## IIFEs (Immediately Invoked Function Expressions)
+
+```js
+// Classic IIFE pattern — creates a private scope
+(function() {
+  const privateVar = 'I am private';
+  console.log(privateVar); // output: I am private
+})();
+
+console.log(typeof privateVar); // output: undefined
+
+// Arrow function IIFE
+(() => {
+  const secret = 42;
+  console.log(secret); // output: 42
+})();
+
+// IIFE with arguments and return value
+const result = (function(a, b) {
+  return a * b;
+})(6, 7);
+console.log(result); // output: 42
+
+// Module pattern using IIFE
+const counter = (() => {
+  let count = 0; // private
+
+  return {
+    increment: () => ++count,
+    decrement: () => --count,
+    getCount: () => count,
+    reset: () => { count = 0; },
+  };
+})();
+
+counter.increment();
+counter.increment();
+counter.increment();
+console.log(counter.getCount()); // output: 3
+counter.reset();
+console.log(counter.getCount()); // output: 0
+```
+
+## Closures
+
+A closure is a function that **remembers** the variables from its enclosing scope even after that scope has finished executing.
+
+```js
+function makeCounter(start = 0) {
+  let count = start;  // `count` is closed over
+
+  return {
+    increment() { return ++count; },
+    decrement() { return --count; },
+    reset() { count = start; return count; },
+    value() { return count; },
+  };
+}
+
+const counter = makeCounter(10);
+console.log(counter.increment()); // output: 11
+console.log(counter.increment()); // output: 12
+console.log(counter.decrement()); // output: 11
+console.log(counter.value());     // output: 11
+
+const counter2 = makeCounter();
+console.log(counter2.value()); // output: 0 — independent closure!
+
+// Closure for data privacy
+function createBankAccount(initialBalance) {
+  let balance = initialBalance;
+  const history = [];
+
+  return {
+    deposit(amount) {
+      if (amount <= 0) throw new RangeError('Amount must be positive');
+      balance += amount;
+      history.push({ type: 'deposit', amount, balance });
+      return balance;
+    },
+    withdraw(amount) {
+      if (amount > balance) throw new Error('Insufficient funds');
+      balance -= amount;
+      history.push({ type: 'withdrawal', amount, balance });
+      return balance;
+    },
+    getBalance: () => balance,
+    getHistory: () => [...history], // return copy, not reference
+  };
+}
+
+const account = createBankAccount(1000);
+account.deposit(500);
+account.withdraw(200);
+console.log(account.getBalance()); // output: 1300
+```
+
+## Higher-Order Functions
+
+A higher-order function is one that accepts functions as arguments or returns a function.
+
+```js
+// Functions as arguments
+function applyTwice(fn, value) {
+  return fn(fn(value));
+}
+console.log(applyTwice(x => x + 3, 10)); // output: 16  (10+3=13, 13+3=16)
+console.log(applyTwice(x => x * 2, 3));  // output: 12
+
+// Functions as return values
+function multiplier(factor) {
+  return (number) => number * factor;
+}
+const double = multiplier(2);
+const triple = multiplier(3);
+console.log(double(5));  // output: 10
+console.log(triple(5));  // output: 15
+
+// Function composition
+const compose = (...fns) => (x) => fns.reduceRight((acc, fn) => fn(acc), x);
+const pipe = (...fns) => (x) => fns.reduce((acc, fn) => fn(acc), x);
+
+const transform = pipe(
+  x => x * 2,          // 5 → 10
+  x => x + 1,          // 10 → 11
+  x => x.toString(),   // 11 → '11'
+  x => `Result: ${x}`, // '11' → 'Result: 11'
+);
+console.log(transform(5)); // output: Result: 11
+```
+
+## Currying
+
+Currying transforms a function that takes multiple arguments into a sequence of functions each taking one argument.
+
+```js
+// Manual currying
+function add(a) {
+  return function(b) {
+    return a + b;
+  };
+}
+const add5 = add(5);
+console.log(add5(3));  // output: 8
+console.log(add5(10)); // output: 15
+
+// Arrow function curry
+const multiply = a => b => a * b;
+const double = multiply(2);
+const triple = multiply(3);
+console.log(double(7)); // output: 14
+console.log(triple(7)); // output: 21
+
+// Generic curry utility
+function curry(fn) {
+  return function curried(...args) {
+    if (args.length >= fn.length) {
+      return fn.apply(this, args);
+    }
+    return function(...args2) {
+      return curried.apply(this, args.concat(args2));
+    };
+  };
+}
+
+const curriedAdd = curry((a, b, c) => a + b + c);
+console.log(curriedAdd(1)(2)(3)); // output: 6
+console.log(curriedAdd(1, 2)(3)); // output: 6
+console.log(curriedAdd(1)(2, 3)); // output: 6
+console.log(curriedAdd(1, 2, 3)); // output: 6
+
+// Practical currying example
+const hasRole = curry((role, user) => user.roles.includes(role));
+const isAdmin = hasRole('admin');
+const isModerator = hasRole('moderator');
+
+const users = [
+  { name: 'Alice', roles: ['admin', 'user'] },
+  { name: 'Bob', roles: ['user'] },
+  { name: 'Carol', roles: ['moderator', 'user'] },
+];
+
+console.log(users.filter(isAdmin).map(u => u.name));     // output: ['Alice']
+console.log(users.filter(isModerator).map(u => u.name)); // output: ['Carol']
+```
+
+## Memoization
+
+Memoization caches the results of expensive function calls.
+
+```js
+function memoize(fn) {
+  const cache = new Map();
+
+  return function(...args) {
+    const key = JSON.stringify(args);
+    if (cache.has(key)) {
+      console.log('Cache hit:', key);
+      return cache.get(key);
+    }
+    const result = fn.apply(this, args);
+    cache.set(key, result);
+    return result;
+  };
+}
+
+// Expensive fibonacci without memoization
+function slowFib(n) {
+  if (n <= 1) return n;
+  return slowFib(n - 1) + slowFib(n - 2);
+}
+
+// Memoized version
+const fib = memoize(function(n) {
+  if (n <= 1) return n;
+  return fib(n - 1) + fib(n - 2);
+});
+
+console.time('fib');
+console.log(fib(40)); // output: 102334155
+console.timeEnd('fib'); // output: fib: ~0.1ms (vs seconds without memoization)
+
+console.log(fib(40)); // output: 102334155 (output: Cache hit: [40])
+```
+
+## `call`, `apply`, and `bind`
+
+```js
+function greet(greeting, punctuation) {
+  return `${greeting}, ${this.name}${punctuation}`;
+}
+
+const alice = { name: 'Alice' };
+const bob = { name: 'Bob' };
+
+// call — invoke with explicit `this`, args spread out
+console.log(greet.call(alice, 'Hello', '!'));  // output: Hello, Alice!
+console.log(greet.call(bob, 'Hi', '.'));       // output: Hi, Bob.
+
+// apply — invoke with explicit `this`, args as array
+console.log(greet.apply(alice, ['Good morning', '?'])); // output: Good morning, Alice?
+
+// bind — returns NEW function with `this` permanently set
+const greetAlice = greet.bind(alice);
+console.log(greetAlice('Hey', '~'));  // output: Hey, Alice~
+
+// Partial application with bind
+const helloAlice = greet.bind(alice, 'Hello'); // pre-fills greeting
+console.log(helloAlice('!'));  // output: Hello, Alice!
+console.log(helloAlice('.')); // output: Hello, Alice.
+
+// Practical: borrowing array methods
+const arrayLike = { 0: 'a', 1: 'b', 2: 'c', length: 3 };
+const arr = Array.prototype.slice.call(arrayLike);
+console.log(arr); // output: ['a', 'b', 'c']
+```
+
+## Generator Functions
+
+Generators are functions that can pause execution and resume later. They use `function*` and `yield`.
+
+```js
+function* counter(start = 0, step = 1) {
+  while (true) {
+    yield start;
+    start += step;
+  }
+}
+
+const gen = counter(0, 2);
+console.log(gen.next()); // output: { value: 0, done: false }
+console.log(gen.next()); // output: { value: 2, done: false }
+console.log(gen.next()); // output: { value: 4, done: false }
+
+// Finite generator
+function* range(start, end, step = 1) {
+  for (let i = start; i < end; i += step) {
+    yield i;
+  }
+}
+
+console.log([...range(0, 10, 2)]); // output: [0, 2, 4, 6, 8]
+
+// Generators are iterables
+for (const n of range(1, 5)) {
+  console.log(n); // output: 1, 2, 3, 4
+}
+
+// Two-way communication with generators
+function* accumulator() {
+  let total = 0;
+  while (true) {
+    const input = yield total; // yield sends out current total, receives next input
+    if (input === null) break;
+    total += input;
+  }
+  return total;
+}
+
+const acc = accumulator();
+acc.next();     // start the generator
+acc.next(10);   // sends 10 in, total = 10
+acc.next(20);   // sends 20 in, total = 30
+const { value } = acc.next(5); // sends 5 in, total = 35
+console.log(value); // output: 35
+```
+
+## Symbol.iterator and Custom Iterables
+
+Any object with a `[Symbol.iterator]()` method is iterable and can be used in `for...of`, spread, and destructuring.
+
+```js
+class NumberRange {
+  constructor(start, end, step = 1) {
+    this.start = start;
+    this.end = end;
+    this.step = step;
+  }
+
+  [Symbol.iterator]() {
+    let current = this.start;
+    const { end, step } = this;
+
+    return {
+      next() {
+        if (current <= end) {
+          const value = current;
+          current += step;
+          return { value, done: false };
+        }
+        return { value: undefined, done: true };
+      },
+
+      // Make the iterator itself iterable
+      [Symbol.iterator]() { return this; },
+    };
+  }
+}
+
+const range = new NumberRange(1, 10, 2);
+console.log([...range]);              // output: [1, 3, 5, 7, 9]
+
+for (const n of range) {
+  console.log(n);                     // output: 1, 3, 5, 7, 9
+}
+
+const [first, second] = range;
+console.log(first, second);           // output: 1 3
+
+// Lazy infinite sequence
+function* naturals() {
+  let n = 1;
+  while (true) yield n++;
+}
+
+function* take(n, iterable) {
+  let count = 0;
+  for (const item of iterable) {
+    if (count++ >= n) break;
+    yield item;
+  }
+}
+
+console.log([...take(5, naturals())]); // output: [1, 2, 3, 4, 5]
+```
+
+## Tagged Template Literals
+
+A tag is a function that intercepts a template literal, receiving the string parts and interpolated values separately.
+
+```js
+// Basic tag function
+function tag(strings, ...values) {
+  console.log(strings); // array of string parts
+  console.log(values);  // array of interpolated values
+  return strings.reduce((result, str, i) => result + str + (values[i] ?? ''), '');
+}
+
+const name = 'World';
+const count = 42;
+tag`Hello ${name}, you have ${count} messages.`;
+// output: ['Hello ', ', you have ', ' messages.']
+// output: ['World', 42]
+
+// Safe HTML escaping
+function safeHtml(strings, ...values) {
+  const escaped = values.map(v =>
+    String(v)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+  );
+  return strings.reduce((result, str, i) => result + str + (escaped[i] ?? ''), '');
+}
+
+const userInput = '<script>alert("XSS")</script>';
+const html = safeHtml`<p>User said: ${userInput}</p>`;
+console.log(html);
+// output: <p>User said: &lt;script&gt;alert(&quot;XSS&quot;)&lt;/script&gt;</p>
+
+// SQL parameterized queries (concept)
+function sql(strings, ...values) {
+  const query = strings.reduce((q, str, i) => q + str + (values[i] !== undefined ? `$${i}` : ''), '');
+  return { query, params: values };
+}
+
+const userId = 42;
+const status = 'active';
+const query = sql`SELECT * FROM users WHERE id = ${userId} AND status = ${status}`;
+// output: { query: 'SELECT * FROM users WHERE id = $1 AND status = $2', params: [42, 'active'] }
+```

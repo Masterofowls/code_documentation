@@ -1,0 +1,744 @@
+---
+title: Dialogs, Menus & System UI in PyQt6
+description: Build complete application chrome with QDialog, QMessageBox, QFileDialog, QColorDialog, QInputDialog, QMenuBar, QToolBar, QStatusBar, QAction, keyboard shortcuts, and system tray icons.
+sidebar:
+  order: 6
+tags: [python, desktop]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+A polished application needs more than just widgets — it needs menus, toolbars, status feedback, and platform dialogs. This page covers everything from a simple message box to a full menu bar with keyboard shortcuts and a system tray icon.
+
+---
+
+## QDialog — Custom Dialogs
+
+`QDialog` is the base class for all dialog windows. Dialogs can be **modal** (block interaction with other windows) or **modeless** (both the dialog and main window are usable simultaneously).
+
+```python
+from PyQt6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+    QLineEdit, QPushButton, QDialogButtonBox,
+)
+from PyQt6.QtCore import Qt
+
+
+class NewProjectDialog(QDialog):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("New Project")
+        self.setMinimumWidth(380)
+
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel("Project name:"))
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("e.g. my-awesome-app")
+        layout.addWidget(self.name_edit)
+
+        layout.addWidget(QLabel("Description:"))
+        self.desc_edit = QLineEdit()
+        layout.addWidget(self.desc_edit)
+
+        # Standard OK / Cancel button box
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)   # sets result to Accepted
+        buttons.rejected.connect(self.reject)   # sets result to Rejected
+        layout.addWidget(buttons)
+
+    def project_name(self) -> str:
+        return self.name_edit.text().strip()
+
+
+# ── Usage ─────────────────────────────────────────────────────────
+def open_new_project_dialog(parent) -> None:
+    dlg = NewProjectDialog(parent)
+
+    # Modal — blocks until user dismisses
+    if dlg.exec() == QDialog.DialogCode.Accepted:
+        print("Creating project:", dlg.project_name())
+    else:
+        print("Cancelled")
+```
+
+### Modeless Dialog
+
+```python
+dlg = NewProjectDialog(parent)
+dlg.setModal(False)   # or just don't call exec()
+dlg.show()            # non-blocking
+
+# React when user clicks OK
+dlg.accepted.connect(lambda: print("Accepted:", dlg.project_name()))
+```
+
+:::tip[exec() vs show()]
+`exec()` runs a local event loop and **blocks** until the dialog closes — use it for modal dialogs that must complete before your code continues. `show()` returns immediately — use it for modeless dialogs or when you handle `accepted`/`rejected` signals instead.
+:::
+
+---
+
+## QMessageBox — Standard Alerts
+
+`QMessageBox` provides quick information, warning, question, and critical dialogs.
+
+<Tabs>
+  <TabItem label="Information">
+```python
+from PyQt6.QtWidgets import QMessageBox
+
+QMessageBox.information(
+    parent,
+    "Success",                        # title
+    "The file was saved successfully." # message
+)
+```
+  </TabItem>
+  <TabItem label="Warning">
+```python
+QMessageBox.warning(
+    parent,
+    "Warning",
+    "Disk space is running low.\nConsider freeing up space."
+)
+```
+  </TabItem>
+  <TabItem label="Critical Error">
+```python
+QMessageBox.critical(
+    parent,
+    "Error",
+    "Failed to connect to the database.\n\nCheck your connection settings."
+)
+```
+  </TabItem>
+  <TabItem label="Question (Yes/No)">
+```python
+reply = QMessageBox.question(
+    parent,
+    "Confirm Delete",
+    "Are you sure you want to delete this item?",
+    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+    QMessageBox.StandardButton.No,    # default button
+)
+
+if reply == QMessageBox.StandardButton.Yes:
+    delete_item()
+```
+  </TabItem>
+  <TabItem label="About">
+```python
+QMessageBox.about(
+    parent,
+    "About MyApp",
+    "<b>MyApp</b> v2.1.0<br><br>"
+    "Built with PyQt6 and Python 3.12.<br>"
+    "© 2024 My Company"
+)
+```
+  </TabItem>
+</Tabs>
+
+### Custom QMessageBox
+
+```python
+msg = QMessageBox(parent)
+msg.setWindowTitle("Unsaved Changes")
+msg.setText("You have unsaved changes.")
+msg.setInformativeText("Do you want to save before closing?")
+msg.setDetailedText("Modified files:\n  - document.txt\n  - notes.md")
+msg.setIcon(QMessageBox.Icon.Warning)
+
+save_btn    = msg.addButton("Save",    QMessageBox.ButtonRole.AcceptRole)
+discard_btn = msg.addButton("Discard", QMessageBox.ButtonRole.DestructiveRole)
+cancel_btn  = msg.addButton("Cancel",  QMessageBox.ButtonRole.RejectRole)
+msg.setDefaultButton(save_btn)
+msg.setEscapeButton(cancel_btn)
+
+msg.exec()
+
+clicked = msg.clickedButton()
+if clicked == save_btn:
+    save_document()
+elif clicked == discard_btn:
+    pass   # close without saving
+else:
+    pass   # stay open
+```
+
+---
+
+## QFileDialog — File and Directory Pickers
+
+<Tabs>
+  <TabItem label="Open File">
+```python
+from PyQt6.QtWidgets import QFileDialog
+
+path, _ = QFileDialog.getOpenFileName(
+    parent,
+    "Open File",                        # dialog title
+    "",                                 # starting directory ("" = last used)
+    "Text Files (*.txt);;All Files (*)" # filter
+)
+if path:
+    with open(path, "r") as f:
+        content = f.read()
+```
+  </TabItem>
+  <TabItem label="Open Multiple Files">
+```python
+paths, _ = QFileDialog.getOpenFileNames(
+    parent,
+    "Open Files",
+    "",
+    "Images (*.png *.jpg *.bmp);;All Files (*)"
+)
+for path in paths:
+    process_image(path)
+```
+  </TabItem>
+  <TabItem label="Save File">
+```python
+path, selected_filter = QFileDialog.getSaveFileName(
+    parent,
+    "Save As",
+    "untitled.txt",
+    "Text Files (*.txt);;Markdown (*.md);;All Files (*)"
+)
+if path:
+    with open(path, "w") as f:
+        f.write(content)
+```
+  </TabItem>
+  <TabItem label="Select Directory">
+```python
+directory = QFileDialog.getExistingDirectory(
+    parent,
+    "Select Output Folder",
+    "",
+    QFileDialog.Option.ShowDirsOnly
+)
+if directory:
+    export_to(directory)
+```
+  </TabItem>
+</Tabs>
+
+### Advanced QFileDialog (programmatic)
+
+```python
+dialog = QFileDialog(parent)
+dialog.setWindowTitle("Export Report")
+dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+dialog.setNameFilters(["PDF Files (*.pdf)", "HTML Files (*.html)", "All Files (*)"])
+dialog.selectNameFilter("PDF Files (*.pdf)")
+dialog.setDefaultSuffix("pdf")
+
+if dialog.exec() == QFileDialog.DialogCode.Accepted:
+    file_path = dialog.selectedFiles()[0]
+    export_report(file_path)
+```
+
+---
+
+## QColorDialog — Colour Picker
+
+```python
+from PyQt6.QtWidgets import QColorDialog
+from PyQt6.QtGui import QColor
+
+# One-liner
+colour = QColorDialog.getColor(
+    QColor("#2563eb"),   # initial colour
+    parent,
+    "Choose Accent Colour",
+    QColorDialog.ColorDialogOption.ShowAlphaChannel,
+)
+
+if colour.isValid():
+    widget.setStyleSheet(f"background-color: {colour.name()};")
+    r, g, b, a = colour.getRgb()
+    print(f"RGBA: {r}, {g}, {b}, {a}")
+
+# Persistent dialog (reuse between calls)
+colour_dialog = QColorDialog(parent)
+colour_dialog.setOption(QColorDialog.ColorDialogOption.ShowAlphaChannel)
+colour_dialog.currentColorChanged.connect(live_preview)
+colour_dialog.show()
+```
+
+---
+
+## QInputDialog — Simple Value Prompts
+
+```python
+from PyQt6.QtWidgets import QInputDialog
+
+# Text input
+text, ok = QInputDialog.getText(parent, "Rename", "New name:", text="untitled")
+if ok and text:
+    rename_item(text)
+
+# Integer input
+number, ok = QInputDialog.getInt(parent, "Set Limit", "Max items:", value=10, min=1, max=100)
+if ok:
+    set_limit(number)
+
+# Float input
+value, ok = QInputDialog.getDouble(parent, "Scale", "Factor:", value=1.0, min=0.1, max=10.0, decimals=2)
+
+# Item selection from a list
+items = ["Low", "Medium", "High", "Critical"]
+item, ok = QInputDialog.getItem(parent, "Priority", "Select priority:", items, current=1, editable=False)
+if ok:
+    set_priority(item)
+```
+
+---
+
+## QMenuBar & QMenu — Application Menus
+
+```python
+import sys
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QMenu, QMenuBar
+)
+from PyQt6.QtGui import QAction, QKeySequence, QIcon
+from PyQt6.QtCore import Qt
+
+
+class MainWindow(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("Menu Demo")
+        self.resize(800, 600)
+        self._build_menu_bar()
+
+    def _build_menu_bar(self) -> None:
+        menubar = self.menuBar()
+
+        # ── File menu ─────────────────────────────────────────────
+        file_menu = menubar.addMenu("&File")
+
+        new_action = QAction(QIcon("icons/new.png"), "&New", self)
+        new_action.setShortcut(QKeySequence.StandardKey.New)
+        new_action.setStatusTip("Create a new document")
+        new_action.triggered.connect(self.new_document)
+        file_menu.addAction(new_action)
+
+        open_action = QAction(QIcon("icons/open.png"), "&Open…", self)
+        open_action.setShortcut(QKeySequence.StandardKey.Open)
+        open_action.triggered.connect(self.open_document)
+        file_menu.addAction(open_action)
+
+        # Recent files sub-menu
+        recent_menu = QMenu("Recent Files", self)
+        for name in ["doc1.txt", "doc2.txt", "report.pdf"]:
+            act = QAction(name, self)
+            act.triggered.connect(lambda checked, n=name: self.open_recent(n))
+            recent_menu.addAction(act)
+        file_menu.addMenu(recent_menu)
+
+        file_menu.addSeparator()
+
+        save_action = QAction("&Save", self)
+        save_action.setShortcut(QKeySequence.StandardKey.Save)
+        save_action.triggered.connect(self.save_document)
+        file_menu.addAction(save_action)
+
+        save_as_action = QAction("Save &As…", self)
+        save_as_action.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        file_menu.addAction(save_as_action)
+
+        file_menu.addSeparator()
+
+        quit_action = QAction("&Quit", self)
+        quit_action.setShortcut(QKeySequence.StandardKey.Quit)
+        quit_action.triggered.connect(QApplication.instance().quit)
+        file_menu.addAction(quit_action)
+
+        # ── Edit menu ─────────────────────────────────────────────
+        edit_menu = menubar.addMenu("&Edit")
+
+        undo_action = QAction("&Undo", self)
+        undo_action.setShortcut(QKeySequence.StandardKey.Undo)
+        edit_menu.addAction(undo_action)
+
+        redo_action = QAction("&Redo", self)
+        redo_action.setShortcut(QKeySequence.StandardKey.Redo)
+        edit_menu.addAction(redo_action)
+
+        edit_menu.addSeparator()
+        edit_menu.addAction(QAction("Cu&t",   self, shortcut=QKeySequence.StandardKey.Cut))
+        edit_menu.addAction(QAction("&Copy",  self, shortcut=QKeySequence.StandardKey.Copy))
+        edit_menu.addAction(QAction("&Paste", self, shortcut=QKeySequence.StandardKey.Paste))
+
+        # ── View menu (checkable items) ───────────────────────────
+        view_menu = menubar.addMenu("&View")
+
+        self.toolbar_toggle = QAction("Show &Toolbar", self)
+        self.toolbar_toggle.setCheckable(True)
+        self.toolbar_toggle.setChecked(True)
+        self.toolbar_toggle.toggled.connect(self.toggle_toolbar)
+        view_menu.addAction(self.toolbar_toggle)
+
+        view_menu.addSeparator()
+        view_menu.addAction(QAction("Zoom &In",  self, shortcut=QKeySequence.StandardKey.ZoomIn))
+        view_menu.addAction(QAction("Zoom &Out", self, shortcut=QKeySequence.StandardKey.ZoomOut))
+
+        # ── Help menu ─────────────────────────────────────────────
+        help_menu = menubar.addMenu("&Help")
+        about_action = QAction("&About", self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
+
+    # ── Slot methods ──────────────────────────────────────────────
+
+    def new_document(self)    -> None: self.statusBar().showMessage("New document")
+    def open_document(self)   -> None: self.statusBar().showMessage("Open document")
+    def save_document(self)   -> None: self.statusBar().showMessage("Saved")
+    def open_recent(self, n)  -> None: self.statusBar().showMessage(f"Opening {n}")
+    def toggle_toolbar(self, v: bool) -> None:
+        if hasattr(self, "_toolbar"):
+            self._toolbar.setVisible(v)
+
+    def show_about(self) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.about(self, "About", "<b>Menu Demo</b><br>PyQt6 example")
+```
+
+---
+
+## QToolBar
+
+```python
+from PyQt6.QtWidgets import QToolBar
+from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtCore import Qt
+
+toolbar = QToolBar("Main Toolbar")
+toolbar.setMovable(False)
+toolbar.setIconSize(QSize(24, 24))   # from PyQt6.QtCore import QSize
+self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
+self._toolbar = toolbar
+
+# Add actions (shared with menu bar)
+toolbar.addAction(new_action)
+toolbar.addAction(open_action)
+toolbar.addAction(save_action)
+toolbar.addSeparator()
+
+# Widget in toolbar (e.g. search bar)
+from PyQt6.QtWidgets import QLineEdit
+search = QLineEdit()
+search.setPlaceholderText("Search…")
+search.setMaximumWidth(200)
+toolbar.addWidget(search)
+
+# Toolbar buttons as toggle (e.g. bold/italic)
+bold_action = QAction(QIcon("icons/bold.png"), "Bold", self)
+bold_action.setCheckable(True)
+bold_action.setShortcut(QKeySequence("Ctrl+B"))
+toolbar.addAction(bold_action)
+```
+
+---
+
+## QStatusBar
+
+```python
+from PyQt6.QtWidgets import QStatusBar, QLabel
+
+status_bar = self.statusBar()   # auto-created by QMainWindow
+
+# Temporary message (cleared after timeout)
+status_bar.showMessage("File saved", 3000)   # 3 seconds
+
+# Permanent widget (right-aligned, stays forever)
+self.pos_label = QLabel("Ln 1, Col 1")
+status_bar.addPermanentWidget(self.pos_label)
+
+# Left-side widget (with stretch)
+self.mode_label = QLabel("INSERT")
+status_bar.addWidget(self.mode_label, stretch=1)
+
+# Update from slots
+def update_cursor_position(line: int, col: int) -> None:
+    self.pos_label.setText(f"Ln {line}, Col {col}")
+```
+
+---
+
+## Context Menu (Right-Click)
+
+```python
+from PyQt6.QtWidgets import QMenu
+from PyQt6.QtGui import QAction
+from PyQt6.QtCore import QPoint, Qt
+
+
+class MyWidget(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self.show_context_menu)
+
+    def show_context_menu(self, pos: QPoint) -> None:
+        menu = QMenu(self)
+
+        cut_action   = menu.addAction("Cut")
+        copy_action  = menu.addAction("Copy")
+        paste_action = menu.addAction("Paste")
+        menu.addSeparator()
+        delete_action = menu.addAction("Delete")
+
+        # Show at cursor position and get the chosen action
+        chosen = menu.exec(self.mapToGlobal(pos))
+
+        if chosen == copy_action:
+            self.copy_selection()
+        elif chosen == delete_action:
+            self.delete_selection()
+```
+
+---
+
+## QSystemTrayIcon — System Tray Integration
+
+```python
+import sys
+from PyQt6.QtWidgets import (
+    QApplication, QSystemTrayIcon, QMenu, QMainWindow
+)
+from PyQt6.QtGui import QAction, QIcon
+
+
+class TrayApp(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("Tray App")
+        self.resize(400, 300)
+        self._setup_tray()
+
+    def _setup_tray(self) -> None:
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            print("System tray not available on this platform")
+            return
+
+        icon = QIcon("icons/app.png")   # 16×16 or 22×22 works best
+
+        self.tray = QSystemTrayIcon(icon, self)
+        self.tray.setToolTip("My App is running")
+
+        # Context menu for the tray icon
+        tray_menu = QMenu()
+
+        show_action = QAction("Show Window", self)
+        show_action.triggered.connect(self.show)
+        show_action.triggered.connect(self.activateWindow)
+        tray_menu.addAction(show_action)
+
+        hide_action = QAction("Hide to Tray", self)
+        hide_action.triggered.connect(self.hide)
+        tray_menu.addAction(hide_action)
+
+        tray_menu.addSeparator()
+
+        quit_action = QAction("Quit", self)
+        quit_action.triggered.connect(QApplication.instance().quit)
+        tray_menu.addAction(quit_action)
+
+        self.tray.setContextMenu(tray_menu)
+
+        # React to icon clicks
+        self.tray.activated.connect(self.on_tray_activated)
+
+        self.tray.show()
+
+    def on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:   # single click
+            if self.isVisible():
+                self.hide()
+            else:
+                self.show()
+                self.activateWindow()
+
+    def closeEvent(self, event) -> None:
+        """Minimise to tray instead of quitting on close."""
+        event.ignore()
+        self.hide()
+        self.tray.showMessage(
+            "Still running",
+            "My App is minimised to the tray. Right-click the icon to quit.",
+            QSystemTrayIcon.MessageIcon.Information,
+            3000,
+        )
+
+
+if __name__ == "__main__":
+    QApplication.setQuitOnLastWindowClosed(False)  # don't quit when window hides
+    app = QApplication(sys.argv)
+    win = TrayApp()
+    win.show()
+    sys.exit(app.exec())
+```
+
+:::caution[QApplication.setQuitOnLastWindowClosed(False)]
+If you want the app to keep running when all windows are hidden (living in the tray), you **must** call `QApplication.setQuitOnLastWindowClosed(False)` before the event loop starts. Otherwise the app exits as soon as the main window is hidden.
+:::
+
+---
+
+## Keyboard Shortcuts with QAction and QShortcut
+
+```python
+from PyQt6.QtGui import QKeySequence, QShortcut
+
+# Via QAction (preferred — integrates with menus & tooltips)
+action = QAction("Find", self)
+action.setShortcut(QKeySequence.StandardKey.Find)   # Ctrl+F on most platforms
+action.triggered.connect(self.open_find_dialog)
+self.addAction(action)   # register on window even without a menu
+
+# Via QShortcut (widget-scoped, no menu integration)
+shortcut = QShortcut(QKeySequence("Ctrl+Shift+F"), self)
+shortcut.activated.connect(self.open_advanced_search)
+
+# Custom multi-key shortcut
+dark_shortcut = QShortcut(QKeySequence("Ctrl+Alt+D"), self)
+dark_shortcut.activated.connect(self.toggle_dark_mode)
+
+# Platform-standard shortcuts
+QKeySequence.StandardKey.New        # Ctrl+N
+QKeySequence.StandardKey.Open       # Ctrl+O
+QKeySequence.StandardKey.Save       # Ctrl+S
+QKeySequence.StandardKey.Quit       # Ctrl+Q / Cmd+Q
+QKeySequence.StandardKey.Undo       # Ctrl+Z
+QKeySequence.StandardKey.Redo       # Ctrl+Y / Ctrl+Shift+Z
+QKeySequence.StandardKey.Cut        # Ctrl+X
+QKeySequence.StandardKey.Copy       # Ctrl+C
+QKeySequence.StandardKey.Paste      # Ctrl+V
+QKeySequence.StandardKey.SelectAll  # Ctrl+A
+QKeySequence.StandardKey.Find       # Ctrl+F
+QKeySequence.StandardKey.ZoomIn     # Ctrl++
+QKeySequence.StandardKey.ZoomOut    # Ctrl+-
+```
+
+---
+
+## Complete Application Shell
+
+Putting it all together — a minimal but complete application with menus, toolbar, status bar, and a tray icon:
+
+```python
+import sys
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout,
+    QTextEdit, QSystemTrayIcon, QMenu,
+)
+from PyQt6.QtGui import QAction, QIcon, QKeySequence
+from PyQt6.QtCore import QSize, Qt
+
+
+class AppShell(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("Complete App Shell")
+        self.resize(900, 650)
+
+        # Central editor
+        self.editor = QTextEdit()
+        self.editor.setPlaceholderText("Start writing…")
+        self.setCentralWidget(self.editor)
+
+        self._build_menus()
+        self._build_toolbar()
+        self._build_statusbar()
+        self._build_tray()
+
+    def _build_menus(self) -> None:
+        mb = self.menuBar()
+
+        # File
+        fm = mb.addMenu("&File")
+        for label, shortcut, slot in [
+            ("&New",   QKeySequence.StandardKey.New,  self.new_file),
+            ("&Open",  QKeySequence.StandardKey.Open, self.open_file),
+            ("&Save",  QKeySequence.StandardKey.Save, self.save_file),
+        ]:
+            a = QAction(label, self)
+            a.setShortcut(shortcut)
+            a.triggered.connect(slot)
+            fm.addAction(a)
+        fm.addSeparator()
+        fm.addAction(QAction("&Quit", self, shortcut=QKeySequence.StandardKey.Quit,
+                             triggered=QApplication.instance().quit))
+
+        # Help
+        hm = mb.addMenu("&Help")
+        hm.addAction(QAction("&About Qt", self,
+                             triggered=lambda: QApplication.instance().aboutQt()))
+
+    def _build_toolbar(self) -> None:
+        tb = self.addToolBar("Main")
+        tb.setMovable(False)
+        tb.setIconSize(QSize(20, 20))
+        for label, slot in [("New", self.new_file), ("Open", self.open_file), ("Save", self.save_file)]:
+            tb.addAction(QAction(label, self, triggered=slot))
+
+    def _build_statusbar(self) -> None:
+        self.statusBar().showMessage("Ready")
+        from PyQt6.QtWidgets import QLabel
+        self.char_count_label = QLabel("0 chars")
+        self.statusBar().addPermanentWidget(self.char_count_label)
+        self.editor.textChanged.connect(self._update_char_count)
+
+    def _build_tray(self) -> None:
+        self.tray = QSystemTrayIcon(self)
+        menu = QMenu()
+        menu.addAction(QAction("Show", self, triggered=self.show))
+        menu.addAction(QAction("Quit", self, triggered=QApplication.instance().quit))
+        self.tray.setContextMenu(menu)
+        self.tray.show()
+
+    def _update_char_count(self) -> None:
+        n = len(self.editor.toPlainText())
+        self.char_count_label.setText(f"{n} chars")
+
+    def new_file(self)  -> None:
+        self.editor.clear()
+        self.statusBar().showMessage("New file", 2000)
+
+    def open_file(self) -> None:
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(self, "Open", "", "Text (*.txt);;All (*)")
+        if path:
+            with open(path) as f:
+                self.editor.setPlainText(f.read())
+            self.statusBar().showMessage(f"Opened {path}", 3000)
+
+    def save_file(self) -> None:
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(self, "Save As", "", "Text (*.txt);;All (*)")
+        if path:
+            with open(path, "w") as f:
+                f.write(self.editor.toPlainText())
+            self.statusBar().showMessage(f"Saved {path}", 3000)
+
+
+if __name__ == "__main__":
+    QApplication.setQuitOnLastWindowClosed(False)
+    app = QApplication(sys.argv)
+    win = AppShell()
+    win.show()
+    sys.exit(app.exec())
+```
+
+:::tip[Next steps]
+Explore [Qt Style Sheets](https://doc.qt.io/qt-6/stylesheet.html) to skin your app, and [QSettings](https://doc.qt.io/qt-6/qsettings.html) to persist user preferences between sessions.
+:::

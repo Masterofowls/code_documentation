@@ -1,0 +1,670 @@
+---
+title: Forms in React
+description: Master controlled and uncontrolled inputs, React Hook Form with Zod validation, field arrays, multi-step forms, file uploads, and optimistic update patterns.
+sidebar:
+  order: 7
+tags: [react, javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Forms are notoriously complex in React. This guide covers every pattern from basic controlled inputs to production-grade forms with React Hook Form, Zod schema validation, and multi-step wizards.
+
+## Controlled vs Uncontrolled Components
+
+<Tabs>
+  <TabItem label="Controlled">
+
+In a controlled component, React state is the single source of truth for form data:
+
+```tsx
+import { useState } from 'react';
+
+function ControlledForm() {
+  const [name,  setName]  = useState('');
+  const [email, setEmail] = useState('');
+  const [error, setError] = useState('');
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email.includes('@')) {
+      setError('Please enter a valid email address.');
+      return;
+    }
+    console.log({ name, email });
+  };
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <label htmlFor="name">Name</label>
+      <input
+        id="name"
+        value={name}
+        onChange={e => setName(e.target.value)}
+      />
+
+      <label htmlFor="email">Email</label>
+      <input
+        id="email"
+        type="email"
+        value={email}
+        onChange={e => setEmail(e.target.value)}
+        aria-describedby="email-error"
+      />
+      {error && <span id="email-error" role="alert">{error}</span>}
+
+      <button type="submit">Submit</button>
+    </form>
+  );
+}
+```
+
+  </TabItem>
+  <TabItem label="Uncontrolled">
+
+Uncontrolled components use the DOM as source of truth, accessed via refs:
+
+```tsx
+import { useRef } from 'react';
+
+function UncontrolledForm() {
+  const nameRef  = useRef<HTMLInputElement>(null);
+  const emailRef = useRef<HTMLInputElement>(null);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const name  = nameRef.current?.value ?? '';
+    const email = emailRef.current?.value ?? '';
+    console.log({ name, email });
+  };
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input ref={nameRef}  defaultValue="" placeholder="Name" />
+      <input ref={emailRef} defaultValue="" type="email" placeholder="Email" />
+      <button type="submit">Submit</button>
+    </form>
+  );
+}
+```
+
+:::tip[When to Use Uncontrolled]
+Use uncontrolled components for simple forms, file inputs (which can't be controlled), or when integrating with non-React libraries. For everything else, use React Hook Form which combines the DX of controlled inputs with the performance of uncontrolled refs.
+:::
+
+  </TabItem>
+</Tabs>
+
+## Native Form Elements
+
+```tsx
+function AllInputTypes() {
+  const [state, setState] = useState({
+    text:     '',
+    number:   0,
+    email:    '',
+    password: '',
+    textarea: '',
+    select:   'option1',
+    multi:    [] as string[],
+    checkbox: false,
+    radio:    'a',
+  });
+
+  const update = <K extends keyof typeof state>(key: K, value: typeof state[K]) =>
+    setState(prev => ({ ...prev, [key]: value }));
+
+  return (
+    <form>
+      {/* Text input */}
+      <input type="text"     value={state.text}     onChange={e => update('text', e.target.value)} />
+      <input type="number"   value={state.number}   onChange={e => update('number', Number(e.target.value))} />
+      <input type="email"    value={state.email}    onChange={e => update('email', e.target.value)} />
+      <input type="password" value={state.password} onChange={e => update('password', e.target.value)} />
+
+      {/* Textarea */}
+      <textarea value={state.textarea} onChange={e => update('textarea', e.target.value)} />
+
+      {/* Select */}
+      <select value={state.select} onChange={e => update('select', e.target.value)}>
+        <option value="option1">Option 1</option>
+        <option value="option2">Option 2</option>
+      </select>
+
+      {/* Multi-select */}
+      <select
+        multiple
+        value={state.multi}
+        onChange={e => update('multi', Array.from(e.target.selectedOptions, o => o.value))}
+      >
+        <option value="a">Alpha</option>
+        <option value="b">Beta</option>
+        <option value="c">Gamma</option>
+      </select>
+
+      {/* Checkbox */}
+      <input
+        type="checkbox"
+        checked={state.checkbox}
+        onChange={e => update('checkbox', e.target.checked)}
+      />
+
+      {/* Radio group */}
+      {['a', 'b', 'c'].map(v => (
+        <label key={v}>
+          <input
+            type="radio"
+            name="radio"
+            value={v}
+            checked={state.radio === v}
+            onChange={() => update('radio', v)}
+          />
+          {v.toUpperCase()}
+        </label>
+      ))}
+    </form>
+  );
+}
+```
+
+## React Hook Form
+
+React Hook Form (RHF) is the de-facto standard for production forms in React:
+
+```bash
+npm install react-hook-form zod @hookform/resolvers
+```
+
+### Basic Usage
+
+```tsx
+import { useForm, SubmitHandler } from 'react-hook-form';
+import { z } from 'zod';
+import { zodResolver } from '@hookform/resolvers/zod';
+
+// 1. Define schema with Zod
+const registerSchema = z.object({
+  username: z.string().min(3, 'Username must be at least 3 characters'),
+  email:    z.string().email('Please enter a valid email'),
+  password: z.string()
+    .min(8, 'Password must be at least 8 characters')
+    .regex(/[A-Z]/, 'Must contain at least one uppercase letter')
+    .regex(/[0-9]/, 'Must contain at least one number'),
+  confirmPassword: z.string(),
+  acceptTerms: z.literal(true, {
+    errorMap: () => ({ message: 'You must accept the terms' }),
+  }),
+}).refine(data => data.password === data.confirmPassword, {
+  message: 'Passwords do not match',
+  path:    ['confirmPassword'],
+});
+
+type RegisterFormValues = z.infer<typeof registerSchema>;
+
+// 2. Form component
+function RegisterForm() {
+  const {
+    register,
+    handleSubmit,
+    formState: { errors, isSubmitting, isDirty, isValid },
+    watch,
+    reset,
+    setError,
+  } = useForm<RegisterFormValues>({
+    resolver: zodResolver(registerSchema),
+    mode:     'onBlur',           // validate on blur for better UX
+    defaultValues: {
+      username:        '',
+      email:           '',
+      password:        '',
+      confirmPassword: '',
+      acceptTerms:     undefined,
+    },
+  });
+
+  const onSubmit: SubmitHandler<RegisterFormValues> = async (data) => {
+    try {
+      await registerUser(data);
+      reset();
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.field) {
+        setError(err.field as keyof RegisterFormValues, { message: err.message });
+      }
+    }
+  };
+
+  const password = watch('password');
+
+  return (
+    <form onSubmit={handleSubmit(onSubmit)} noValidate>
+
+      <div className="field">
+        <label htmlFor="username">Username</label>
+        <input
+          id="username"
+          {...register('username')}
+          aria-invalid={!!errors.username}
+        />
+        {errors.username && (
+          <span role="alert" className="error">{errors.username.message}</span>
+        )}
+      </div>
+
+      <div className="field">
+        <label htmlFor="email">Email</label>
+        <input
+          id="email"
+          type="email"
+          {...register('email')}
+          aria-invalid={!!errors.email}
+        />
+        {errors.email && (
+          <span role="alert" className="error">{errors.email.message}</span>
+        )}
+      </div>
+
+      <div className="field">
+        <label htmlFor="password">Password</label>
+        <input
+          id="password"
+          type="password"
+          {...register('password')}
+          aria-invalid={!!errors.password}
+        />
+        {errors.password && (
+          <span role="alert" className="error">{errors.password.message}</span>
+        )}
+      </div>
+
+      <div className="field">
+        <label htmlFor="confirmPassword">Confirm Password</label>
+        <input
+          id="confirmPassword"
+          type="password"
+          {...register('confirmPassword')}
+          aria-invalid={!!errors.confirmPassword}
+        />
+        {errors.confirmPassword && (
+          <span role="alert" className="error">{errors.confirmPassword.message}</span>
+        )}
+      </div>
+
+      <div className="field field--checkbox">
+        <input id="acceptTerms" type="checkbox" {...register('acceptTerms')} />
+        <label htmlFor="acceptTerms">I accept the terms and conditions</label>
+        {errors.acceptTerms && (
+          <span role="alert" className="error">{errors.acceptTerms.message}</span>
+        )}
+      </div>
+
+      <button
+        type="submit"
+        disabled={isSubmitting || !isDirty || !isValid}
+      >
+        {isSubmitting ? 'Creating account…' : 'Create Account'}
+      </button>
+    </form>
+  );
+}
+```
+
+### Advanced: watch, setValue, and reset
+
+```tsx
+function DynamicForm() {
+  const { register, watch, setValue, reset } = useForm({
+    defaultValues: { country: '', state: '' },
+  });
+
+  const country = watch('country');
+
+  // Reset state field when country changes
+  useEffect(() => {
+    setValue('state', '');
+  }, [country, setValue]);
+
+  const handleFillDefaults = () => {
+    reset({
+      country: 'US',
+      state:   'CA',
+    });
+  };
+
+  return (
+    <form>
+      <select {...register('country')}>
+        <option value="">Select country</option>
+        <option value="US">United States</option>
+        <option value="CA">Canada</option>
+        <option value="GB">United Kingdom</option>
+      </select>
+
+      {country === 'US' && (
+        <select {...register('state')}>
+          <option value="">Select state</option>
+          <option value="CA">California</option>
+          <option value="NY">New York</option>
+          <option value="TX">Texas</option>
+        </select>
+      )}
+
+      <button type="button" onClick={handleFillDefaults}>Fill Defaults</button>
+    </form>
+  );
+}
+```
+
+## Field Arrays
+
+Dynamic lists of form fields:
+
+```tsx
+import { useForm, useFieldArray, SubmitHandler } from 'react-hook-form';
+import { z } from 'zod';
+import { zodResolver } from '@hookform/resolvers/zod';
+
+const schema = z.object({
+  teamName: z.string().min(1, 'Team name required'),
+  members: z.array(z.object({
+    name:  z.string().min(1, 'Name required'),
+    email: z.string().email('Invalid email'),
+    role:  z.enum(['lead', 'member', 'viewer']),
+  })).min(1, 'At least one member required'),
+});
+
+type FormValues = z.infer<typeof schema>;
+
+function TeamForm() {
+  const { register, control, handleSubmit, formState: { errors } } =
+    useForm<FormValues>({
+      resolver: zodResolver(schema),
+      defaultValues: {
+        teamName: '',
+        members:  [{ name: '', email: '', role: 'member' }],
+      },
+    });
+
+  const { fields, append, remove, swap } = useFieldArray({
+    control,
+    name: 'members',
+  });
+
+  const onSubmit: SubmitHandler<FormValues> = (data) => {
+    console.log(data);
+  };
+
+  return (
+    <form onSubmit={handleSubmit(onSubmit)}>
+      <input {...register('teamName')} placeholder="Team name" />
+
+      <h3>Members</h3>
+      {fields.map((field, index) => (
+        <div key={field.id} className="member-row">
+          <input
+            {...register(`members.${index}.name`)}
+            placeholder="Name"
+          />
+          {errors.members?.[index]?.name && (
+            <span className="error">{errors.members[index]?.name?.message}</span>
+          )}
+
+          <input
+            {...register(`members.${index}.email`)}
+            type="email"
+            placeholder="Email"
+          />
+
+          <select {...register(`members.${index}.role`)}>
+            <option value="lead">Lead</option>
+            <option value="member">Member</option>
+            <option value="viewer">Viewer</option>
+          </select>
+
+          <button
+            type="button"
+            onClick={() => remove(index)}
+            disabled={fields.length === 1}
+          >
+            Remove
+          </button>
+
+          {index > 0 && (
+            <button type="button" onClick={() => swap(index, index - 1)}>↑</button>
+          )}
+        </div>
+      ))}
+
+      <button
+        type="button"
+        onClick={() => append({ name: '', email: '', role: 'member' })}
+      >
+        Add Member
+      </button>
+
+      <button type="submit">Create Team</button>
+    </form>
+  );
+}
+```
+
+## File Inputs
+
+File inputs cannot be controlled — use `register` with RHF:
+
+```tsx
+import { useForm } from 'react-hook-form';
+import { z } from 'zod';
+import { zodResolver } from '@hookform/resolvers/zod';
+
+const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+const ACCEPTED_IMAGE_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+
+const schema = z.object({
+  avatar: z
+    .custom<FileList>()
+    .refine(files => files?.length === 1, 'Please select a file.')
+    .refine(files => files?.[0]?.size <= MAX_FILE_SIZE, 'Max file size is 5MB.')
+    .refine(
+      files => ACCEPTED_IMAGE_TYPES.includes(files?.[0]?.type ?? ''),
+      'Only .jpg, .jpeg, .png and .webp formats are supported.'
+    ),
+});
+
+type FormValues = z.infer<typeof schema>;
+
+function AvatarUpload() {
+  const { register, handleSubmit, watch, formState: { errors } } =
+    useForm<FormValues>({ resolver: zodResolver(schema) });
+
+  const avatarFile = watch('avatar');
+  const previewUrl = avatarFile?.[0] ? URL.createObjectURL(avatarFile[0]) : null;
+
+  const onSubmit = async ({ avatar }: FormValues) => {
+    const formData = new FormData();
+    formData.append('avatar', avatar[0]);
+    await fetch('/api/avatar', { method: 'POST', body: formData });
+  };
+
+  return (
+    <form onSubmit={handleSubmit(onSubmit)}>
+      {previewUrl && (
+        <img src={previewUrl} alt="Preview" className="avatar-preview" />
+      )}
+      <input
+        type="file"
+        accept="image/*"
+        {...register('avatar')}
+      />
+      {errors.avatar && <span className="error">{errors.avatar.message as string}</span>}
+      <button type="submit">Upload</button>
+    </form>
+  );
+}
+```
+
+## Multi-Step Forms
+
+```tsx
+import { useForm, FormProvider, useFormContext } from 'react-hook-form';
+
+// Full form schema split into steps
+const fullSchema = z.object({
+  // Step 1
+  firstName: z.string().min(1),
+  lastName:  z.string().min(1),
+  email:     z.string().email(),
+  // Step 2
+  address: z.string().min(5),
+  city:    z.string().min(1),
+  country: z.string().min(1),
+  // Step 3
+  plan:    z.enum(['free', 'pro', 'enterprise']),
+  billing: z.enum(['monthly', 'annual']),
+});
+
+type FullFormValues = z.infer<typeof fullSchema>;
+
+const STEPS = ['Personal Info', 'Address', 'Plan'];
+
+function MultiStepForm() {
+  const [step, setStep] = useState(0);
+
+  const methods = useForm<FullFormValues>({
+    resolver: zodResolver(fullSchema),
+    mode:     'onChange',
+    defaultValues: {
+      firstName: '', lastName: '', email: '',
+      address: '', city: '', country: '',
+      plan: 'free', billing: 'monthly',
+    },
+  });
+
+  const onSubmit = async (data: FullFormValues) => {
+    await createAccount(data);
+  };
+
+  return (
+    <FormProvider {...methods}>
+      <form onSubmit={methods.handleSubmit(onSubmit)}>
+        {/* Step indicator */}
+        <div className="stepper">
+          {STEPS.map((label, i) => (
+            <div key={label} className={`step ${i <= step ? 'step--complete' : ''}`}>
+              <span>{i + 1}</span>
+              <label>{label}</label>
+            </div>
+          ))}
+        </div>
+
+        {step === 0 && <StepPersonalInfo />}
+        {step === 1 && <StepAddress />}
+        {step === 2 && <StepPlan />}
+
+        <div className="form-actions">
+          {step > 0 && (
+            <button type="button" onClick={() => setStep(s => s - 1)}>Back</button>
+          )}
+          {step < STEPS.length - 1 ? (
+            <button type="button" onClick={() => setStep(s => s + 1)}>Next</button>
+          ) : (
+            <button type="submit" disabled={methods.formState.isSubmitting}>
+              {methods.formState.isSubmitting ? 'Creating…' : 'Create Account'}
+            </button>
+          )}
+        </div>
+      </form>
+    </FormProvider>
+  );
+}
+
+function StepPersonalInfo() {
+  const { register, formState: { errors } } = useFormContext<FullFormValues>();
+  return (
+    <fieldset>
+      <legend>Personal Information</legend>
+      <input {...register('firstName')} placeholder="First name" />
+      {errors.firstName && <span className="error">{errors.firstName.message}</span>}
+      <input {...register('lastName')} placeholder="Last name" />
+      <input {...register('email')} type="email" placeholder="Email" />
+      {errors.email && <span className="error">{errors.email.message}</span>}
+    </fieldset>
+  );
+}
+```
+
+:::caution[Validate Each Step Before Proceeding]
+Use `trigger(['firstName', 'lastName', 'email'])` to validate only the current step's fields before advancing to the next step. This prevents users from reaching the final step with invalid earlier inputs.
+
+```tsx
+const { trigger } = useFormContext<FullFormValues>();
+
+const handleNext = async () => {
+  const fields: (keyof FullFormValues)[] =
+    step === 0 ? ['firstName', 'lastName', 'email'] :
+    step === 1 ? ['address', 'city', 'country'] : [];
+
+  const valid = await trigger(fields);
+  if (valid) setStep(s => s + 1);
+};
+```
+:::
+
+## Optimistic Updates Pattern
+
+Show immediate feedback while an async operation completes:
+
+```tsx
+import { useState, useOptimistic, useTransition } from 'react';
+
+interface Comment {
+  id: string;
+  text: string;
+  pending?: boolean;
+}
+
+function CommentSection({ postId }: { postId: string }) {
+  const [comments, setComments] = useState<Comment[]>([]);
+  const [optimisticComments, addOptimisticComment] = useOptimistic(
+    comments,
+    (state, newComment: Comment) => [...state, newComment]
+  );
+  const [isPending, startTransition] = useTransition();
+
+  const handleSubmit = async (text: string) => {
+    const tempId = crypto.randomUUID();
+
+    startTransition(async () => {
+      // Immediately show in UI with pending flag
+      addOptimisticComment({ id: tempId, text, pending: true });
+
+      try {
+        const created = await createComment(postId, text);
+        // Replace optimistic comment with real one
+        setComments(prev =>
+          prev.map(c => c.id === tempId ? created : c)
+        );
+      } catch {
+        // Remove optimistic comment on failure
+        setComments(prev => prev.filter(c => c.id !== tempId));
+      }
+    });
+  };
+
+  return (
+    <div>
+      <ul>
+        {optimisticComments.map(comment => (
+          <li
+            key={comment.id}
+            style={{ opacity: comment.pending ? 0.6 : 1 }}
+          >
+            {comment.text}
+            {comment.pending && <span> (sending…)</span>}
+          </li>
+        ))}
+      </ul>
+      <CommentInput onSubmit={handleSubmit} disabled={isPending} />
+    </div>
+  );
+}
+```

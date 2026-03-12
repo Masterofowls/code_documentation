@@ -1,0 +1,609 @@
+---
+title: Parsing XML
+description: Parse XML in JavaScript, Python, and Java using DOM, SAX, StAX, and streaming approaches. Convert to JSON and defend against XXE and billion-laughs attacks.
+sidebar:
+  order: 5
+tags: [xml, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Parsing XML is the process of reading an XML document and making its data available to your program. There are three major parsing models: **DOM** (tree in memory), **SAX** (event-driven), and **StAX/pull** (token-by-token). Choosing the right model depends on document size, access patterns, and memory constraints.
+
+---
+
+## Parsing Models Compared
+
+| Model | Memory | Access Pattern | Mutability | Best For |
+|---|---|---|---|---|
+| **DOM** | Full doc in RAM | Random, multiple passes | Read & write | Small/medium docs, manipulation, XPath |
+| **SAX** | O(1) streaming | Forward-only, one pass | Read only | Huge files, simple extraction |
+| **StAX/Pull** | O(1) streaming | Forward-only, one pass | Read only | Huge files, complex logic |
+| **JAXB/Unmarshal** | Full doc → objects | Object graph | Read & write | Java typed access |
+
+---
+
+## DOM Parsing in the Browser
+
+Modern browsers expose `DOMParser` to parse XML strings and the `XMLSerializer` to serialise back to strings.
+
+```js
+const xmlString = `<?xml version="1.0" encoding="UTF-8"?>
+<bookstore>
+  <book id="1" category="fiction">
+    <title lang="en">The Great Gatsby</title>
+    <author>F. Scott Fitzgerald</author>
+    <year>1925</year>
+    <price>12.99</price>
+  </book>
+  <book id="2" category="technical">
+    <title lang="en">Clean Code</title>
+    <author>Robert C. Martin</author>
+    <year>2008</year>
+    <price>35.99</price>
+  </book>
+</bookstore>`;
+
+const parser = new DOMParser();
+const doc = parser.parseFromString(xmlString, 'application/xml');
+
+// Check for parse errors
+const parseError = doc.querySelector('parsererror');
+if (parseError) {
+  throw new Error(`XML parse error: ${parseError.textContent}`);
+}
+
+// Access elements using standard DOM methods
+const books = doc.querySelectorAll('book');
+console.log(`Found ${books.length} books`);
+
+books.forEach(book => {
+  const id       = book.getAttribute('id');
+  const category = book.getAttribute('category');
+  const title    = book.querySelector('title')?.textContent;
+  const author   = book.querySelector('author')?.textContent;
+  const year     = book.querySelector('year')?.textContent;
+  const price    = parseFloat(book.querySelector('price')?.textContent ?? '0');
+
+  console.log({ id, category, title, author, year, price });
+});
+
+// Navigate the tree manually
+const root       = doc.documentElement;          // <bookstore>
+const firstBook  = root.firstElementChild;        // <book id="1">
+const titleEl    = firstBook.getElementsByTagName('title')[0];
+const lang       = titleEl.getAttribute('lang'); // "en"
+
+// Modify the tree
+const newBook = doc.createElement('book');
+newBook.setAttribute('id', '3');
+newBook.setAttribute('category', 'science');
+const newTitle = doc.createElement('title');
+newTitle.textContent = 'A Brief History of Time';
+newBook.appendChild(newTitle);
+root.appendChild(newBook);
+
+// Serialise back to XML string
+const serializer = new XMLSerializer();
+const updatedXml = serializer.serializeToString(doc);
+```
+
+---
+
+## XPath in the Browser
+
+The browser exposes `XPathEvaluator` and `document.evaluate` for running XPath queries:
+
+```js
+// Using document.evaluate (works on both HTML and XML documents)
+function xpathQuery(doc, expression, contextNode = doc) {
+  const result = doc.evaluate(
+    expression,
+    contextNode,
+    null,                            // namespace resolver
+    XPathResult.ORDERED_NODE_ITERATOR_TYPE,
+    null
+  );
+  const nodes = [];
+  let node;
+  while ((node = result.iterateNext())) {
+    nodes.push(node);
+  }
+  return nodes;
+}
+
+// Select all book titles
+const titles = xpathQuery(doc, '//book/title');
+titles.forEach(t => console.log(t.textContent));
+
+// Select books with price > 20
+const expensive = xpathQuery(doc, '//book[price > 20]');
+
+// Get a single string value
+const firstTitle = doc.evaluate(
+  'string(//book[1]/title)',
+  doc,
+  null,
+  XPathResult.STRING_TYPE,
+  null
+).stringValue;
+
+// Count nodes
+const bookCount = doc.evaluate(
+  'count(//book)',
+  doc,
+  null,
+  XPathResult.NUMBER_TYPE,
+  null
+).numberValue;
+console.log(`Book count: ${bookCount}`);
+
+// XPath with namespaces — needs a resolver
+const nsResolver = doc.createNSResolver(doc.documentElement);
+const nsPrefixed = doc.evaluate(
+  '//ns:book',
+  doc,
+  nsResolver,
+  XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+  null
+);
+```
+
+---
+
+## Python — xml.etree.ElementTree
+
+The standard library `xml.etree.ElementTree` module provides a simple, Pythonic API:
+
+```xml
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+# Parse from file
+tree = ET.parse('bookstore.xml')
+root = tree.getroot()
+
+# Parse from string
+xml_string = b'<root><item>hello</item></root>'
+root_from_str = ET.fromstring(xml_string)
+
+print(f"Root tag: {root.tag}")              # bookstore
+print(f"Root attribs: {root.attrib}")       # {}
+
+# Iterate direct children
+for book in root:
+    book_id  = book.get('id')
+    category = book.get('category', 'unknown')
+    title    = book.findtext('title')
+    year     = book.findtext('year')
+    price    = float(book.findtext('price', '0'))
+    authors  = [a.text for a in book.findall('author')]
+    print(f"[{book_id}] {title} ({year}) — {', '.join(authors)} — ${price:.2f}")
+
+# find() — returns first match or None
+first_tech = root.find('.//book[@category="technical"]')
+
+# findall() — returns list (supports limited XPath subset)
+all_titles     = root.findall('.//title')
+fiction_books  = root.findall('book[@category="fiction"]')
+tech_over_30   = [b for b in root.findall('book[@category="technical"]')
+                  if float(b.findtext('price', '0')) > 30]
+
+# iter() — walk all elements matching tag
+for price_el in root.iter('price'):
+    print(f"  price: {price_el.text}")
+
+# Accessing attributes and text
+for title_el in root.findall('.//title'):
+    lang = title_el.get('lang', 'en')
+    text = title_el.text
+    print(f"  [{lang}] {text}")
+
+# Modifying the tree
+new_book = ET.SubElement(root, 'book', {'id': '5', 'category': 'biography'})
+ET.SubElement(new_book, 'title').text = 'Steve Jobs'
+ET.SubElement(new_book, 'author').text = 'Walter Isaacson'
+ET.SubElement(new_book, 'year').text = '2011'
+ET.SubElement(new_book, 'price').text = '18.99'
+
+# Write back to file
+tree.write('bookstore_updated.xml', encoding='UTF-8', xml_declaration=True)
+
+# Pretty-print (Python 3.9+)
+ET.indent(tree, space='  ')
+tree.write('bookstore_pretty.xml', encoding='UTF-8', xml_declaration=True)
+```
+
+### ElementTree XPath Subset
+
+ElementTree supports a limited but useful subset of XPath:
+
+```xml
+root.findall('book')             # direct children named book
+root.findall('.//book')          # all descendant books
+root.findall('book[@id="1"]')    # book with id="1"
+root.findall('book[title]')      # books that have a title child
+root.find('book[1]')             # first book (1-indexed)
+root.find('book[last()]')        # last book
+```
+
+---
+
+## Python — lxml (Faster with Full XPath)
+
+`lxml` is a C-accelerated library with full XPath 1.0 support:
+
+```bash
+pip install lxml
+```
+
+```xml
+from lxml import etree
+
+# Parse with lxml (preserves whitespace and comments)
+tree = etree.parse('bookstore.xml')
+root = tree.getroot()
+
+# Full XPath 1.0 support
+books = root.xpath('//book[@category="technical" and price > 30]')
+for book in books:
+    title = book.findtext('title')
+    price = float(book.findtext('price'))
+    print(f"{title}: ${price:.2f}")
+
+# XPath with namespace
+NS = {'atom': 'http://www.w3.org/2005/Atom'}
+feed = etree.parse('feed.xml').getroot()
+entries = feed.xpath('//atom:entry/atom:title/text()', namespaces=NS)
+
+# Pretty print
+print(etree.tostring(root, pretty_print=True, encoding='unicode'))
+
+# XSLT transformation
+xsl_tree = etree.parse('bookstore.xsl')
+transform = etree.XSLT(xsl_tree)
+result = transform(tree)
+print(str(result))
+
+# XSD validation
+schema_doc = etree.parse('bookstore.xsd')
+schema = etree.XMLSchema(schema_doc)
+if not schema.validate(tree):
+    for err in schema.error_log:
+        print(f"Error at line {err.line}: {err.message}")
+
+# Incremental/streaming parse for large files
+context = etree.iterparse('large.xml', events=('start', 'end'))
+for event, element in context:
+    if event == 'end' and element.tag == 'book':
+        # process book
+        title = element.findtext('title')
+        print(title)
+        element.clear()  # free memory immediately
+```
+
+---
+
+## JavaScript — Node.js
+
+<Tabs>
+<TabItem label="fast-xml-parser">
+```bash
+npm install fast-xml-parser
+```
+
+```js
+import { XMLParser, XMLBuilder } from 'fast-xml-parser';
+
+const xmlString = `<bookstore>
+  <book id="1" category="fiction">
+    <title lang="en">The Great Gatsby</title>
+    <author>F. Scott Fitzgerald</author>
+    <year>1925</year>
+    <price>12.99</price>
+  </book>
+</bookstore>`;
+
+const parser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '@_',
+  parseAttributeValue: true,
+  parseTagValue: true,
+});
+
+const result = parser.parse(xmlString);
+console.log(JSON.stringify(result, null, 2));
+
+// Build XML from JS object
+const builder = new XMLBuilder({
+  ignoreAttributes: false,
+  attributeNamePrefix: '@_',
+  format: true,
+  indentBy: '  ',
+});
+
+const xmlOutput = builder.build(result);
+console.log(xmlOutput);
+```
+</TabItem>
+<TabItem label="xml2js">
+```bash
+npm install xml2js
+```
+
+```js
+import { parseString, Builder } from 'xml2js';
+import { promisify } from 'util';
+
+const parseXml = promisify(parseString);
+
+const xml = `<root>
+  <person age="30">
+    <name>Alice</name>
+    <email>alice@example.com</email>
+  </person>
+</root>`;
+
+const result = await parseXml(xml, {
+  explicitArray: false,
+  mergeAttrs: true,
+});
+
+console.log(result.root.person.name);   // Alice
+console.log(result.root.person.age);    // "30"
+
+// Build back to XML
+const builder = new Builder();
+const xmlOut = builder.buildObject(result);
+```
+</TabItem>
+</Tabs>
+
+---
+
+## Java — DOM, SAX, and JAXB
+
+<Tabs>
+<TabItem label="DOM">
+```xml
+import org.w3c.dom.*;
+import javax.xml.parsers.*;
+import java.io.File;
+
+DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+// Disable XXE (see Security section)
+factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+factory.setNamespaceAware(true);
+
+DocumentBuilder builder = factory.newDocumentBuilder();
+Document doc = builder.parse(new File("bookstore.xml"));
+doc.getDocumentElement().normalize();
+
+NodeList books = doc.getElementsByTagName("book");
+for (int i = 0; i < books.getLength(); i++) {
+    Element book = (Element) books.item(i);
+    String id       = book.getAttribute("id");
+    String category = book.getAttribute("category");
+    String title    = book.getElementsByTagName("title").item(0).getTextContent();
+    String price    = book.getElementsByTagName("price").item(0).getTextContent();
+    System.out.printf("[%s] %s (%s) $%s%n", id, title, category, price);
+}
+```
+</TabItem>
+<TabItem label="SAX">
+```xml
+import org.xml.sax.*;
+import org.xml.sax.helpers.DefaultHandler;
+import javax.xml.parsers.*;
+
+public class BookSaxHandler extends DefaultHandler {
+    private StringBuilder currentText = new StringBuilder();
+    private String currentBookId;
+    private boolean inTitle;
+
+    @Override
+    public void startElement(String uri, String localName,
+                             String qName, Attributes attrs) {
+        currentText.setLength(0);
+        if ("book".equals(qName)) {
+            currentBookId = attrs.getValue("id");
+        }
+        inTitle = "title".equals(qName);
+    }
+
+    @Override
+    public void characters(char[] ch, int start, int length) {
+        currentText.append(ch, start, length);
+    }
+
+    @Override
+    public void endElement(String uri, String localName, String qName) {
+        if (inTitle && "title".equals(qName)) {
+            System.out.printf("Book %s: %s%n", currentBookId, currentText);
+            inTitle = false;
+        }
+    }
+}
+
+// Usage
+SAXParserFactory saxFactory = SAXParserFactory.newInstance();
+saxFactory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+SAXParser saxParser = saxFactory.newSAXParser();
+saxParser.parse(new File("bookstore.xml"), new BookSaxHandler());
+```
+</TabItem>
+<TabItem label="JAXB">
+```xml
+import jakarta.xml.bind.*;
+import jakarta.xml.bind.annotation.*;
+import java.util.List;
+
+// Annotated Java class
+@XmlRootElement(name = "book")
+@XmlAccessorType(XmlAccessType.FIELD)
+public class Book {
+    @XmlAttribute
+    private String id;
+
+    @XmlAttribute
+    private String category;
+
+    @XmlElement
+    private String title;
+
+    @XmlElement(name = "author")
+    private List<String> authors;
+
+    @XmlElement
+    private int year;
+
+    @XmlElement
+    private double price;
+
+    // getters and setters...
+}
+
+// Unmarshal (XML → Java)
+JAXBContext ctx = JAXBContext.newInstance(Book.class);
+Unmarshaller un = ctx.createUnmarshaller();
+Book book = (Book) un.unmarshal(new File("book.xml"));
+System.out.println(book.getTitle());
+
+// Marshal (Java → XML)
+Marshaller m = ctx.createMarshaller();
+m.setProperty(Marshaller.JAXB_FORMATTED_OUTPUT, true);
+m.marshal(book, System.out);
+```
+</TabItem>
+</Tabs>
+
+---
+
+## XML to JSON Conversion
+
+```js
+// Using fast-xml-parser for reliable conversion
+import { XMLParser } from 'fast-xml-parser';
+
+const parser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '',
+  parseAttributeValue: true,
+  textNodeName: '#text',
+});
+
+const json = parser.parse(xmlString);
+console.log(JSON.stringify(json, null, 2));
+```
+
+```xml
+# Python conversion with xmltodict
+pip install xmltodict
+```
+
+```xml
+import xmltodict, json
+
+with open('bookstore.xml', 'rb') as f:
+    data = xmltodict.parse(f)
+
+# Convert to JSON
+json_str = json.dumps(data, indent=2)
+print(json_str)
+
+# Convert back to XML
+xml_out = xmltodict.unparse(data, pretty=True)
+```
+
+---
+
+## Security Considerations
+
+### XML External Entity (XXE) Injection
+
+XXE is a critical vulnerability where an attacker can read arbitrary server files by declaring a malicious external entity:
+
+```xml
+<!-- Malicious document — reads /etc/passwd via XXE -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE foo [
+  <!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<root><data>&xxe;</data></root>
+```
+
+### Mitigations
+
+<Steps>
+1. **Disable DOCTYPE processing entirely** — the safest option for most applications.
+2. **Disable external entity loading** if DOCTYPE must be allowed.
+3. **Sanitize or sandbox** user-supplied XML before parsing.
+4. **Use a parser that is secure by default** (e.g., `defusedxml` in Python).
+</Steps>
+
+```xml
+# Python — use defusedxml
+pip install defusedxml
+```
+
+```xml
+import defusedxml.ElementTree as ET  # drop-in replacement
+
+# defusedxml raises DefusedXmlException on XXE, billion laughs, etc.
+tree = ET.parse('user_supplied.xml')
+root = tree.getroot()
+```
+
+```xml
+// Java — disable XXE in DocumentBuilderFactory
+DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
+```
+
+```js
+// Node.js — fast-xml-parser is safe by default;
+// for the browser DOMParser, XXE is not a risk
+// since browsers block file:// access cross-origin.
+```
+
+### Billion Laughs (Entity Expansion) Attack
+
+A nested entity attack that expands exponentially in memory:
+
+```xml
+<!-- Billion laughs — do NOT process this -->
+<!DOCTYPE bomb [
+  <!ENTITY a "lol">
+  <!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">
+  <!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">
+  <!ENTITY d "&c;&c;&c;&c;&c;&c;&c;&c;&c;&c;">
+]>
+<root>&d;</root>
+```
+
+Mitigation: Disabling DOCTYPE processing (as above) also prevents this attack.
+
+:::caution[Never Parse Untrusted XML Without Hardening]
+Any application that accepts XML from untrusted sources — user uploads, webhooks, API payloads — must disable external entity resolution. XXE is listed in the OWASP Top 10 and has been exploited in numerous real-world breaches.
+:::
+
+---
+
+## Best Practices
+
+| Practice | Reason |
+|---|---|
+| Always specify `encoding="UTF-8"` in the declaration | Prevents encoding ambiguity |
+| Validate against a schema before processing | Fail fast on malformed input |
+| Disable XXE before parsing untrusted XML | Security |
+| Use streaming (SAX/StAX) for documents > 50 MB | Memory efficiency |
+| Clear elements after processing in streaming mode | Prevent memory leaks |
+| Use namespaces in multi-vocabulary documents | Avoid name collisions |
+| Prefer XPath over manual DOM traversal | More readable, less fragile |
+| Cache parsed documents when possible | Parse is expensive |
+| Use CDATA for embedding code/HTML snippets | Avoid escaping mistakes |
+| Store XML as UTF-8 files without a BOM | Maximum compatibility |

@@ -1,0 +1,534 @@
+---
+title: Providers & Dependency Injection
+description: Understand NestJS providers, the IoC container, custom providers, injection scopes, and advanced DI patterns.
+sidebar:
+  order: 4
+tags: [typescript, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Providers & Dependency Injection
+
+Providers are a fundamental concept in NestJS. Many basic NestJS classes may be treated as providers — services,
+repositories, factories, helpers, and so on. The main idea of a provider is that it can be **injected** as a
+dependency, meaning objects can create various relationships with each other.
+
+## @Injectable() Decorator
+
+The `@Injectable()` decorator marks a class as a provider that can be managed by the NestJS IoC container:
+
+```typescript
+import { Injectable } from '@nestjs/common';
+
+@Injectable()
+export class CatsService {
+  private readonly cats: Cat[] = [];
+
+  create(cat: Cat): Cat {
+    this.cats.push(cat);
+    return cat;
+  }
+
+  findAll(): Cat[] {
+    return this.cats;
+  }
+
+  findOne(id: number): Cat | undefined {
+    return this.cats.find((cat) => cat.id === id);
+  }
+}
+```
+
+## Constructor Injection
+
+The most common and recommended way to inject dependencies is through the constructor:
+
+```typescript
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { ConfigService } from '@nestjs/config';
+import { User } from './entities/user.entity';
+import { MailService } from '../mail/mail.service';
+
+@Injectable()
+export class UsersService {
+  constructor(
+    @InjectRepository(User)
+    private readonly usersRepository: Repository<User>,
+    private readonly configService: ConfigService,
+    private readonly mailService: MailService,
+  ) {}
+
+  async findOne(id: number): Promise<User> {
+    const user = await this.usersRepository.findOne({ where: { id } });
+    if (!user) {
+      throw new NotFoundException(`User #${id} not found`);
+    }
+    return user;
+  }
+
+  async create(email: string, password: string): Promise<User> {
+    const user = this.usersRepository.create({ email, password });
+    const saved = await this.usersRepository.save(user);
+    await this.mailService.sendWelcome(saved.email);
+    return saved;
+  }
+}
+```
+
+## Provider Registration in Module
+
+Providers must be registered in a module before they can be injected:
+
+```typescript
+import { Module } from '@nestjs/common';
+import { UsersController } from './users.controller';
+import { UsersService } from './users.service';
+import { AuditService } from './audit.service';
+
+@Module({
+  controllers: [UsersController],
+  providers: [
+    UsersService,
+    AuditService,
+  ],
+  // Export UsersService so other modules can inject it
+  exports: [UsersService],
+})
+export class UsersModule {}
+```
+
+## Custom Providers
+
+NestJS supports several ways to define a custom provider. The long-hand syntax is:
+
+```typescript
+@Module({
+  providers: [
+    // Short-hand (equivalent to below)
+    UsersService,
+
+    // Explicit long-hand
+    {
+      provide: UsersService,
+      useClass: UsersService,
+    },
+  ],
+})
+```
+
+### useValue
+
+Inject a constant value, a mock object, or a configuration object:
+
+```typescript
+const mockUsersService = {
+  findAll: () => [],
+  findOne: (id: number) => ({ id, name: 'Mock User' }),
+  create: (dto: any) => ({ id: 1, ...dto }),
+};
+
+@Module({
+  providers: [
+    {
+      provide: UsersService,
+      useValue: mockUsersService,
+    },
+    {
+      provide: 'APP_NAME',
+      useValue: 'My NestJS App',
+    },
+  ],
+})
+export class UsersModule {}
+```
+
+### useClass
+
+Swap a provider implementation based on the environment:
+
+```typescript
+const configServiceProvider = {
+  provide: ConfigService,
+  useClass:
+    process.env.NODE_ENV === 'development'
+      ? DevelopmentConfigService
+      : ProductionConfigService,
+};
+
+@Module({
+  providers: [configServiceProvider],
+})
+export class AppModule {}
+```
+
+### useFactory
+
+Create providers dynamically using a factory function. The factory can be async and can inject dependencies:
+
+```typescript
+import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { TypeOrmModule } from '@nestjs/typeorm';
+
+@Module({
+  imports: [
+    TypeOrmModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: async (configService: ConfigService) => ({
+        type: 'postgres',
+        host: configService.getOrThrow('DB_HOST'),
+        port: configService.getOrThrow<number>('DB_PORT'),
+        username: configService.getOrThrow('DB_USER'),
+        password: configService.getOrThrow('DB_PASS'),
+        database: configService.getOrThrow('DB_NAME'),
+        autoLoadEntities: true,
+        synchronize: configService.get('NODE_ENV') !== 'production',
+      }),
+    }),
+  ],
+})
+export class DatabaseModule {}
+```
+
+Custom factory with explicit inject array:
+
+```typescript
+const connectionProvider = {
+  provide: 'DATABASE_CONNECTION',
+  inject: [ConfigService],
+  useFactory: async (configService: ConfigService) => {
+    const connection = await createConnection({
+      url: configService.getOrThrow('DATABASE_URL'),
+    });
+    return connection;
+  },
+};
+```
+
+### useExisting
+
+Create an alias for an existing provider (two tokens pointing to the same instance):
+
+```typescript
+@Module({
+  providers: [
+    LogService,
+    {
+      provide: 'LOG_SERVICE',
+      useExisting: LogService,
+    },
+  ],
+})
+export class AppModule {}
+```
+
+## Async Providers
+
+When a provider's initialization requires asynchronous operations (e.g., connecting to a database), use an
+async factory:
+
+```typescript
+{
+  provide: 'ASYNC_CONNECTION',
+  useFactory: async () => {
+    const connection = await createAsyncConnection({
+      host: 'localhost',
+      port: 5432,
+    });
+    return connection;
+  },
+}
+```
+
+NestJS will await the factory promise before starting the application.
+
+:::tip[Async Startup]
+The application won't start accepting requests until all async providers have resolved. This guarantees that
+your database connection, external service clients, and configuration are fully initialized before any request hits
+your handlers.
+:::
+
+## Optional Providers
+
+Mark a dependency as optional using `@Optional()`. If the provider isn't registered, `undefined` is injected:
+
+```typescript
+import { Injectable, Optional, Inject } from '@nestjs/common';
+
+@Injectable()
+export class HttpService {
+  constructor(
+    @Optional()
+    @Inject('HTTP_OPTIONS')
+    private readonly httpOptions: HttpOptions = {},
+  ) {}
+}
+```
+
+## Injection Tokens
+
+Tokens can be strings, Symbols, or class references. Using Symbol tokens avoids string collision:
+
+```typescript
+// tokens.ts
+export const DATABASE_CONNECTION = Symbol('DATABASE_CONNECTION');
+export const MAIL_CONFIG = Symbol('MAIL_CONFIG');
+
+// mail.module.ts
+@Module({
+  providers: [
+    {
+      provide: MAIL_CONFIG,
+      useValue: {
+        host: 'smtp.example.com',
+        port: 587,
+      },
+    },
+  ],
+})
+export class MailModule {}
+
+// mail.service.ts
+@Injectable()
+export class MailService {
+  constructor(
+    @Inject(MAIL_CONFIG)
+    private readonly config: MailConfig,
+  ) {}
+}
+```
+
+## @Inject() Decorator
+
+Use `@Inject()` when the injection token is not a class (string, Symbol, or interface token):
+
+```typescript
+import { Injectable, Inject } from '@nestjs/common';
+
+@Injectable()
+export class AppService {
+  constructor(
+    @Inject('APP_NAME') private readonly appName: string,
+    @Inject(DATABASE_CONNECTION) private readonly db: DatabaseConnection,
+  ) {}
+
+  getName(): string {
+    return this.appName;
+  }
+}
+```
+
+## Circular Dependencies and forwardRef()
+
+When two providers depend on each other, use `forwardRef()` to break the circular reference:
+
+```typescript
+// users.service.ts
+import { Injectable, forwardRef, Inject } from '@nestjs/common';
+import { AuthService } from '../auth/auth.service';
+
+@Injectable()
+export class UsersService {
+  constructor(
+    @Inject(forwardRef(() => AuthService))
+    private authService: AuthService,
+  ) {}
+}
+
+// auth.service.ts
+import { Injectable, forwardRef, Inject } from '@nestjs/common';
+import { UsersService } from '../users/users.service';
+
+@Injectable()
+export class AuthService {
+  constructor(
+    @Inject(forwardRef(() => UsersService))
+    private usersService: UsersService,
+  ) {}
+}
+```
+
+:::caution[Circular Dependencies]
+Circular dependencies often indicate a design issue. Consider refactoring to extract shared logic into a third
+provider. Use `forwardRef()` only as a last resort, as it can make the dependency graph harder to reason about.
+:::
+
+For modules, use the same pattern:
+
+```typescript
+// users.module.ts
+@Module({
+  imports: [forwardRef(() => AuthModule)],
+  ...
+})
+export class UsersModule {}
+```
+
+## Request-Scoped Providers
+
+By default, providers are **singletons** — one instance shared across the entire application.
+NestJS supports three scopes:
+
+```typescript
+import { Injectable, Scope } from '@nestjs/common';
+
+// DEFAULT: singleton (one instance for the whole app)
+@Injectable()
+export class SingletonService {}
+
+// REQUEST: new instance per incoming request
+@Injectable({ scope: Scope.REQUEST })
+export class RequestScopedService {
+  constructor(@Inject(REQUEST) private request: Request) {}
+}
+
+// TRANSIENT: new instance every time it is injected
+@Injectable({ scope: Scope.TRANSIENT })
+export class TransientService {}
+```
+
+:::caution[Request Scope Performance]
+Request-scoped providers create a new instance for every request, which adds overhead. Avoid request scope
+unless you genuinely need per-request isolation (e.g., holding request context or user info in a service).
+:::
+
+## Service Layers — Repository Pattern
+
+Organize your code into layers for better separation of concerns:
+
+```typescript
+// users.repository.ts — Data access layer
+@Injectable()
+export class UsersRepository {
+  constructor(
+    @InjectRepository(User)
+    private readonly ormRepository: Repository<User>,
+  ) {}
+
+  findAll(): Promise<User[]> {
+    return this.ormRepository.find();
+  }
+
+  findById(id: number): Promise<User | null> {
+    return this.ormRepository.findOne({ where: { id } });
+  }
+
+  save(user: Partial<User>): Promise<User> {
+    return this.ormRepository.save(user);
+  }
+}
+
+// users.service.ts — Business logic layer
+@Injectable()
+export class UsersService {
+  constructor(private readonly usersRepository: UsersRepository) {}
+
+  async getActiveUsers(): Promise<User[]> {
+    const users = await this.usersRepository.findAll();
+    return users.filter((u) => u.isActive);
+  }
+}
+
+// users.controller.ts — Presentation layer
+@Controller('users')
+export class UsersController {
+  constructor(private readonly usersService: UsersService) {}
+
+  @Get()
+  getActive(): Promise<User[]> {
+    return this.usersService.getActiveUsers();
+  }
+}
+```
+
+## Global Providers
+
+Register a provider globally without importing its module in every consuming module:
+
+```typescript
+import { Global, Module } from '@nestjs/common';
+
+@Global()
+@Module({
+  providers: [DatabaseService, LogService],
+  exports: [DatabaseService, LogService],
+})
+export class CoreModule {}
+```
+
+:::tip[Use Global Sparingly]
+Only mark modules as global when the provider is genuinely needed application-wide (e.g., logging, configuration,
+database connection). Overusing global modules eliminates the encapsulation benefits of the module system.
+:::
+
+## ModuleRef — Dynamic Provider Lookup
+
+`ModuleRef` lets you retrieve providers from the DI container dynamically at runtime:
+
+```typescript
+import { Injectable, OnModuleInit } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
+import { Scope } from '@nestjs/common';
+
+@Injectable()
+export class CatsService implements OnModuleInit {
+  private service: SomeService;
+
+  constructor(private moduleRef: ModuleRef) {}
+
+  async onModuleInit() {
+    // Retrieve a singleton provider
+    this.service = this.moduleRef.get(SomeService, { strict: false });
+  }
+
+  async handleRequest() {
+    // Retrieve a transient or request-scoped provider
+    const transient = await this.moduleRef.resolve(TransientService);
+    transient.doWork();
+  }
+}
+```
+
+## Provider Interfaces
+
+Define interfaces for your providers to make them easier to mock in tests:
+
+```typescript
+// mail.interface.ts
+export interface IMailService {
+  sendWelcome(email: string): Promise<void>;
+  sendPasswordReset(email: string, token: string): Promise<void>;
+}
+
+export const MAIL_SERVICE = Symbol('MAIL_SERVICE');
+
+// mail.service.ts
+@Injectable()
+export class MailService implements IMailService {
+  async sendWelcome(email: string): Promise<void> {
+    // implementation
+  }
+  async sendPasswordReset(email: string, token: string): Promise<void> {
+    // implementation
+  }
+}
+
+// In tests, swap with a mock:
+const mockMailService: IMailService = {
+  sendWelcome: jest.fn(),
+  sendPasswordReset: jest.fn(),
+};
+
+// mail.module.ts
+@Module({
+  providers: [
+    { provide: MAIL_SERVICE, useClass: MailService },
+  ],
+  exports: [MAIL_SERVICE],
+})
+export class MailModule {}
+```

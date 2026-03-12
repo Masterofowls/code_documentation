@@ -1,0 +1,515 @@
+---
+title: HTML Browser APIs
+description: Browser APIs available in the HTML context — Web Storage, Web Workers, Service Workers, Notifications, Geolocation, Clipboard, Drag and Drop, History, Broadcast Channel, Page Visibility, and Fullscreen.
+sidebar:
+  order: 8
+tags: [html, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Modern browsers expose a rich set of APIs that extend what HTML pages can do. These APIs allow you to store data locally, run code in background threads, work offline, access device hardware, and communicate between tabs.
+
+## Web Storage
+
+The Web Storage API provides key-value storage in the browser. It is simpler than cookies and has larger capacity (5–10 MB).
+
+<Tabs>
+  <TabItem label="localStorage">
+    ```js
+    // Persists across browser sessions (survives page close)
+
+    // Store a value
+    localStorage.setItem('theme', 'dark');
+    localStorage.setItem('user', JSON.stringify({ id: 42, name: 'Jane' }));
+
+    // Read a value
+    const theme = localStorage.getItem('theme');           // 'dark'
+    const user = JSON.parse(localStorage.getItem('user')); // { id: 42, name: 'Jane' }
+
+    // Remove a specific key
+    localStorage.removeItem('theme');
+
+    // Clear all keys for this origin
+    localStorage.clear();
+
+    // Iterate all keys
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      console.log(key, localStorage.getItem(key));
+    }
+
+    // Listen for changes in other tabs
+    window.addEventListener('storage', (event) => {
+      console.log('Key changed:', event.key);
+      console.log('Old value:', event.oldValue);
+      console.log('New value:', event.newValue);
+    });
+    ```
+  </TabItem>
+  <TabItem label="sessionStorage">
+    ```js
+    // Cleared when the browser tab/window is closed
+
+    // Exactly the same API as localStorage
+    sessionStorage.setItem('draft', JSON.stringify({ title: 'My Post', body: '...' }));
+
+    const draft = JSON.parse(sessionStorage.getItem('draft'));
+
+    sessionStorage.removeItem('draft');
+    sessionStorage.clear();
+    ```
+
+    Use `sessionStorage` for:
+    - Form state that should not persist across sessions
+    - Multi-step wizard data
+    - Scroll position or UI state during a single visit
+  </TabItem>
+</Tabs>
+
+:::caution[Never Store Sensitive Data in Web Storage]
+`localStorage` and `sessionStorage` are accessible to any JavaScript on the same origin, including third-party scripts. Never store authentication tokens, passwords, credit card numbers, or other sensitive data there.
+:::
+
+## Web Workers
+
+Web Workers let you run JavaScript on a background thread, keeping the main thread (and therefore the UI) responsive:
+
+```html
+<!-- index.html -->
+<button id="start-btn">Start Heavy Calculation</button>
+<p id="result"></p>
+```
+
+```js
+// main.js — runs on the main thread
+const worker = new Worker('/workers/calculator.js');
+
+document.getElementById('start-btn').addEventListener('click', () => {
+  // Send data to the worker
+  worker.postMessage({ numbers: Array.from({ length: 1_000_000 }, (_, i) => i) });
+});
+
+// Receive result from worker
+worker.addEventListener('message', (event) => {
+  document.getElementById('result').textContent = `Sum: ${event.data.result}`;
+});
+
+// Handle worker errors
+worker.addEventListener('error', (event) => {
+  console.error('Worker error:', event.message);
+});
+
+// Terminate the worker when done
+// worker.terminate();
+```
+
+```js
+// /workers/calculator.js — runs on a background thread
+self.addEventListener('message', (event) => {
+  const { numbers } = event.data;
+
+  // This heavy computation won't block the UI
+  const sum = numbers.reduce((acc, n) => acc + n, 0);
+
+  // Send result back to main thread
+  self.postMessage({ result: sum });
+});
+```
+
+### Worker Types
+
+| Type | Description |
+|---|---|
+| `Worker` | Dedicated worker — one-to-one with the creating page |
+| `SharedWorker` | Shared between multiple pages/tabs from the same origin |
+| `ServiceWorker` | Acts as a network proxy — see below |
+
+## Service Workers
+
+Service Workers are a special type of Web Worker that act as a programmable proxy between your page and the network. They enable offline functionality, push notifications, and background sync.
+
+<Steps>
+1. **Register the Service Worker**
+
+   ```js
+   // In your main JavaScript file
+   if ('serviceWorker' in navigator) {
+     navigator.serviceWorker.register('/sw.js', { scope: '/' })
+       .then(registration => {
+         console.log('SW registered:', registration.scope);
+       })
+       .catch(error => {
+         console.error('SW registration failed:', error);
+       });
+   }
+   ```
+
+2. **Install — Cache Assets**
+
+   ```js
+   // /sw.js
+   const CACHE_NAME = 'my-app-v1';
+   const ASSETS_TO_CACHE = [
+     '/',
+     '/index.html',
+     '/styles.css',
+     '/app.js',
+     '/images/logo.svg',
+   ];
+
+   self.addEventListener('install', (event) => {
+     event.waitUntil(
+       caches.open(CACHE_NAME).then(cache => {
+         return cache.addAll(ASSETS_TO_CACHE);
+       })
+     );
+   });
+   ```
+
+3. **Activate — Clean Old Caches**
+
+   ```js
+   self.addEventListener('activate', (event) => {
+     event.waitUntil(
+       caches.keys().then(cacheNames => {
+         return Promise.all(
+           cacheNames
+             .filter(name => name !== CACHE_NAME)
+             .map(name => caches.delete(name))
+         );
+       })
+     );
+   });
+   ```
+
+4. **Fetch — Serve from Cache (Offline Support)**
+
+   ```js
+   self.addEventListener('fetch', (event) => {
+     event.respondWith(
+       caches.match(event.request).then(cachedResponse => {
+         // Cache hit — return cached response
+         if (cachedResponse) return cachedResponse;
+
+         // Not in cache — fetch from network and cache it
+         return fetch(event.request).then(response => {
+           // Clone the response (it can only be consumed once)
+           const responseClone = response.clone();
+           caches.open(CACHE_NAME).then(cache => {
+             cache.put(event.request, responseClone);
+           });
+           return response;
+         });
+       }).catch(() => {
+         // Offline fallback
+         return caches.match('/offline.html');
+       })
+     );
+   });
+   ```
+</Steps>
+
+## Notifications API
+
+```js
+// Request permission
+async function requestNotificationPermission() {
+  const permission = await Notification.requestPermission();
+  return permission; // 'granted', 'denied', or 'default'
+}
+
+// Show a notification
+async function showNotification() {
+  const permission = await requestNotificationPermission();
+
+  if (permission === 'granted') {
+    const notification = new Notification('New Message', {
+      body: 'Jane sent you a message: "Hello!"',
+      icon: '/images/icon-192.png',
+      badge: '/images/badge-72.png',
+      tag: 'message-1', // Replaces existing notification with same tag
+      requireInteraction: false,
+      silent: false,
+    });
+
+    notification.addEventListener('click', () => {
+      window.focus();
+      notification.close();
+    });
+  }
+}
+```
+
+:::tip[Request Permission Only on User Gesture]
+Browsers block automatic permission prompts. Always trigger `Notification.requestPermission()` from a direct user action like a button click, not on page load.
+:::
+
+## Geolocation API
+
+```js
+// One-time position
+navigator.geolocation.getCurrentPosition(
+  (position) => {
+    const { latitude, longitude, accuracy } = position.coords;
+    console.log(`Location: ${latitude}, ${longitude} (±${accuracy}m)`);
+  },
+  (error) => {
+    switch (error.code) {
+      case error.PERMISSION_DENIED:
+        console.error('User denied geolocation');
+        break;
+      case error.POSITION_UNAVAILABLE:
+        console.error('Position unavailable');
+        break;
+      case error.TIMEOUT:
+        console.error('Request timed out');
+        break;
+    }
+  },
+  {
+    enableHighAccuracy: true, // GPS vs network-based (more battery drain)
+    timeout: 10000,           // ms before error
+    maximumAge: 60000,        // ms to accept cached position
+  }
+);
+
+// Watch continuous position updates
+const watchId = navigator.geolocation.watchPosition(
+  (position) => {
+    updateMapMarker(position.coords.latitude, position.coords.longitude);
+  },
+  (error) => console.error(error),
+  { enableHighAccuracy: true }
+);
+
+// Stop watching
+navigator.geolocation.clearWatch(watchId);
+```
+
+## Clipboard API
+
+```js
+// Write to clipboard
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    console.log('Copied to clipboard');
+  } catch (error) {
+    console.error('Failed to copy:', error);
+  }
+}
+
+// Read from clipboard (requires user gesture + 'clipboard-read' permission)
+async function pasteFromClipboard() {
+  try {
+    const text = await navigator.clipboard.readText();
+    document.getElementById('target').value = text;
+  } catch (error) {
+    console.error('Failed to paste:', error);
+  }
+}
+
+// Copy rich content (HTML)
+async function copyHTML(htmlString) {
+  const blob = new Blob([htmlString], { type: 'text/html' });
+  const item = new ClipboardItem({ 'text/html': blob });
+  await navigator.clipboard.write([item]);
+}
+```
+
+## Drag and Drop API
+
+```html
+<!-- Draggable element -->
+<div
+  draggable="true"
+  id="drag-item"
+  class="card"
+>
+  Drag me!
+</div>
+
+<!-- Drop target -->
+<div
+  id="drop-zone"
+  class="drop-zone"
+>
+  Drop here
+</div>
+```
+
+```js
+const dragItem = document.getElementById('drag-item');
+const dropZone = document.getElementById('drop-zone');
+
+// Source events
+dragItem.addEventListener('dragstart', (event) => {
+  event.dataTransfer.setData('text/plain', dragItem.id);
+  event.dataTransfer.effectAllowed = 'move';
+  dragItem.classList.add('dragging');
+});
+
+dragItem.addEventListener('dragend', () => {
+  dragItem.classList.remove('dragging');
+});
+
+// Target events
+dropZone.addEventListener('dragover', (event) => {
+  event.preventDefault(); // Required to allow drop
+  event.dataTransfer.dropEffect = 'move';
+  dropZone.classList.add('drag-over');
+});
+
+dropZone.addEventListener('dragleave', () => {
+  dropZone.classList.remove('drag-over');
+});
+
+dropZone.addEventListener('drop', (event) => {
+  event.preventDefault();
+  const id = event.dataTransfer.getData('text/plain');
+  const droppedElement = document.getElementById(id);
+  dropZone.appendChild(droppedElement);
+  dropZone.classList.remove('drag-over');
+});
+```
+
+## History API
+
+Navigate programmatically without full page reloads — the foundation of single-page application routing:
+
+```js
+// Push a new entry to the history stack
+history.pushState({ page: 'about', id: 42 }, 'About Us', '/about');
+
+// Replace the current history entry (no back button entry)
+history.replaceState({ page: 'home' }, 'Home', '/');
+
+// Navigate backwards
+history.back();
+history.go(-1); // Same as back()
+
+// Navigate forwards
+history.forward();
+history.go(1);
+
+// Navigate N steps
+history.go(-3);
+
+// Respond to back/forward button navigation
+window.addEventListener('popstate', (event) => {
+  const state = event.state;
+  if (state) {
+    console.log('Navigated to:', state.page);
+    // Re-render the appropriate content
+    renderPage(state.page);
+  }
+});
+```
+
+## Broadcast Channel API
+
+Send messages between tabs, windows, and workers from the same origin:
+
+```js
+// In each tab / page
+const channel = new BroadcastChannel('app-sync');
+
+// Send a message to all other contexts
+channel.postMessage({ type: 'USER_LOGGED_OUT' });
+
+// Receive messages from other contexts
+channel.addEventListener('message', (event) => {
+  if (event.data.type === 'USER_LOGGED_OUT') {
+    // Redirect to login page in this tab too
+    window.location.href = '/login';
+  }
+});
+
+// Clean up
+channel.close();
+```
+
+## Page Visibility API
+
+React to the user switching tabs or minimising the window:
+
+```js
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    // Page is hidden — pause video, stop animations, reduce polling
+    document.title = 'Come back! 👋';
+    pauseVideoPlayback();
+    stopPolling();
+  } else {
+    // Page is visible again — resume
+    document.title = 'My App';
+    resumePolling();
+  }
+});
+
+// Check current state
+console.log(document.visibilityState); // 'visible' or 'hidden'
+console.log(document.hidden);          // true or false
+```
+
+## Fullscreen API
+
+```js
+// Enter fullscreen
+async function enterFullscreen(element = document.documentElement) {
+  try {
+    if (element.requestFullscreen) {
+      await element.requestFullscreen();
+    } else if (element.webkitRequestFullscreen) {
+      // Safari
+      element.webkitRequestFullscreen();
+    }
+  } catch (error) {
+    console.error('Could not enter fullscreen:', error);
+  }
+}
+
+// Exit fullscreen
+async function exitFullscreen() {
+  if (document.exitFullscreen) {
+    await document.exitFullscreen();
+  }
+}
+
+// Toggle fullscreen
+async function toggleFullscreen(element) {
+  if (!document.fullscreenElement) {
+    await enterFullscreen(element);
+  } else {
+    await exitFullscreen();
+  }
+}
+
+// Respond to fullscreen changes
+document.addEventListener('fullscreenchange', () => {
+  const isFullscreen = !!document.fullscreenElement;
+  updateFullscreenButton(isFullscreen);
+});
+```
+
+```css
+/* Style elements differently when in fullscreen */
+:fullscreen {
+  background: #000;
+}
+
+/* Prefix for Safari */
+:-webkit-full-screen {
+  background: #000;
+}
+
+/* Style the backdrop behind a fullscreen element */
+::backdrop {
+  background: rgba(0, 0, 0, 0.8);
+}
+```
+
+:::tip[API Feature Detection]
+Always check for API availability before using it. Features like Geolocation, Notifications, and Clipboard require explicit user permission and may be blocked in iframes or insecure (non-HTTPS) contexts.
+:::

@@ -1,0 +1,367 @@
+---
+title: Scene, Camera & Renderer
+description: Master the Three.js scene graph, PerspectiveCamera vs OrthographicCamera, WebGLRenderer configuration, the render loop, and Object3D hierarchy.
+sidebar:
+  order: 3
+tags: [javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+The scene, camera, and renderer are the three core pillars of every Three.js application. Understanding how they work together — and how to configure each — is fundamental to building anything with the library.
+
+---
+
+## The Scene
+
+`THREE.Scene` is the root container of your 3D world. Everything you want to render must be added to the scene (or to a child of something in the scene).
+
+```js
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+
+// Background
+scene.background = new THREE.Color('#111827');      // solid colour
+scene.background = new THREE.Color(0x111827);       // hex number
+scene.background = null;                            // transparent canvas
+
+// Fog
+scene.fog = new THREE.Fog('#111827', 10, 50);       // linear fog (near, far)
+scene.fog = new THREE.FogExp2('#111827', 0.05);     // exponential fog (density)
+
+// Environment map (used for IBL reflections on PBR materials)
+// (See lights-shadows.mdx for the full setup with PMREMGenerator)
+scene.environment = envTexture;
+
+// Inspect the scene tree
+console.log(scene.children);        // direct children
+scene.traverse(obj => {
+  console.log(obj.name, obj.type);  // walk every node
+});
+```
+
+---
+
+## PerspectiveCamera
+
+`PerspectiveCamera` simulates how a real camera lens works — objects farther away appear smaller. This is the camera you want for almost all 3D scenes.
+
+```js
+const camera = new THREE.PerspectiveCamera(
+  75,                                    // fov — vertical field of view in degrees
+  window.innerWidth / window.innerHeight, // aspect ratio (width / height)
+  0.1,                                   // near clipping plane
+  1000,                                  // far clipping plane
+);
+
+camera.position.set(3, 2, 5);
+camera.lookAt(0, 0, 0);       // point at scene origin
+
+// Or set a custom "up" vector (default is +Y)
+camera.up.set(0, 1, 0);
+camera.lookAt(new THREE.Vector3(0, 0, 0));
+
+// After changing aspect, call this:
+camera.updateProjectionMatrix();
+```
+
+### FOV and Depth
+
+| Setting | Effect |
+|---|---|
+| **Low FOV** (< 50°) | Telephoto — compressed depth, good for product shots |
+| **Medium FOV** (50–75°) | Natural — most 3D scenes use 60–75° |
+| **High FOV** (> 90°) | Wide angle / fisheye — distorted perspective |
+| **Near too large** | Front of objects clipped |
+| **Far too small** | Distant objects disappear |
+| **Far / Near ratio > 10000** | Z-fighting artefacts on overlapping surfaces |
+
+:::caution[Z-Fighting]
+If your far/near ratio is very large (e.g., `near=0.001, far=100000`), you will see z-fighting — flickering where two surfaces overlap. Keep the ratio as small as your scene allows, typically `near=0.1, far=1000` for human-scale scenes.
+:::
+
+---
+
+## OrthographicCamera
+
+`OrthographicCamera` projects with no perspective — parallel lines stay parallel and objects do not shrink with distance. Perfect for 2D games, CAD views, isometric games, and HUDs.
+
+```js
+const aspect = window.innerWidth / window.innerHeight;
+const frustumSize = 10;
+
+const camera = new THREE.OrthographicCamera(
+  -frustumSize * aspect / 2,  // left
+   frustumSize * aspect / 2,  // right
+   frustumSize / 2,           // top
+  -frustumSize / 2,           // bottom
+  0.1,                        // near
+  1000,                       // far
+);
+
+camera.position.set(10, 10, 10);
+camera.lookAt(0, 0, 0);
+
+// Resize handler for orthographic
+function onResize() {
+  const a = window.innerWidth / window.innerHeight;
+  camera.left   = -frustumSize * a / 2;
+  camera.right  =  frustumSize * a / 2;
+  camera.top    =  frustumSize / 2;
+  camera.bottom = -frustumSize / 2;
+  camera.updateProjectionMatrix();
+}
+```
+
+---
+
+## Camera Positioning and Look-At
+
+```js
+// Basic positioning
+camera.position.x = 5;
+camera.position.y = 3;
+camera.position.z = 8;
+camera.position.set(5, 3, 8);            // shorthand
+
+// Look at a point
+camera.lookAt(0, 0, 0);                  // look at origin
+camera.lookAt(new THREE.Vector3(0, 1, 0)); // look at a Vector3
+
+// Orbit around a target manually
+const angle = Date.now() * 0.001;
+camera.position.x = Math.sin(angle) * 5;
+camera.position.z = Math.cos(angle) * 5;
+camera.lookAt(0, 0, 0);
+
+// Camera shake utility
+function shake(camera, intensity = 0.05) {
+  camera.position.x += (Math.random() - 0.5) * intensity;
+  camera.position.y += (Math.random() - 0.5) * intensity;
+}
+```
+
+---
+
+## WebGLRenderer
+
+`WebGLRenderer` is responsible for drawing the scene to a `<canvas>` element using WebGL.
+
+```js
+const renderer = new THREE.WebGLRenderer({
+  canvas: document.querySelector('#canvas'),  // use existing canvas
+  antialias: true,                            // MSAA anti-aliasing
+  alpha: false,                               // transparent canvas background
+  premultipliedAlpha: true,
+  preserveDrawingBuffer: false,               // set true to screenshot
+  powerPreference: 'high-performance',        // 'default' | 'low-power' | 'high-performance'
+  logarithmicDepthBuffer: false,              // set true for huge scale ranges
+});
+
+// Size and pixel ratio
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+// Shadows
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap; // softer shadows
+
+// Color management (Three.js r152+)
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+// Tone mapping — converts HDR linear light to LDR display
+renderer.toneMapping = THREE.ACESFilmicToneMapping;  // cinematic
+renderer.toneMappingExposure = 1.0;   // overall brightness multiplier
+
+// Other tone mapping options:
+// THREE.LinearToneMapping    — no mapping
+// THREE.ReinhardToneMapping  — simple compression
+// THREE.CineonToneMapping    — film-like
+// THREE.AgXToneMapping       — (r158+) excellent highlights
+// THREE.NeutralToneMapping   — (r162+) perceptually uniform
+```
+
+### Shadow Map Types
+
+| Type | Quality | Performance |
+|---|---|---|
+| `BasicShadowMap` | Pixelated, sharp | Fastest |
+| `PCFShadowMap` | Soft edges (PCF filtering) | Moderate |
+| `PCFSoftShadowMap` | Softer edges | Moderate |
+| `VSMShadowMap` | Variance — very soft | Slowest |
+
+---
+
+## The Render Loop
+
+```js
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);      // register next frame
+
+  const elapsed = clock.getElapsedTime(); // seconds since start
+  const delta   = clock.getDelta();       // seconds since last frame
+
+  // Update game logic using delta for frame-rate-independent movement
+  cube.rotation.y += delta * 1.0;        // 1 radian per second regardless of FPS
+  cube.position.x = Math.sin(elapsed) * 2;
+
+  // Must update controls each frame if damping is enabled
+  controls.update();
+
+  renderer.render(scene, camera);
+}
+animate();
+```
+
+:::tip[Why delta time?]
+Without delta time, your animations run at different speeds on 30 FPS vs 144 FPS hardware. By multiplying movement by `delta` (seconds since last frame), the total distance per second is constant on any device.
+:::
+
+### Pausing the Loop
+
+```js
+let animating = true;
+let rafId;
+
+function animate() {
+  if (!animating) return;
+  rafId = requestAnimationFrame(animate);
+  renderer.render(scene, camera);
+}
+
+function pause() {
+  animating = false;
+  cancelAnimationFrame(rafId);
+}
+
+function resume() {
+  animating = true;
+  clock.start(); // reset clock so delta doesn't spike
+  animate();
+}
+
+// Pause when tab is hidden
+document.addEventListener('visibilitychange', () => {
+  document.hidden ? pause() : resume();
+});
+```
+
+---
+
+## Scene Graph Hierarchy
+
+Three.js uses a **scene graph** — a tree where transformations are inherited from parent to child. This lets you group objects and move them together.
+
+```js
+// Create a solar system hierarchy
+const solarSystem = new THREE.Group();
+scene.add(solarSystem);
+
+const sunMesh = new THREE.Mesh(
+  new THREE.SphereGeometry(1, 32, 32),
+  new THREE.MeshStandardMaterial({ color: '#fbbf24', emissive: '#f59e0b', emissiveIntensity: 1 }),
+);
+solarSystem.add(sunMesh);
+
+const earthOrbit = new THREE.Group();
+earthOrbit.position.x = 5;
+solarSystem.add(earthOrbit);
+
+const earthMesh = new THREE.Mesh(
+  new THREE.SphereGeometry(0.4, 32, 32),
+  new THREE.MeshStandardMaterial({ color: '#3b82f6' }),
+);
+earthOrbit.add(earthMesh);
+
+const moonOrbit = new THREE.Group();
+moonOrbit.position.x = 1;
+earthOrbit.add(moonOrbit);
+
+const moonMesh = new THREE.Mesh(
+  new THREE.SphereGeometry(0.1, 16, 16),
+  new THREE.MeshStandardMaterial({ color: '#9ca3af' }),
+);
+moonOrbit.add(moonMesh);
+
+// Animate — each orbit group rotates independently
+function animate() {
+  requestAnimationFrame(animate);
+  const t = clock.getElapsedTime();
+  solarSystem.rotation.y = t * 0.1;      // whole system rotates
+  earthOrbit.rotation.y  = t * 0.5;      // earth orbits sun
+  moonOrbit.rotation.y   = t * 2.0;      // moon orbits earth
+  renderer.render(scene, camera);
+}
+```
+
+---
+
+## Object3D — The Base Class
+
+Every visible and invisible object in Three.js extends `Object3D`. Understanding its API is key to controlling the scene graph.
+
+```js
+const obj = new THREE.Mesh(geo, mat);
+
+// ── Position ────────────────────────────────────────────────
+obj.position.set(1, 2, 3);
+obj.position.x = 1;
+obj.position.y += 0.1;                    // relative move
+obj.translateX(0.5);                      // move along local X axis
+
+// ── Rotation ────────────────────────────────────────────────
+obj.rotation.set(0, Math.PI / 4, 0);     // Euler angles (radians)
+obj.rotation.y = Math.PI;
+obj.rotation.order = 'YXZ';              // rotation order
+
+// Or use Quaternion for gimbal-lock-free rotation
+obj.quaternion.setFromEuler(obj.rotation);
+obj.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2);
+
+// ── Scale ───────────────────────────────────────────────────
+obj.scale.set(2, 2, 2);                  // uniform scale
+obj.scale.x = 0.5;                        // non-uniform
+
+// ── Visibility & Rendering ──────────────────────────────────
+obj.visible = false;                      // hide without removing
+obj.castShadow    = true;
+obj.receiveShadow = true;
+obj.renderOrder   = 1;                    // draw order for transparency
+
+// ── Naming & Lookup ─────────────────────────────────────────
+obj.name = 'myObject';
+const found = scene.getObjectByName('myObject');
+const byId  = scene.getObjectById(obj.id);
+
+// ── Hierarchy Traversal ─────────────────────────────────────
+scene.traverse(child => {
+  if (child.isMesh) {
+    child.material.wireframe = true;    // apply to all meshes
+  }
+});
+
+// world position (accounts for parent transforms)
+const worldPos = new THREE.Vector3();
+obj.getWorldPosition(worldPos);
+
+const worldDir = new THREE.Vector3();
+obj.getWorldDirection(worldDir);
+```
+
+### Coordinate Spaces
+
+```js
+// Convert between local and world space
+const localPoint  = new THREE.Vector3(1, 0, 0);
+const worldPoint  = new THREE.Vector3();
+obj.localToWorld(worldPoint.copy(localPoint));
+
+const worldBack   = new THREE.Vector3();
+obj.worldToLocal(worldBack.copy(worldPoint));
+
+// Look at a world-space target from within a group
+obj.lookAt(target.getWorldPosition(new THREE.Vector3()));
+```

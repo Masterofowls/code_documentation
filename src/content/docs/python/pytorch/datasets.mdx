@@ -1,0 +1,638 @@
+---
+title: Datasets and DataLoaders
+description: Build custom PyTorch datasets, configure DataLoaders, apply torchvision transforms, handle data augmentation, and balance imbalanced classes.
+sidebar:
+  order: 7
+tags: [python, ml]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Efficient data loading is often the bottleneck in model training. PyTorch provides `Dataset` and `DataLoader` abstractions that separate data access from training logic and support multi-process prefetching, on-the-fly augmentation, and pinned memory transfers to GPU.
+
+## The Dataset Interface
+
+Every custom dataset extends `torch.utils.data.Dataset` and implements three methods:
+
+```python
+import torch
+from torch.utils.data import Dataset
+from typing import Tuple
+
+class MyDataset(Dataset):
+    """Minimal Dataset contract: __len__ and __getitem__."""
+
+    def __init__(self, data: torch.Tensor, labels: torch.Tensor):
+        assert len(data) == len(labels), 'data and labels must have the same length'
+        self.data   = data
+        self.labels = labels
+
+    def __len__(self) -> int:
+        """Return the total number of samples."""
+        return len(self.data)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return one (input, target) pair."""
+        return self.data[idx], self.labels[idx]
+
+# Usage
+X = torch.randn(1000, 16)
+y = torch.randint(0, 4, (1000,))
+dataset = MyDataset(X, y)
+print(len(dataset))         # 1000
+print(dataset[0][0].shape)  # torch.Size([16])
+print(dataset[0][1])        # tensor(2)  (some class label)
+```
+
+## DataLoader
+
+`DataLoader` wraps a `Dataset` and provides batching, shuffling, and multi-process loading:
+
+```python
+from torch.utils.data import DataLoader, random_split
+
+# ── Train / val split ─────────────────────────────────────────────────────────
+train_size = int(0.8 * len(dataset))
+val_size   = len(dataset) - train_size
+train_ds, val_ds = random_split(
+    dataset, [train_size, val_size],
+    generator=torch.Generator().manual_seed(42)
+)
+
+# ── DataLoaders ───────────────────────────────────────────────────────────────
+train_loader = DataLoader(
+    train_ds,
+    batch_size  = 64,
+    shuffle     = True,       # shuffle every epoch
+    num_workers = 4,          # parallel data loading processes
+    pin_memory  = True,       # faster CPU→GPU transfer
+    drop_last   = True,       # drop final incomplete batch
+    persistent_workers = True # keep workers alive between epochs (PyTorch 1.7+)
+)
+
+val_loader = DataLoader(
+    val_ds,
+    batch_size  = 128,
+    shuffle     = False,      # never shuffle validation
+    num_workers = 4,
+    pin_memory  = True,
+)
+
+# Iterate
+for batch_x, batch_y in train_loader:
+    print(batch_x.shape)   # torch.Size([64, 16])
+    print(batch_y.shape)   # torch.Size([64])
+    break
+
+print(f'Train batches : {len(train_loader)}')   # 12  (800 / 64, drop_last)
+print(f'Val   batches : {len(val_loader)}')     # 2   (200 / 128, ceil)
+```
+
+:::tip[num_workers on Windows]
+On Windows, multiprocessing requires your DataLoader construction to be inside `if __name__ == '__main__':`. For Jupyter notebooks, use `num_workers=0` (single-process) to avoid deadlocks.
+:::
+
+### DataLoader Parameters Reference
+
+| Parameter | Default | Recommendation |
+|-----------|---------|----------------|
+| `batch_size` | 1 | 32–256 for GPU training |
+| `shuffle` | False | `True` for training, `False` for val/test |
+| `num_workers` | 0 | 2–8; set to `os.cpu_count() // 2` |
+| `pin_memory` | False | `True` when using CUDA (faster transfers) |
+| `drop_last` | False | `True` for stable batch norms in training |
+| `persistent_workers` | False | `True` to avoid worker respawn overhead |
+| `prefetch_factor` | 2 | Increase to 4 if GPU waits on CPU |
+| `collate_fn` | default | Override for variable-length sequences |
+
+## torchvision Datasets
+
+```python
+import torchvision
+import torchvision.transforms as T
+
+# ── CIFAR-10 ──────────────────────────────────────────────────────────────────
+train_transform = T.Compose([
+    T.RandomCrop(32, padding=4),
+    T.RandomHorizontalFlip(),
+    T.ToTensor(),
+    T.Normalize(mean=(0.4914, 0.4822, 0.4465),
+                std =(0.2023, 0.1994, 0.2010)),
+])
+test_transform = T.Compose([
+    T.ToTensor(),
+    T.Normalize(mean=(0.4914, 0.4822, 0.4465),
+                std =(0.2023, 0.1994, 0.2010)),
+])
+
+cifar_train = torchvision.datasets.CIFAR10(
+    root='./data', train=True,  download=True, transform=train_transform
+)
+cifar_test  = torchvision.datasets.CIFAR10(
+    root='./data', train=False, download=True, transform=test_transform
+)
+print(len(cifar_train))         # 50000
+print(cifar_train.classes)
+# ['airplane', 'automobile', 'bird', 'cat', 'deer',
+#  'dog', 'frog', 'horse', 'ship', 'truck']
+
+# ── MNIST ─────────────────────────────────────────────────────────────────────
+mnist = torchvision.datasets.MNIST(
+    root='./data', train=True, download=True,
+    transform=T.Compose([T.ToTensor(), T.Normalize((0.1307,), (0.3081,))])
+)
+img, label = mnist[0]
+print(img.shape)    # torch.Size([1, 28, 28])
+print(label)        # 5
+
+# ── ImageFolder — for custom directory-structured datasets ────────────────────
+# Expected structure:
+#   data/
+#     train/
+#       cat/   *.jpg
+#       dog/   *.jpg
+#     val/
+#       cat/   *.jpg
+#       dog/   *.jpg
+
+imagenet_train = torchvision.datasets.ImageFolder(
+    root='data/train',
+    transform=train_transform
+)
+print(imagenet_train.class_to_idx)   # {'cat': 0, 'dog': 1}
+```
+
+## Transforms
+
+<Tabs>
+  <TabItem label="Basic">
+```python
+import torchvision.transforms as T
+from PIL import Image
+import torch
+
+# Geometric transforms
+resize      = T.Resize((224, 224))
+center_crop = T.CenterCrop(224)
+random_crop = T.RandomCrop(224, padding=28)
+hflip       = T.RandomHorizontalFlip(p=0.5)
+vflip       = T.RandomVerticalFlip(p=0.1)
+rotate      = T.RandomRotation(degrees=15)
+
+# Colour transforms
+jitter      = T.ColorJitter(brightness=0.4, contrast=0.4,
+                             saturation=0.4, hue=0.1)
+grayscale   = T.Grayscale(num_output_channels=3)
+
+# Tensor conversion
+to_tensor   = T.ToTensor()    # PIL [0,255] → Tensor [0,1], shape (C,H,W)
+normalize   = T.Normalize(mean=[0.485, 0.456, 0.406],   # ImageNet stats
+                          std =[0.229, 0.224, 0.225])
+
+# Compose all transforms
+transform = T.Compose([
+    resize,
+    random_crop,
+    hflip,
+    jitter,
+    to_tensor,
+    normalize,
+])
+
+# Apply to a PIL image
+img        = Image.open('photo.jpg').convert('RGB')
+tensor     = transform(img)
+print(tensor.shape)   # torch.Size([3, 224, 224])
+```
+  </TabItem>
+  <TabItem label="Advanced (v2)">
+```python
+# torchvision.transforms.v2 — works on tensors, PIL, and bounding boxes
+import torchvision.transforms.v2 as T2
+import torch
+
+# v2 handles images AND bounding boxes simultaneously (for detection)
+transform = T2.Compose([
+    T2.RandomResizedCrop(224, scale=(0.8, 1.0), ratio=(0.75, 1.33)),
+    T2.RandomHorizontalFlip(p=0.5),
+    T2.AutoAugment(T2.AutoAugmentPolicy.IMAGENET),   # learned augmentation
+    T2.ToDtype(torch.float32, scale=True),            # uint8 → float32 [0,1]
+    T2.Normalize(mean=[0.485, 0.456, 0.406],
+                 std =[0.229, 0.224, 0.225]),
+])
+
+# RandAugment — randomly selects N augmentation operations
+rand_aug = T2.RandAugment(num_ops=2, magnitude=9)
+
+# TrivialAugment — single random op, surprisingly effective
+trivial   = T2.TrivialAugmentWide()
+
+# AugMix
+augmix    = T2.AugMix()
+
+# CutMix and MixUp (applied to the batch, not per-image)
+cutmix    = T2.CutMix(num_classes=10)
+mixup     = T2.MixUp(num_classes=10)
+```
+  </TabItem>
+</Tabs>
+
+## Custom Image Dataset
+
+A production-ready image dataset loaded from a CSV manifest:
+
+```python
+import torch
+from torch.utils.data import Dataset
+from torchvision import transforms as T
+from pathlib import Path
+from PIL import Image
+import pandas as pd
+from typing import Callable, Optional
+
+class ImageManifestDataset(Dataset):
+    """
+    Dataset for image files referenced in a CSV.
+
+    CSV format:
+        filepath,label
+        data/train/cat_001.jpg,0
+        data/train/dog_001.jpg,1
+        ...
+    """
+
+    def __init__(
+        self,
+        manifest_csv:  str,
+        transform:     Optional[Callable] = None,
+        root_dir:      str = '',
+    ):
+        self.df        = pd.read_csv(manifest_csv)
+        self.transform = transform
+        self.root_dir  = Path(root_dir)
+
+        # Cache label→class mapping
+        labels         = sorted(self.df['label'].unique())
+        self.classes   = labels
+        self.class_to_idx = {c: i for i, c in enumerate(labels)}
+
+    def __len__(self) -> int:
+        return len(self.df)
+
+    def __getitem__(self, idx: int):
+        row      = self.df.iloc[idx]
+        img_path = self.root_dir / row['filepath']
+        label    = int(row['label'])
+
+        img = Image.open(img_path).convert('RGB')
+
+        if self.transform:
+            img = self.transform(img)
+
+        return img, label
+
+    def get_labels(self) -> list[int]:
+        """Return all labels — used for WeightedRandomSampler."""
+        return self.df['label'].tolist()
+
+
+# Instantiate with train and validation transforms
+train_transform = T.Compose([
+    T.Resize(256),
+    T.RandomCrop(224),
+    T.RandomHorizontalFlip(),
+    T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+    T.ToTensor(),
+    T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+])
+val_transform = T.Compose([
+    T.Resize(256),
+    T.CenterCrop(224),
+    T.ToTensor(),
+    T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+])
+
+train_ds = ImageManifestDataset('data/train.csv', transform=train_transform)
+val_ds   = ImageManifestDataset('data/val.csv',   transform=val_transform)
+```
+
+## Custom Dataset from Folder (No CSV)
+
+```python
+import os
+from pathlib import Path
+from PIL import Image
+from torch.utils.data import Dataset
+import torchvision.transforms as T
+
+class FolderDataset(Dataset):
+    """
+    Load images from a directory tree:
+        root/
+          class_a/  img1.jpg  img2.jpg  ...
+          class_b/  img1.jpg  ...
+    """
+
+    EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}
+
+    def __init__(self, root: str, transform=None):
+        self.root      = Path(root)
+        self.transform = transform
+        self.samples: list[tuple[Path, int]] = []
+
+        # Discover classes (sorted for reproducibility)
+        classes = sorted(
+            p.name for p in self.root.iterdir() if p.is_dir()
+        )
+        self.class_to_idx = {c: i for i, c in enumerate(classes)}
+        self.classes      = classes
+
+        for cls in classes:
+            cls_dir = self.root / cls
+            for img_path in sorted(cls_dir.iterdir()):
+                if img_path.suffix.lower() in self.EXTENSIONS:
+                    self.samples.append((img_path, self.class_to_idx[cls]))
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int):
+        path, label = self.samples[idx]
+        img = Image.open(path).convert('RGB')
+        if self.transform:
+            img = self.transform(img)
+        return img, label
+
+ds = FolderDataset('data/train', transform=T.Compose([T.Resize(224), T.ToTensor()]))
+print(f'Classes: {ds.classes}')      # e.g., ['cat', 'dog']
+print(f'Samples: {len(ds)}')         # e.g., 12000
+```
+
+## Data Augmentation Strategies
+
+:::tip[Augmentation Rules of Thumb]
+- **Always apply** during training, **never** during validation or inference
+- **Spatial augmentations** (flip, crop, rotate) are almost universally beneficial
+- **Colour augmentations** help when test images may have lighting variation
+- **CutMix/MixUp** significantly improve accuracy on classification benchmarks
+- Start with simple augmentations; add complexity only if val accuracy plateaus
+:::
+
+```python
+import torch
+import torchvision.transforms as T
+import torchvision.transforms.functional as TF
+import random
+
+# ── Conservative (safe default for most tasks) ────────────────────────────────
+conservative = T.Compose([
+    T.RandomHorizontalFlip(p=0.5),
+    T.RandomCrop(224, padding=16),
+    T.ToTensor(),
+    T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+])
+
+# ── Aggressive (classification benchmarks) ────────────────────────────────────
+aggressive = T.Compose([
+    T.RandomResizedCrop(224, scale=(0.6, 1.0)),
+    T.RandomHorizontalFlip(),
+    T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),
+    T.RandomGrayscale(p=0.1),
+    T.RandomApply([T.GaussianBlur(kernel_size=3)], p=0.5),
+    T.ToTensor(),
+    T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    T.RandomErasing(p=0.25, scale=(0.02, 0.1)),  # CutOut variant
+])
+
+# ── CutMix — applied to a batch of tensors ────────────────────────────────────
+def cutmix_batch(images, labels, num_classes, alpha=1.0):
+    """Mix two images by cutting and pasting a rectangular region."""
+    batch_size = images.size(0)
+    lam   = torch.distributions.Beta(alpha, alpha).sample().item()
+    idx   = torch.randperm(batch_size)
+
+    # Bounding box
+    _, _, H, W = images.shape
+    cut_w = int(W * (1 - lam) ** 0.5)
+    cut_h = int(H * (1 - lam) ** 0.5)
+    cx, cy = random.randint(0, W), random.randint(0, H)
+    x1, y1 = max(cx - cut_w // 2, 0), max(cy - cut_h // 2, 0)
+    x2, y2 = min(cx + cut_w // 2, W), min(cy + cut_h // 2, H)
+
+    mixed = images.clone()
+    mixed[:, :, y1:y2, x1:x2] = images[idx, :, y1:y2, x1:x2]
+
+    # Adjust lambda based on actual bbox area
+    lam = 1 - (x2 - x1) * (y2 - y1) / (W * H)
+    labels_a = torch.nn.functional.one_hot(labels, num_classes).float()
+    labels_b = torch.nn.functional.one_hot(labels[idx], num_classes).float()
+    mixed_labels = lam * labels_a + (1 - lam) * labels_b
+    return mixed, mixed_labels
+
+# ── MixUp ─────────────────────────────────────────────────────────────────────
+def mixup_batch(images, labels, num_classes, alpha=0.4):
+    """Linearly interpolate two images and their labels."""
+    lam   = torch.distributions.Beta(alpha, alpha).sample().item()
+    idx   = torch.randperm(images.size(0))
+    mixed = lam * images + (1 - lam) * images[idx]
+    lab_a = torch.nn.functional.one_hot(labels, num_classes).float()
+    lab_b = torch.nn.functional.one_hot(labels[idx], num_classes).float()
+    return mixed, lam * lab_a + (1 - lam) * lab_b
+```
+
+## Handling Imbalanced Datasets
+
+:::caution[Class Imbalance Is Common]
+Real-world datasets are often imbalanced (e.g., 95% normal, 5% fraud). Training without correction causes the model to predict the majority class for everything, achieving high accuracy but zero recall on the minority class.
+:::
+
+```python
+import torch
+from torch.utils.data import DataLoader, WeightedRandomSampler
+from collections import Counter
+
+# Suppose our dataset has class distribution: [900, 80, 20] for 3 classes
+labels = ([0] * 900 + [1] * 80 + [2] * 20)  # 1000 samples total
+counts = Counter(labels)   # {0: 900, 1: 80, 2: 20}
+
+# ── WeightedRandomSampler ─────────────────────────────────────────────────────
+# Each sample gets a weight = 1 / frequency_of_its_class
+class_weights = {cls: 1.0 / count for cls, count in counts.items()}
+sample_weights = torch.tensor([class_weights[l] for l in labels])
+
+sampler = WeightedRandomSampler(
+    weights     = sample_weights,
+    num_samples = len(sample_weights),
+    replacement = True   # allow same sample multiple times per epoch
+)
+
+loader = DataLoader(
+    dataset,          # your Dataset
+    batch_size=64,
+    sampler=sampler,  # NOTE: do NOT set shuffle=True when using a sampler
+    num_workers=2,
+)
+
+# After sampling, each class should appear ~equally per epoch
+# Expected batches per class: ~333 each instead of 900/80/20
+```
+
+### Class-Weighted Loss (Alternative to Sampling)
+
+```python
+import torch
+import torch.nn as nn
+from collections import Counter
+
+# Calculate inverse-frequency class weights for CrossEntropyLoss
+labels  = [0]*900 + [1]*80 + [2]*20
+counts  = Counter(labels)
+total   = len(labels)
+
+# weight_c = total / (num_classes * count_c)
+num_classes    = 3
+class_weights  = torch.tensor([
+    total / (num_classes * counts[c]) for c in range(num_classes)
+], dtype=torch.float32)
+
+print(class_weights)   # tensor([0.3704, 4.1667, 16.6667])
+
+criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
+```
+
+### Focal Loss (for Extreme Imbalance)
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class FocalLoss(nn.Module):
+    """
+    Focal Loss — down-weights easy (well-classified) examples.
+    alpha: class balancing factor
+    gamma: focusing parameter (0 = standard CE, 2 = typical focal)
+    """
+    def __init__(self, gamma: float = 2.0, alpha: float = 0.25):
+        super().__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        ce_loss  = F.cross_entropy(logits, targets, reduction='none')
+        p_t      = torch.exp(-ce_loss)
+        focal    = self.alpha * (1 - p_t) ** self.gamma * ce_loss
+        return focal.mean()
+
+focal = FocalLoss(gamma=2.0, alpha=0.25)
+logits = torch.randn(32, 3)
+labels = torch.randint(0, 3, (32,))
+loss   = focal(logits, labels)
+print(loss.item())   # scalar focal loss value
+```
+
+## Train / Validation / Test Split
+
+```python
+import torch
+from torch.utils.data import random_split, Subset
+import numpy as np
+
+# ── Simple random split ───────────────────────────────────────────────────────
+total = len(dataset)
+train_n = int(0.70 * total)
+val_n   = int(0.15 * total)
+test_n  = total - train_n - val_n
+
+train_ds, val_ds, test_ds = random_split(
+    dataset, [train_n, val_n, test_n],
+    generator=torch.Generator().manual_seed(42)
+)
+
+print(f'Train: {len(train_ds):5,}  Val: {len(val_ds):5,}  Test: {len(test_ds):5,}')
+
+# ── Stratified split (preserves class proportions) ───────────────────────────
+from sklearn.model_selection import train_test_split
+
+labels     = [dataset[i][1] for i in range(len(dataset))]  # slow for large ds
+indices    = np.arange(len(dataset))
+
+train_idx, temp_idx, _, temp_y = train_test_split(
+    indices, labels, test_size=0.3, stratify=labels, random_state=42
+)
+val_idx, test_idx = train_test_split(
+    temp_idx, test_size=0.5, stratify=temp_y, random_state=42
+)
+
+train_ds_s = Subset(dataset, train_idx.tolist())
+val_ds_s   = Subset(dataset, val_idx.tolist())
+test_ds_s  = Subset(dataset, test_idx.tolist())
+
+print(f'Stratified — Train: {len(train_ds_s):,} '
+      f'Val: {len(val_ds_s):,} Test: {len(test_ds_s):,}')
+```
+
+## Custom collate_fn for Variable-Length Sequences
+
+```python
+import torch
+from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import DataLoader
+
+def variable_len_collate(batch):
+    """Pad variable-length sequences in a batch."""
+    sequences, labels = zip(*batch)    # unzip (seq, label) tuples
+
+    # Pad sequences to the length of the longest in this batch
+    padded = pad_sequence(
+        [torch.tensor(s, dtype=torch.long) for s in sequences],
+        batch_first=True,
+        padding_value=0    # pad with 0 (pad token id)
+    )
+    lengths = torch.tensor([len(s) for s in sequences])
+    labels  = torch.tensor(labels)
+
+    return padded, lengths, labels
+
+loader = DataLoader(
+    text_dataset,
+    batch_size=32,
+    collate_fn=variable_len_collate,
+    shuffle=True,
+)
+
+for padded_seqs, seq_lens, labels in loader:
+    print(padded_seqs.shape)   # (32, max_seq_len_in_batch)
+    print(seq_lens.shape)      # (32,)
+    break
+```
+
+## DataLoader Worker Reproducibility
+
+```python
+import torch
+import numpy as np
+import random
+
+def seed_worker(worker_id: int) -> None:
+    """Ensure each DataLoader worker has a unique but deterministic seed."""
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+g = torch.Generator()
+g.manual_seed(42)
+
+reproducible_loader = DataLoader(
+    dataset,
+    batch_size  = 64,
+    shuffle     = True,
+    num_workers = 4,
+    worker_init_fn = seed_worker,
+    generator      = g,
+)
+```
+
+:::tip[Pin Memory for Maximum GPU Throughput]
+Set `pin_memory=True` in your DataLoader when training on CUDA. This allocates tensor memory in page-locked RAM, enabling direct DMA transfers to the GPU — typically 2–3× faster than the default pageable memory transfers. Always pair with `non_blocking=True` when calling `.to(device)` inside the training loop.
+:::

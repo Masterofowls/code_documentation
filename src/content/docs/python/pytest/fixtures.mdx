@@ -1,0 +1,720 @@
+---
+title: Pytest Fixtures
+description: Reusable setup and teardown with scoping, dependency injection, conftest.py, and built-in fixtures.
+sidebar:
+  order: 3
+tags:
+  - python
+  - testing
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Fixtures are pytest's mechanism for providing test functions with pre-built objects, database connections, temporary files, or any other dependency they need. They replace the rigid `setUp`/`tearDown` methods of `unittest` with a flexible, composable, dependency-injection system.
+
+## What Is a Fixture?
+
+A fixture is a function decorated with `@pytest.fixture`. When a test declares a fixture name as a parameter, pytest calls the fixture function and passes its return value to the test automatically.
+
+```python
+import pytest
+
+
+@pytest.fixture
+def user():
+    return {"id": 1, "name": "Alice", "email": "alice@example.com"}
+
+
+def test_user_has_name(user):
+    assert user["name"] == "Alice"
+
+
+def test_user_has_email(user):
+    assert "@" in user["email"]
+```
+
+pytest sees that `test_user_has_name` declares a `user` parameter, calls the `user()` fixture function, and injects its return value. Each test gets a fresh call — no shared state between tests.
+
+## Fixture Scope
+
+By default, pytest creates a new fixture instance for every test that requests it. Control the lifetime with the `scope` parameter:
+
+| Scope | Lifetime | Typical use case |
+| --- | --- | --- |
+| `"function"` (default) | Per test function | Stateful objects that must not be shared |
+| `"class"` | Per test class | Objects shared across methods in one class |
+| `"module"` | Per test file | Expensive setup shared across one module |
+| `"package"` | Per package directory | Shared across all tests in a package |
+| `"session"` | Entire test run | Very expensive resources (DB connections, servers) |
+
+```python
+import pytest
+
+
+@pytest.fixture(scope="function")   # new instance for every test (default)
+def user():
+    return {"name": "Alice"}
+
+
+@pytest.fixture(scope="module")     # one instance per test file
+def db_connection():
+    conn = connect_to_test_db()
+    yield conn
+    conn.close()
+
+
+@pytest.fixture(scope="session")    # one instance for the entire pytest run
+def app_server():
+    server = start_test_server(port=9000)
+    yield server
+    server.stop()
+```
+
+:::caution[Scope hierarchy]
+A fixture can only depend on fixtures of the **same or broader** scope. A `session`-scoped fixture cannot use a `function`-scoped fixture — pytest raises `ScopeMismatch`. When in doubt: broader scopes depend on broader scopes.
+:::
+
+### Scope Demo
+
+```python
+# tests/test_scope.py
+import pytest
+
+
+@pytest.fixture(scope="module")
+def module_counter():
+    print("\n[SETUP] module_counter created")
+    data = {"count": 0}
+    yield data
+    print(f"\n[TEARDOWN] final count was {data['count']}")
+
+
+def test_first(module_counter):
+    module_counter["count"] += 1
+    assert module_counter["count"] == 1
+
+
+def test_second(module_counter):
+    module_counter["count"] += 1
+    assert module_counter["count"] == 2
+
+
+def test_third(module_counter):
+    module_counter["count"] += 1
+    assert module_counter["count"] == 3
+```
+
+Output with `-s`:
+
+```
+[SETUP] module_counter created
+
+tests/test_scope.py::test_first PASSED
+tests/test_scope.py::test_second PASSED
+tests/test_scope.py::test_third PASSED
+
+[TEARDOWN] final count was 3
+```
+
+The fixture is created once, shared across all three tests, and torn down only when the module finishes.
+
+## Yield Fixtures — Setup and Teardown
+
+Replace `return` with `yield` to add teardown code. Everything **before** `yield` is setup; everything **after** is teardown.
+
+```python
+import pytest
+import tempfile
+import os
+
+
+@pytest.fixture
+def temp_file():
+    # --- SETUP ---
+    fd, path = tempfile.mkstemp(suffix=".txt")
+    os.close(fd)
+    print(f"\n[SETUP] created temp file: {path}")
+
+    yield path   # <-- the test receives 'path' here
+
+    # --- TEARDOWN ---
+    if os.path.exists(path):
+        os.unlink(path)
+        print(f"\n[TEARDOWN] deleted temp file: {path}")
+
+
+def test_write_to_temp_file(temp_file):
+    with open(temp_file, "w") as f:
+        f.write("hello pytest")
+
+    with open(temp_file, "r") as f:
+        content = f.read()
+
+    assert content == "hello pytest"
+```
+
+:::tip[Teardown always runs]
+pytest guarantees that the teardown portion of a yield fixture runs even if the test raises an exception. This makes yield fixtures safer than wrapping test logic in `try/finally`.
+:::
+
+### Database Transaction Rollback Pattern
+
+A classic pattern for database tests: open a transaction, run the test inside it, roll back so no test leaves persistent state:
+
+```python
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+
+@pytest.fixture(scope="session")
+def engine():
+    return create_engine("sqlite:///:memory:")
+
+
+@pytest.fixture(scope="session")
+def tables(engine):
+    Base.metadata.create_all(engine)
+    yield
+    Base.metadata.drop_all(engine)
+
+
+@pytest.fixture
+def db_session(engine, tables):
+    """Each test gets an isolated, auto-rolled-back database session."""
+    connection = engine.connect()
+    transaction = connection.begin()
+    Session = sessionmaker(bind=connection)
+    session = Session()
+
+    yield session
+
+    session.close()
+    transaction.rollback()
+    connection.close()
+```
+
+## conftest.py — Sharing Fixtures
+
+Fixtures defined in `conftest.py` are automatically available to all tests in the same directory and all subdirectories — no import required.
+
+```
+project/
+└── tests/
+    ├── conftest.py          # Available everywhere under tests/
+    ├── test_users.py
+    ├── test_orders.py
+    └── integration/
+        ├── conftest.py      # Available only to tests in integration/
+        └── test_api.py
+```
+
+```python
+# tests/conftest.py
+import pytest
+from myapp import create_app
+from myapp.database import db as _db
+
+
+@pytest.fixture(scope="session")
+def app():
+    """Create a Flask/Django app instance for the test session."""
+    application = create_app({
+        "TESTING": True,
+        "DATABASE_URL": "sqlite:///:memory:",
+        "SECRET_KEY": "test-secret",
+    })
+    with application.app_context():
+        _db.create_all()
+        yield application
+        _db.drop_all()
+
+
+@pytest.fixture
+def client(app):
+    """Provide a test HTTP client."""
+    return app.test_client()
+
+
+@pytest.fixture
+def db(app):
+    """Provide a clean database that rolls back after each test."""
+    yield _db
+    _db.session.rollback()
+```
+
+```python
+# tests/test_users.py — fixtures injected with no imports
+
+def test_create_user(client, db):
+    response = client.post("/users", json={"name": "Bob", "email": "bob@example.com"})
+    assert response.status_code == 201
+    assert db.session.query(User).count() == 1
+```
+
+## Fixture Dependency Injection
+
+Fixtures can depend on other fixtures. pytest resolves the entire dependency graph automatically, in the correct order.
+
+```python
+import pytest
+
+
+@pytest.fixture
+def user_data():
+    return {"name": "Carol", "role": "admin"}
+
+
+@pytest.fixture
+def user(user_data):
+    # This fixture depends on user_data
+    return User.create(**user_data)
+
+
+@pytest.fixture
+def authenticated_client(client, user):
+    # This fixture depends on two other fixtures
+    client.force_login(user)
+    return client
+
+
+def test_admin_dashboard(authenticated_client):
+    # pytest resolves: authenticated_client → client + user → user_data
+    response = authenticated_client.get("/admin")
+    assert response.status_code == 200
+```
+
+:::tip[Fixture finalization order]
+Fixtures are torn down in the reverse order of their setup. The last fixture set up is the first to be torn down — just like a stack.
+:::
+
+## Built-in Fixtures
+
+pytest ships with a set of useful built-in fixtures available in every test without any import.
+
+### `tmp_path`
+
+Provides a `pathlib.Path` object pointing to a temporary directory unique to the test invocation. Automatically cleaned up after the test.
+
+```python
+def test_write_config_file(tmp_path):
+    config_file = tmp_path / "config.json"
+    config_file.write_text('{"debug": true, "port": 8080}')
+
+    assert config_file.exists()
+    content = config_file.read_text()
+    assert '"debug": true' in content
+
+
+def test_nested_directories(tmp_path):
+    output_dir = tmp_path / "data" / "output"
+    output_dir.mkdir(parents=True)
+
+    result_file = output_dir / "result.csv"
+    result_file.write_text("id,name,score\n1,Alice,95\n2,Bob,87\n")
+
+    lines = result_file.read_text().splitlines()
+    assert len(lines) == 3   # header + 2 data rows
+```
+
+### `tmp_path_factory`
+
+Session-scoped version of `tmp_path`. Use it inside session-scoped fixtures that need temporary files:
+
+```python
+@pytest.fixture(scope="session")
+def shared_data_dir(tmp_path_factory):
+    data_dir = tmp_path_factory.mktemp("data")
+    (data_dir / "sample.csv").write_text("a,b,c\n1,2,3\n4,5,6\n")
+    (data_dir / "config.json").write_text('{"version": 1}')
+    return data_dir
+
+
+def test_load_sample(shared_data_dir):
+    csv_path = shared_data_dir / "sample.csv"
+    assert csv_path.exists()
+    rows = csv_path.read_text().splitlines()
+    assert len(rows) == 3
+```
+
+### `capsys`
+
+Captures output written to `sys.stdout` and `sys.stderr`, so you can assert on what your code prints:
+
+```python
+import sys
+
+
+def greet(name: str) -> None:
+    print(f"Hello, {name}!")
+    print("Something went wrong.", file=sys.stderr)
+
+
+def test_greet_stdout(capsys):
+    greet("pytest")
+    captured = capsys.readouterr()
+
+    assert captured.out == "Hello, pytest!\n"
+    assert "Something went wrong." in captured.err
+
+
+def test_multiple_print_calls(capsys):
+    print("line one")
+    out1, _ = capsys.readouterr()   # clears the buffer
+    assert out1 == "line one\n"
+
+    print("line two")
+    out2, _ = capsys.readouterr()
+    assert out2 == "line two\n"
+    assert "line one" not in out2   # buffer was reset
+```
+
+### `capfd`
+
+Like `capsys` but captures at the **file descriptor** level (fd 1 and fd 2) instead of the Python-level `sys.stdout`/`sys.stderr`. Useful for C extensions or code that writes directly to file descriptors.
+
+```python
+def test_fd_level_output(capfd):
+    import os
+    os.write(1, b"direct fd write\n")
+    captured = capfd.readouterr()
+    assert captured.out == "direct fd write\n"
+```
+
+### `monkeypatch`
+
+Provides safe, reversible patching of attributes, environment variables, dictionary entries, and `sys.path`. All patches are automatically reversed after the test — no cleanup code needed.
+
+```python
+import os
+
+
+def get_api_url() -> str:
+    return os.environ.get("API_URL", "https://api.prod.example.com")
+
+
+def get_max_retries() -> int:
+    import myapp.config as config
+    return config.MAX_RETRIES
+
+
+def test_api_url_from_env(monkeypatch):
+    monkeypatch.setenv("API_URL", "https://api.test.example.com")
+    assert get_api_url() == "https://api.test.example.com"
+
+
+def test_api_url_default(monkeypatch):
+    monkeypatch.delenv("API_URL", raising=False)   # remove if present
+    assert get_api_url() == "https://api.prod.example.com"
+
+
+def test_patch_config_attribute(monkeypatch):
+    import myapp.config as config
+    monkeypatch.setattr(config, "MAX_RETRIES", 10)
+    assert get_max_retries() == 10
+    # After the test, MAX_RETRIES is restored to its original value
+
+
+def test_patch_dict_entry(monkeypatch):
+    settings = {"timeout": 30, "retries": 3}
+    monkeypatch.setitem(settings, "timeout", 120)
+    assert settings["timeout"] == 120
+    assert settings["retries"] == 3   # unchanged
+
+
+def test_patch_sys_path(monkeypatch):
+    monkeypatch.syspath_prepend("/custom/path")
+    import sys
+    assert sys.path[0] == "/custom/path"
+```
+
+### `request`
+
+Provides introspection of the requesting test. Useful inside fixtures to access test metadata, parameters, or to register finalizers.
+
+```python
+@pytest.fixture
+def resource_with_name(request):
+    """Fixture that uses the requesting test's name."""
+    test_name = request.node.name
+    resource = create_resource(name=f"resource-for-{test_name}")
+    yield resource
+    resource.cleanup()
+
+
+@pytest.fixture
+def fixture_with_finalizer(request):
+    """Alternative teardown using addfinalizer."""
+    resource = acquire_resource()
+
+    def cleanup():
+        resource.release()
+
+    request.addfinalizer(cleanup)
+    return resource
+
+
+@pytest.fixture
+def parametrized_resource(request):
+    """Access the parameter value passed via indirect parametrize."""
+    config = request.param   # set by @pytest.mark.parametrize(..., indirect=True)
+    return connect_with_config(config)
+```
+
+## Parametrized Fixtures
+
+Parametrize a fixture itself to make every test that uses it run once per parameter:
+
+```python
+import pytest
+
+
+@pytest.fixture(params=["sqlite", "postgres", "mysql"])
+def database(request):
+    db = connect_to_db(backend=request.param)
+    db.create_tables()
+    yield db
+    db.drop_tables()
+    db.close()
+
+
+def test_insert_record(database):
+    database.insert({"id": 1, "name": "Alice"})
+    assert database.count() == 1
+
+
+def test_query_records(database):
+    database.insert({"id": 1, "name": "Alice"})
+    results = database.query("SELECT * FROM users")
+    assert len(results) == 1
+    assert results[0]["name"] == "Alice"
+```
+
+This runs both tests three times — once per backend — for 6 total test items:
+
+```
+test_db.py::test_insert_record[sqlite] PASSED
+test_db.py::test_insert_record[postgres] PASSED
+test_db.py::test_insert_record[mysql] PASSED
+test_db.py::test_query_records[sqlite] PASSED
+test_db.py::test_query_records[postgres] PASSED
+test_db.py::test_query_records[mysql] PASSED
+```
+
+### Parametrized Fixture IDs
+
+Use `ids` for readable test names:
+
+```python
+@pytest.fixture(
+    params=[
+        pytest.param("sqlite", id="sqlite"),
+        pytest.param("postgres", id="postgres"),
+        pytest.param("mysql", id="mysql"),
+    ]
+)
+def database(request):
+    ...
+```
+
+## Factory Fixtures
+
+When a single test needs multiple instances of the same object, return a factory function:
+
+```python
+import pytest
+
+
+@pytest.fixture
+def make_user():
+    """Factory fixture: creates User objects with customizable fields."""
+    created_users = []
+
+    def _make_user(name="Alice", role="user", active=True, email=None):
+        if email is None:
+            email = f"{name.lower()}@example.com"
+        u = User(name=name, role=role, active=active, email=email)
+        u.save()
+        created_users.append(u)
+        return u
+
+    yield _make_user
+
+    # Cleanup: delete all users created during this test
+    for u in created_users:
+        u.delete()
+
+
+def test_user_can_manage_subordinates(make_user):
+    admin = make_user(name="Admin", role="admin")
+    viewer = make_user(name="Viewer", role="viewer")
+    editor = make_user(name="Editor", role="editor")
+
+    assert admin.can_manage(viewer)
+    assert admin.can_manage(editor)
+    assert not viewer.can_manage(admin)
+    assert not editor.can_manage(admin)
+```
+
+## autouse Fixtures
+
+Mark a fixture `autouse=True` to automatically apply it to every test in scope without explicit declaration:
+
+```python
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def reset_database():
+    """Automatically clear all tables before each test."""
+    db.clear_all_tables()
+    yield
+    # Optional: additional assertions or cleanup after each test
+
+
+@pytest.fixture(autouse=True, scope="session")
+def configure_logging():
+    """Configure test logging once for the entire session."""
+    import logging
+    logging.basicConfig(level=logging.DEBUG, format="%(name)s: %(message)s")
+
+
+@pytest.fixture(autouse=True)
+def isolate_environment(monkeypatch):
+    """Ensure no real credentials or URLs leak into tests."""
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("API_KEY", raising=False)
+    monkeypatch.setenv("ENVIRONMENT", "test")
+```
+
+:::caution[Use autouse sparingly]
+`autouse` fixtures run for every test in scope. If they do expensive work, they slow down your entire suite. Prefer explicit fixture requests for most fixtures — they make tests self-documenting about their dependencies.
+:::
+
+## Fixture Finalization with `addfinalizer`
+
+As an alternative to `yield`, register teardown functions explicitly:
+
+```python
+@pytest.fixture
+def managed_resource(request):
+    resource = Resource()
+    resource.open()
+
+    def close_resource():
+        if resource.is_open:
+            resource.close()
+
+    request.addfinalizer(close_resource)
+    return resource   # note: return, not yield
+```
+
+You can register multiple independent finalizers:
+
+```python
+@pytest.fixture
+def multi_resource(request):
+    db = open_database()
+    cache = open_cache()
+    file_handle = open_file()
+
+    request.addfinalizer(db.close)
+    request.addfinalizer(cache.flush)
+    request.addfinalizer(file_handle.close)
+
+    return {"db": db, "cache": cache, "file": file_handle}
+```
+
+:::tip[yield vs addfinalizer]
+Prefer `yield` for simple linear setup/teardown. Use `addfinalizer` when teardown is conditional, involves multiple independent resources, or when you need to register cleanup mid-fixture.
+:::
+
+## Overriding Fixtures
+
+A local `conftest.py` or test file can override a fixture defined in a parent `conftest.py`:
+
+```python
+# tests/conftest.py
+@pytest.fixture
+def settings():
+    return {"debug": False, "timeout": 30, "db_url": "sqlite:///prod.db"}
+
+
+# tests/integration/conftest.py — overrides for integration tests only
+@pytest.fixture
+def settings():
+    return {"debug": True, "timeout": 120, "db_url": "sqlite:///test_integration.db"}
+```
+
+Tests in `tests/integration/` use the overridden `settings`; tests in `tests/` use the original.
+
+## Fixture Visibility Summary
+
+| Defined in | Visible to |
+| --- | --- |
+| `conftest.py` at root `tests/` | All tests under `tests/` |
+| `conftest.py` in `tests/integration/` | Only tests under `tests/integration/` |
+| Plugin (installed package) | All tests in the project |
+| Inside a test file | Only tests in that same file |
+
+## Real-World Example: Full Flask App Fixture Stack
+
+```python
+# tests/conftest.py
+
+import pytest
+from myapp import create_app
+from myapp.models import db, User, Post
+
+
+@pytest.fixture(scope="session")
+def app():
+    """Create the application once per session."""
+    app = create_app({
+        "TESTING": True,
+        "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
+        "WTF_CSRF_ENABLED": False,
+    })
+    with app.app_context():
+        db.create_all()
+        yield app
+        db.drop_all()
+
+
+@pytest.fixture
+def db_session(app):
+    """Wrap each test in a transaction that gets rolled back."""
+    connection = db.engine.connect()
+    transaction = connection.begin()
+    db.session.bind = connection
+    yield db.session
+    db.session.close()
+    transaction.rollback()
+    connection.close()
+
+
+@pytest.fixture
+def client(app):
+    return app.test_client()
+
+
+@pytest.fixture
+def make_user(db_session):
+    """Factory for creating test users."""
+    def _make(username="testuser", password="secret", admin=False):
+        u = User(username=username, admin=admin)
+        u.set_password(password)
+        db_session.add(u)
+        db_session.flush()   # assign ID without committing
+        return u
+    return _make
+
+
+@pytest.fixture
+def logged_in_client(client, make_user):
+    """Client pre-authenticated as a regular user."""
+    user = make_user()
+    with client.session_transaction() as sess:
+        sess["user_id"] = user.id
+    return client
+```

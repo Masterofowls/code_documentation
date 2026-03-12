@@ -1,0 +1,567 @@
+---
+title: Database with Flask-SQLAlchemy
+description: Define models, manage relationships, perform CRUD operations, and run schema migrations with Flask-SQLAlchemy and Flask-Migrate.
+sidebar:
+  order: 5
+tags: [python, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Flask doesn't include a database layer, which means you choose the right tool for your project. **Flask-SQLAlchemy** is the de-facto standard ORM integration, wrapping SQLAlchemy's powerful capabilities with Flask's application context. **Flask-Migrate** adds Alembic-powered schema migrations on top.
+
+## Installation
+
+```bash
+pip install flask-sqlalchemy flask-migrate psycopg2-binary
+```
+
+For SQLite development only (no Postgres driver needed):
+
+```bash
+pip install flask-sqlalchemy flask-migrate
+```
+
+## Configuration
+
+<Tabs>
+  <TabItem label="SQLite (development)">
+    ```python
+    # config.py
+    class DevelopmentConfig:
+        SQLALCHEMY_DATABASE_URI = 'sqlite:///dev.db'
+        SQLALCHEMY_TRACK_MODIFICATIONS = False
+        SQLALCHEMY_ECHO = True  # Log all SQL to console
+    ```
+  </TabItem>
+  <TabItem label="PostgreSQL (production)">
+    ```python
+    # config.py
+    import os
+
+    class ProductionConfig:
+        # Format: postgresql://user:password@host:port/dbname
+        SQLALCHEMY_DATABASE_URI = os.environ['DATABASE_URL']
+        SQLALCHEMY_TRACK_MODIFICATIONS = False
+        SQLALCHEMY_POOL_SIZE = 10
+        SQLALCHEMY_MAX_OVERFLOW = 20
+        SQLALCHEMY_POOL_TIMEOUT = 30
+    ```
+
+    ```ini
+    # .env
+    DATABASE_URL=postgresql://myuser:mypassword@localhost:5432/myapp
+    ```
+  </TabItem>
+  <TabItem label="MySQL">
+    ```python
+    class ProductionConfig:
+        SQLALCHEMY_DATABASE_URI = (
+            'mysql+pymysql://user:password@localhost:3306/myapp'
+        )
+        SQLALCHEMY_TRACK_MODIFICATIONS = False
+    ```
+  </TabItem>
+</Tabs>
+
+:::tip[Heroku DATABASE_URL Fix]
+Heroku sets `DATABASE_URL` with the deprecated `postgres://` scheme. SQLAlchemy 1.4+ requires `postgresql://`. Fix it:
+```python
+import os
+uri = os.environ.get('DATABASE_URL', 'sqlite:///app.db')
+if uri.startswith('postgres://'):
+    uri = uri.replace('postgres://', 'postgresql://', 1)
+SQLALCHEMY_DATABASE_URI = uri
+```
+:::
+
+## Setting Up with the App Factory
+
+Always initialize extensions with `db.init_app(app)` in the factory — never pass the `app` directly to `SQLAlchemy()`:
+
+```python
+# app/extensions.py
+from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
+
+db = SQLAlchemy()
+migrate = Migrate()
+```
+
+```python
+# app/__init__.py
+from flask import Flask
+from app.extensions import db, migrate
+from app.config import config
+
+
+def create_app(config_name: str = 'default') -> Flask:
+    app = Flask(__name__)
+    app.config.from_object(config[config_name])
+
+    db.init_app(app)
+    migrate.init_app(app, db)
+
+    # Import models so Migrate can detect them
+    with app.app_context():
+        from app.models import user, post, tag  # noqa: F401
+
+    from app.main import main
+    app.register_blueprint(main)
+
+    return app
+```
+
+## Defining Models
+
+Models are Python classes that inherit from `db.Model`. Each class maps to a database table:
+
+```python
+# app/models/user.py
+from datetime import datetime
+from app.extensions import db
+
+
+class User(db.Model):
+    __tablename__ = 'users'
+
+    # Primary key
+    id: int = db.Column(db.Integer, primary_key=True)
+
+    # Required string fields
+    username: str = db.Column(db.String(64), unique=True, nullable=False, index=True)
+    email: str = db.Column(db.String(120), unique=True, nullable=False, index=True)
+
+    # Optional fields
+    password_hash: str = db.Column(db.String(256), nullable=False)
+    display_name: str | None = db.Column(db.String(100), nullable=True)
+    bio: str | None = db.Column(db.Text, nullable=True)
+    avatar_url: str | None = db.Column(db.String(500), nullable=True)
+
+    # Boolean with default
+    is_active: bool = db.Column(db.Boolean, default=True, nullable=False)
+    is_admin: bool = db.Column(db.Boolean, default=False, nullable=False)
+
+    # Timestamps — set automatically
+    created_at: datetime = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: datetime = db.Column(
+        db.DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+    last_seen: datetime | None = db.Column(db.DateTime, nullable=True)
+
+    # Relationship (defined below)
+    posts = db.relationship('Post', back_populates='author', lazy='dynamic', cascade='all, delete-orphan')
+    profile = db.relationship('UserProfile', back_populates='user', uselist=False, cascade='all, delete-orphan')
+
+    def __repr__(self) -> str:
+        return f'<User {self.username}>'
+
+    def to_dict(self) -> dict:
+        return {
+            'id': self.id,
+            'username': self.username,
+            'email': self.email,
+            'created_at': self.created_at.isoformat(),
+        }
+```
+
+```python
+# app/models/post.py
+from datetime import datetime
+from app.extensions import db
+
+# Association table for many-to-many (Post ↔ Tag)
+post_tags = db.Table(
+    'post_tags',
+    db.Column('post_id', db.Integer, db.ForeignKey('posts.id'), primary_key=True),
+    db.Column('tag_id', db.Integer, db.ForeignKey('tags.id'), primary_key=True),
+)
+
+
+class Post(db.Model):
+    __tablename__ = 'posts'
+
+    id: int = db.Column(db.Integer, primary_key=True)
+    title: str = db.Column(db.String(200), nullable=False)
+    slug: str = db.Column(db.String(200), unique=True, nullable=False, index=True)
+    body: str = db.Column(db.Text, nullable=False)
+    published: bool = db.Column(db.Boolean, default=False, nullable=False)
+
+    created_at: datetime = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at: datetime = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Foreign key to User
+    author_id: int = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+
+    # Relationships
+    author = db.relationship('User', back_populates='posts')
+    tags = db.relationship('Tag', secondary=post_tags, back_populates='posts', lazy='subquery')
+    comments = db.relationship('Comment', back_populates='post', lazy='dynamic', cascade='all, delete-orphan')
+
+    def __repr__(self) -> str:
+        return f'<Post {self.slug}>'
+
+
+class Tag(db.Model):
+    __tablename__ = 'tags'
+
+    id: int = db.Column(db.Integer, primary_key=True)
+    name: str = db.Column(db.String(50), unique=True, nullable=False)
+    slug: str = db.Column(db.String(50), unique=True, nullable=False)
+
+    posts = db.relationship('Post', secondary=post_tags, back_populates='tags')
+
+    def __repr__(self) -> str:
+        return f'<Tag {self.name}>'
+
+
+class Comment(db.Model):
+    __tablename__ = 'comments'
+
+    id: int = db.Column(db.Integer, primary_key=True)
+    body: str = db.Column(db.Text, nullable=False)
+    author_id: int = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    post_id: int = db.Column(db.Integer, db.ForeignKey('posts.id'), nullable=False)
+    created_at: datetime = db.Column(db.DateTime, default=datetime.utcnow)
+
+    author = db.relationship('User')
+    post = db.relationship('Post', back_populates='comments')
+```
+
+## Relationship Types
+
+| Relationship | Configuration | Example |
+|---|---|---|
+| One-to-Many | `relationship('Child', back_populates='parent')` | User → Posts |
+| Many-to-One | Foreign key + `relationship` | Post → User |
+| One-to-One | `relationship(..., uselist=False)` | User → UserProfile |
+| Many-to-Many | `secondary=association_table` | Post ↔ Tags |
+| Self-referential | `remote_side=[id]` | Category → SubCategory |
+
+```python
+# One-to-One example
+class UserProfile(db.Model):
+    __tablename__ = 'user_profiles'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), unique=True, nullable=False)
+    website = db.Column(db.String(200))
+    location = db.Column(db.String(100))
+    twitter_handle = db.Column(db.String(50))
+
+    user = db.relationship('User', back_populates='profile')
+
+# Self-referential (tree structure)
+class Category(db.Model):
+    __tablename__ = 'categories'
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    parent_id = db.Column(db.Integer, db.ForeignKey('categories.id'), nullable=True)
+
+    children = db.relationship('Category', backref=db.backref('parent', remote_side=[id]))
+```
+
+## CRUD Operations with db.session
+
+All database writes go through `db.session`, which acts as a unit of work:
+
+```python
+from app.extensions import db
+from app.models.user import User
+from app.models.post import Post, Tag
+
+# ── CREATE ────────────────────────────────────────────────────────────────────
+def create_user(username: str, email: str, password_hash: str) -> User:
+    user = User(
+        username=username,
+        email=email.lower(),
+        password_hash=password_hash,
+    )
+    db.session.add(user)
+    db.session.commit()
+    return user
+
+
+def create_post_with_tags(title: str, body: str, author: User, tag_names: list[str]) -> Post:
+    post = Post(title=title, body=body, author=author, slug=slugify(title))
+
+    for name in tag_names:
+        tag = Tag.query.filter_by(name=name).first()
+        if tag is None:
+            tag = Tag(name=name, slug=slugify(name))
+            db.session.add(tag)
+        post.tags.append(tag)
+
+    db.session.add(post)
+    db.session.commit()
+    return post
+
+
+# ── READ ──────────────────────────────────────────────────────────────────────
+# Legacy query API (SQLAlchemy 1.x style — still works)
+user = User.query.get(1)
+user = User.query.filter_by(username='alice').first()
+user = User.query.filter_by(username='alice').first_or_404()
+users = User.query.filter(User.is_active == True).order_by(User.created_at.desc()).all()
+count = User.query.filter_by(is_active=True).count()
+
+# SQLAlchemy 2.0 style (recommended for new code)
+from sqlalchemy import select
+
+stmt = select(User).where(User.username == 'alice')
+user = db.session.execute(stmt).scalar_one_or_none()
+
+stmt = select(User).where(User.is_active == True).order_by(User.created_at.desc())
+users = db.session.execute(stmt).scalars().all()
+
+
+# ── UPDATE ────────────────────────────────────────────────────────────────────
+def update_user_email(user_id: int, new_email: str) -> User | None:
+    user = db.session.get(User, user_id)
+    if user is None:
+        return None
+    user.email = new_email.lower()
+    db.session.commit()
+    return user
+
+
+# Bulk update
+db.session.execute(
+    db.update(User).where(User.last_seen == None).values(is_active=False)
+)
+db.session.commit()
+
+
+# ── DELETE ────────────────────────────────────────────────────────────────────
+def delete_user(user_id: int) -> bool:
+    user = db.session.get(User, user_id)
+    if user is None:
+        return False
+    db.session.delete(user)
+    db.session.commit()
+    return True
+```
+
+## Pagination
+
+```python
+# Legacy paginate API
+@app.route('/posts')
+def list_posts():
+    page = request.args.get('page', 1, type=int)
+    per_page = current_app.config.get('POSTS_PER_PAGE', 10)
+
+    pagination = Post.query \
+        .filter_by(published=True) \
+        .order_by(Post.created_at.desc()) \
+        .paginate(page=page, per_page=per_page, error_out=False)
+
+    return render_template(
+        'main/posts.html',
+        posts=pagination.items,
+        pagination=pagination,
+    )
+```
+
+## Advanced Queries
+
+```python
+from sqlalchemy import and_, or_, not_, func, desc
+
+# AND / OR conditions
+active_admins = User.query.filter(
+    and_(User.is_active == True, User.is_admin == True)
+).all()
+
+search_results = User.query.filter(
+    or_(
+        User.username.ilike(f'%{query}%'),
+        User.email.ilike(f'%{query}%'),
+    )
+).all()
+
+# Aggregate functions
+from sqlalchemy import func
+
+post_counts = db.session.query(
+    User.username,
+    func.count(Post.id).label('post_count'),
+).join(Post).group_by(User.id).order_by(desc('post_count')).all()
+
+# Eager loading to avoid N+1 queries
+posts_with_authors = Post.query.options(
+    db.joinedload(Post.author),
+    db.subqueryload(Post.tags),
+).filter_by(published=True).all()
+```
+
+## Error Handling in Views
+
+```python
+from flask import jsonify
+from sqlalchemy.exc import IntegrityError
+
+@app.route('/users', methods=['POST'])
+def create_user():
+    data = request.get_json()
+    try:
+        user = User(username=data['username'], email=data['email'])
+        user.set_password(data['password'])
+        db.session.add(user)
+        db.session.commit()
+        return jsonify(user.to_dict()), 201
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({'error': 'Username or email already exists'}), 409
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f'Failed to create user: {e}')
+        return jsonify({'error': 'Internal server error'}), 500
+```
+
+## Flask-Migrate
+
+Flask-Migrate uses **Alembic** to manage schema changes through version-controlled migration scripts.
+
+<Steps>
+1. Initialize the migrations folder (once per project)
+
+   ```bash
+   flask db init
+   ```
+
+   ```
+   Creating directory migrations ...  done
+   Creating directory migrations/versions ...  done
+   Generating migrations/alembic.ini ...  done
+   Generating migrations/env.py ...  done
+   Generating migrations/README ...  done
+   Generating migrations/script.py.mako ...  done
+   Please edit configuration/connection/logging settings in 'migrations/alembic.ini'
+   before proceeding.
+   ```
+
+2. Generate a migration after changing models
+
+   ```bash
+   flask db migrate -m "add user bio column"
+   ```
+
+   ```
+   INFO  [alembic.runtime.migration] Context impl SQLiteImpl.
+   INFO  [alembic.runtime.migration] Will assume non-transactional DDL.
+   INFO  [alembic.autogenerate.compare] Detected added column 'users.bio'
+   Generating migrations/versions/3a7c2d1f4e5b_add_user_bio_column.py ...  done
+   ```
+
+3. Review the generated migration script
+
+   ```python
+   # migrations/versions/3a7c2d1f4e5b_add_user_bio_column.py
+   def upgrade():
+       op.add_column('users', sa.Column('bio', sa.Text(), nullable=True))
+
+   def downgrade():
+       op.drop_column('users', 'bio')
+   ```
+
+4. Apply the migration to your database
+
+   ```bash
+   flask db upgrade
+   ```
+
+   ```
+   INFO  [alembic.runtime.migration] Running upgrade  -> 3a7c2d1f4e5b, add user bio column
+   ```
+
+5. Check current migration status
+
+   ```bash
+   flask db current
+   # 3a7c2d1f4e5b (head)
+
+   flask db history
+   # 3a7c2d1f4e5b -> (head), add user bio column
+   # <base> -> 3a7c2d1f4e5b, initial migration
+   ```
+
+6. Roll back one migration
+
+   ```bash
+   flask db downgrade
+   ```
+</Steps>
+
+:::caution[Always Review Auto-Generated Migrations]
+Alembic's autogenerate is smart but not perfect. Always open and read the generated migration file before running `flask db upgrade`. It may miss: renamed columns (detected as drop + add), complex constraints, data migrations, or custom types.
+:::
+
+## teardown_appcontext
+
+Use `teardown_appcontext` to clean up resources that were opened during a request:
+
+```python
+# app/__init__.py (inside create_app)
+
+@app.teardown_appcontext
+def shutdown_session(exception=None):
+    """Remove the database session at the end of each request."""
+    if exception:
+        db.session.rollback()
+    db.session.remove()
+```
+
+Flask-SQLAlchemy handles this automatically via `scoped_session`, but if you manage your own connections (e.g., raw `psycopg2`), you must close them here.
+
+## Seeding the Database
+
+```python
+# app/cli.py
+import click
+from flask import current_app
+from app.extensions import db
+from app.models.user import User
+from app.models.post import Post, Tag
+
+
+def register_commands(app):
+    @app.cli.command('seed-db')
+    @click.option('--drop', is_flag=True, help='Drop and recreate tables first.')
+    def seed_db(drop):
+        """Seed the database with initial data."""
+        if drop:
+            click.echo('Dropping all tables...')
+            db.drop_all()
+
+        click.echo('Creating tables...')
+        db.create_all()
+
+        click.echo('Seeding users...')
+        admin = User(username='admin', email='admin@example.com', is_admin=True)
+        admin.set_password('adminpass')
+        db.session.add(admin)
+
+        click.echo('Seeding tags...')
+        for tag_name in ['python', 'flask', 'web', 'tutorial']:
+            db.session.add(Tag(name=tag_name, slug=tag_name))
+
+        db.session.commit()
+        click.echo('Database seeded successfully.')
+```
+
+Register in factory and run:
+
+```bash
+flask seed-db
+# Database seeded successfully.
+
+flask seed-db --drop
+# Dropping all tables...
+# Creating tables...
+# Database seeded successfully.
+```

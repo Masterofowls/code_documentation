@@ -1,0 +1,415 @@
+---
+title: React Testing with Jest
+description: Test React components using @testing-library/react — render, screen queries, user-event interactions, waitFor, hooks, Context, Router, and accessibility-first testing.
+sidebar:
+  order: 6
+tags: [testing, javascript]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+`@testing-library/react` is the standard library for testing React components. It encourages testing from the user's perspective — querying the DOM the same way a user or assistive technology would, rather than relying on implementation details like component state or prop names.
+
+## Setup
+
+<Steps>
+1. Install the required packages:
+
+   ```bash
+   npm install --save-dev @testing-library/react @testing-library/user-event @testing-library/jest-dom
+   ```
+
+2. Configure jest-dom matchers globally in `jest.config.ts`:
+
+   ```typescript
+   // jest.config.ts
+   export default {
+     testEnvironment: 'jsdom',
+     setupFilesAfterFramework: ['@testing-library/jest-dom'],
+   };
+   ```
+
+3. Optionally, create a custom render wrapper for providers:
+
+   ```typescript
+   // src/test-utils/render.tsx
+   import React from 'react';
+   import { render, RenderOptions } from '@testing-library/react';
+   import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+   import { MemoryRouter } from 'react-router-dom';
+
+   const createTestQueryClient = () =>
+     new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+   function AllProviders({ children }: { children: React.ReactNode }) {
+     return (
+       <QueryClientProvider client={createTestQueryClient()}>
+         <MemoryRouter>{children}</MemoryRouter>
+       </QueryClientProvider>
+     );
+   }
+
+   const customRender = (ui: React.ReactElement, options?: RenderOptions) =>
+     render(ui, { wrapper: AllProviders, ...options });
+
+   export * from '@testing-library/react';
+   export { customRender as render };
+   ```
+</Steps>
+
+## render()
+
+`render()` mounts a component into a jsdom environment and returns utilities for querying it:
+
+```typescript
+import { render, screen } from '@testing-library/react';
+import { UserCard } from './UserCard';
+
+it('displays the user name and email', () => {
+  render(<UserCard name="Alice" email="alice@example.com" role="Admin" />);
+
+  expect(screen.getByRole('heading', { name: 'Alice' })).toBeInTheDocument();
+  expect(screen.getByText('alice@example.com')).toBeInTheDocument();
+  expect(screen.getByText('Admin')).toBeInTheDocument();
+});
+```
+
+Key utilities returned from `render()`:
+
+| Utility | Description |
+|---|---|
+| `container` | The DOM node that wraps the rendered component |
+| `baseElement` | The `document.body` element |
+| `asFragment()` | Returns a DocumentFragment (useful for snapshot testing) |
+| `rerender(ui)` | Re-render with different props |
+| `unmount()` | Unmount the component |
+| `debug()` | Print the current DOM to stdout |
+
+## screen Queries
+
+`screen` provides queries that work on the entire document. There are three query types for every selector, each with different behaviour when the element is not found:
+
+| Query type | 0 matches | 1 match | 2+ matches | Async? |
+|---|---|---|---|---|
+| `getBy...` | Throw | Return element | Throw | No |
+| `queryBy...` | Return `null` | Return element | Throw | No |
+| `findBy...` | Reject | Resolve | Reject | Yes |
+| `getAllBy...` | Throw | Return array | Return array | No |
+| `queryAllBy...` | Return `[]` | Return array | Return array | No |
+| `findAllBy...` | Reject | Resolve array | Resolve array | Yes |
+
+### getByRole (Preferred)
+
+Query by ARIA role — the most accessible and resilient query:
+
+```typescript
+// Common roles
+screen.getByRole('button', { name: 'Submit' });
+screen.getByRole('link', { name: 'Learn more' });
+screen.getByRole('heading', { name: 'Dashboard', level: 1 });
+screen.getByRole('textbox', { name: 'Email address' });
+screen.getByRole('checkbox', { name: 'Remember me' });
+screen.getByRole('combobox', { name: 'Country' });
+screen.getByRole('listitem');
+screen.getByRole('dialog', { name: 'Confirm deletion' });
+screen.getByRole('alert');
+screen.getByRole('status');
+screen.getByRole('img', { name: 'Profile photo' });
+
+// Query by role with additional filters
+screen.getByRole('button', { name: /submit/i, hidden: false });
+screen.getByRole('row', { name: /Alice/ }); // table row
+```
+
+### Other Queries
+
+```typescript
+// getByText — match by visible text content
+screen.getByText('Welcome back, Alice!');
+screen.getByText(/welcome back/i);       // regex, case-insensitive
+screen.getByText('Price:', { exact: false }); // substring match
+
+// getByLabelText — matches form element by its label
+screen.getByLabelText('Email address');
+screen.getByLabelText(/email/i);
+
+// getByPlaceholderText
+screen.getByPlaceholderText('Enter your email');
+screen.getByPlaceholderText(/search/i);
+
+// getByDisplayValue — current value of input/select/textarea
+screen.getByDisplayValue('alice@example.com');
+
+// getByAltText — img alt text
+screen.getByAltText('Company logo');
+
+// getByTitle — title attribute
+screen.getByTitle('Close dialog');
+
+// getByTestId — last resort, uses data-testid attribute
+screen.getByTestId('user-avatar');
+```
+
+### Query Priority (Accessibility Order)
+
+The Testing Library recommends this query priority:
+
+1. **`getByRole`** — most accessible, maps to ARIA semantics
+2. **`getByLabelText`** — for form inputs with labels
+3. **`getByPlaceholderText`** — for inputs without labels (accessibility issue, but practical)
+4. **`getByText`** — for non-interactive elements
+5. **`getByDisplayValue`** — for pre-filled form values
+6. **`getByAltText`** — for images
+7. **`getByTitle`** — for elements with a title attribute
+8. **`getByTestId`** — last resort only; prefer semantic queries
+
+:::caution[Avoid getByTestId Overuse]
+`data-testid` attributes tightly couple tests to implementation. A test querying `data-testid="submit-btn"` will not catch a UI regression that accidentally removes the accessible role of the button. Prefer `getByRole('button', { name: 'Submit' })`.
+:::
+
+## userEvent vs fireEvent
+
+`@testing-library/user-event` simulates real user interactions more accurately than `fireEvent`, which dispatches individual DOM events directly.
+
+| | **userEvent** | **fireEvent** |
+|---|---|---|
+| Simulates real user | Yes (full event sequence) | No (single event dispatch) |
+| Fires intermediate events | Yes (focus, keydown, input, keyup) | No |
+| Async | Yes (use `await`) | No |
+| Recommended | ✓ Yes | For edge cases only |
+
+```typescript
+import userEvent from '@testing-library/user-event';
+
+describe('Search input', () => {
+  it('updates results as user types', async () => {
+    const user = userEvent.setup(); // create a user-event instance
+    render(<SearchBar onSearch={mockSearch} />);
+
+    const input = screen.getByRole('textbox', { name: 'Search' });
+
+    await user.type(input, 'react testing');
+    expect(input).toHaveValue('react testing');
+    expect(mockSearch).toHaveBeenCalledWith('react testing');
+  });
+
+  it('clears the input', async () => {
+    const user = userEvent.setup();
+    render(<SearchBar />);
+
+    const input = screen.getByRole('textbox', { name: 'Search' });
+    await user.type(input, 'some text');
+    await user.clear(input);
+    expect(input).toHaveValue('');
+  });
+
+  it('clicks a button', async () => {
+    const user = userEvent.setup();
+    const handleClick = jest.fn();
+    render(<Button onClick={handleClick}>Submit</Button>);
+
+    await user.click(screen.getByRole('button', { name: 'Submit' }));
+    expect(handleClick).toHaveBeenCalledTimes(1);
+  });
+
+  it('selects a dropdown option', async () => {
+    const user = userEvent.setup();
+    render(<CountrySelect />);
+
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Country' }),
+      'United Kingdom'
+    );
+    expect(screen.getByRole('combobox', { name: 'Country' })).toHaveValue('UK');
+  });
+
+  it('checks a checkbox', async () => {
+    const user = userEvent.setup();
+    render(<TermsCheckbox />);
+
+    const checkbox = screen.getByRole('checkbox', { name: /agree to terms/i });
+    expect(checkbox).not.toBeChecked();
+
+    await user.click(checkbox);
+    expect(checkbox).toBeChecked();
+  });
+});
+```
+
+## waitFor and waitForElementToBeRemoved
+
+For assertions that depend on async state changes (data fetching, animations, conditional rendering):
+
+```typescript
+import { waitFor, waitForElementToBeRemoved } from '@testing-library/react';
+
+it('displays user data after loading', async () => {
+  render(<UserProfile userId={1} />);
+
+  // Element appears asynchronously
+  const userName = await screen.findByText('Alice Johnson'); // findBy = waitFor + getBy
+  expect(userName).toBeInTheDocument();
+});
+
+it('shows success message after form submission', async () => {
+  const user = userEvent.setup();
+  render(<ContactForm />);
+
+  await user.type(screen.getByLabelText('Name'), 'Bob');
+  await user.type(screen.getByLabelText('Email'), 'bob@example.com');
+  await user.click(screen.getByRole('button', { name: 'Send' }));
+
+  await waitFor(() => {
+    expect(screen.getByRole('alert')).toHaveTextContent('Message sent!');
+  });
+});
+
+it('removes loading spinner after data loads', async () => {
+  render(<DataTable />);
+
+  await waitForElementToBeRemoved(() =>
+    screen.getByRole('status', { name: 'Loading' })
+  );
+
+  expect(screen.getAllByRole('row')).toHaveLength(6); // header + 5 data rows
+});
+
+// waitFor with custom timeout and interval
+await waitFor(
+  () => expect(screen.getByText('Done')).toBeInTheDocument(),
+  { timeout: 3000, interval: 100 }
+);
+```
+
+## Testing Forms
+
+```typescript
+describe('RegistrationForm', () => {
+  it('submits with valid data', async () => {
+    const user = userEvent.setup();
+    const onSubmit = jest.fn();
+    render(<RegistrationForm onSubmit={onSubmit} />);
+
+    await user.type(screen.getByLabelText('Full Name'), 'Alice Smith');
+    await user.type(screen.getByLabelText('Email'), 'alice@example.com');
+    await user.type(screen.getByLabelText('Password'), 'SecurePass123!');
+    await user.click(screen.getByRole('button', { name: 'Create Account' }));
+
+    expect(onSubmit).toHaveBeenCalledWith({
+      name: 'Alice Smith',
+      email: 'alice@example.com',
+      password: 'SecurePass123!',
+    });
+  });
+
+  it('shows validation errors on empty submit', async () => {
+    const user = userEvent.setup();
+    render(<RegistrationForm />);
+
+    await user.click(screen.getByRole('button', { name: 'Create Account' }));
+
+    expect(screen.getByText('Name is required')).toBeInTheDocument();
+    expect(screen.getByText('Email is required')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create Account' })).toBeDisabled();
+  });
+});
+```
+
+## Testing Hooks with renderHook
+
+```typescript
+import { renderHook, act } from '@testing-library/react';
+import { useCounter } from './useCounter';
+
+describe('useCounter', () => {
+  it('initializes with the given value', () => {
+    const { result } = renderHook(() => useCounter(10));
+    expect(result.current.count).toBe(10);
+  });
+
+  it('increments the counter', () => {
+    const { result } = renderHook(() => useCounter(0));
+
+    act(() => {
+      result.current.increment();
+    });
+
+    expect(result.current.count).toBe(1);
+  });
+
+  it('resets to initial value', () => {
+    const { result } = renderHook(() => useCounter(5));
+
+    act(() => {
+      result.current.increment();
+      result.current.increment();
+      result.current.reset();
+    });
+
+    expect(result.current.count).toBe(5);
+  });
+});
+```
+
+## Testing Context
+
+```typescript
+// Provide context values directly in the wrapper
+it('reads the user from AuthContext', () => {
+  const contextValue = { user: { name: 'Alice', role: 'admin' }, logout: jest.fn() };
+
+  render(
+    <AuthContext.Provider value={contextValue}>
+      <UserMenu />
+    </AuthContext.Provider>
+  );
+
+  expect(screen.getByText('Alice')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Admin Panel' })).toBeInTheDocument();
+});
+```
+
+## Testing with React Router
+
+```typescript
+import { MemoryRouter, Routes, Route } from 'react-router-dom';
+
+it('navigates to the product page on click', async () => {
+  const user = userEvent.setup();
+
+  render(
+    <MemoryRouter initialEntries={['/products']}>
+      <Routes>
+        <Route path="/products" element={<ProductList />} />
+        <Route path="/products/:id" element={<ProductDetail />} />
+      </Routes>
+    </MemoryRouter>
+  );
+
+  await user.click(screen.getByRole('link', { name: 'Widget Pro' }));
+  expect(screen.getByRole('heading', { name: 'Widget Pro' })).toBeInTheDocument();
+});
+```
+
+## act() Wrapper
+
+`act()` ensures all React state updates, effects, and re-renders complete before assertions. Testing Library wraps its utilities in `act()` automatically, but you need it when calling component methods or triggering external state changes directly:
+
+```typescript
+import { act } from '@testing-library/react';
+
+it('updates when WebSocket message is received', async () => {
+  render(<LiveDashboard />);
+
+  await act(async () => {
+    // Simulate an external event outside of user-event
+    mockWebSocket.emit('message', { type: 'UPDATE', value: 42 });
+  });
+
+  expect(screen.getByRole('status')).toHaveTextContent('42');
+});
+```
+
+:::tip[Testing Library Handles act() Automatically]
+You rarely need to call `act()` directly when using Testing Library's `userEvent`, `waitFor`, `findBy*`, and `render`. These all wrap interactions in `act()` internally. Only reach for `act()` when triggering state changes outside of Testing Library's utilities.
+:::

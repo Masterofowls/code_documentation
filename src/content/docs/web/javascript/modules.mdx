@@ -1,0 +1,448 @@
+---
+title: JavaScript Modules
+description: Everything about ES modules — named and default exports, re-exports, dynamic import(), import.meta, bundlers (Vite, Webpack, Rollup, esbuild), CommonJS vs ESM, tree shaking, and import maps.
+sidebar:
+  order: 8
+tags: [javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+JavaScript modules are self-contained files with their own scope. Variables and functions declared in a module are private by default — you choose what to expose with `export`.
+
+## ES Modules Basics
+
+```js
+// math.js — exporting
+export const PI = 3.14159265358979;
+
+export function add(a, b) {
+  return a + b;
+}
+
+export function multiply(a, b) {
+  return a * b;
+}
+
+// Private — not exported, not accessible from outside
+function _internalHelper() {
+  return 'private';
+}
+```
+
+```js
+// app.js — importing
+import { PI, add, multiply } from './math.js';
+
+console.log(PI);            // output: 3.14159265358979
+console.log(add(2, 3));     // output: 5
+console.log(multiply(4, 5)); // output: 20
+
+// Import with alias (rename)
+import { add as sum, multiply as product } from './math.js';
+console.log(sum(1, 2));     // output: 3
+
+// Import everything into a namespace object
+import * as Math from './math.js';
+console.log(Math.PI);       // output: 3.14159265358979
+console.log(Math.add(1, 2)); // output: 3
+```
+
+## Named vs Default Exports
+
+```js
+// user.js — default export (only one per file)
+export default class User {
+  constructor(name, email) {
+    this.name = name;
+    this.email = email;
+  }
+
+  toString() {
+    return `User(${this.name})`;
+  }
+}
+
+// Also export some named exports alongside the default
+export const ROLES = ['admin', 'user', 'moderator'];
+export function createGuest() {
+  return new User('Guest', 'guest@example.com');
+}
+```
+
+```js
+// Importing default and named exports together
+import User, { ROLES, createGuest } from './user.js';
+// default import can be named anything — the name is up to the importer
+import MyUser, { ROLES } from './user.js'; // valid — same default
+
+const alice = new User('Alice', 'alice@example.com');
+const guest = createGuest();
+console.log(alice.toString()); // output: User(Alice)
+console.log(ROLES);             // output: ['admin', 'user', 'moderator']
+```
+
+:::tip[Default vs Named — Style Guide]
+Prefer **named exports** — they enable better tree shaking, make refactoring safer (imports break visibly when names change), and improve IDE autocompletion. Use default exports for the "main" export of a module (a component, a class, a configuration object).
+:::
+
+## Re-Exports (Barrel Files)
+
+Re-exporting consolidates multiple modules into one public API:
+
+```js
+// utils/string.js
+export function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+export function truncate(s, n) { return s.length > n ? s.slice(0, n) + '...' : s; }
+
+// utils/array.js
+export function unique(arr) { return [...new Set(arr)]; }
+export function groupBy(arr, key) {
+  return arr.reduce((acc, item) => {
+    (acc[item[key]] ??= []).push(item);
+    return acc;
+  }, {});
+}
+
+// utils/index.js — barrel file (aggregates and re-exports)
+export { capitalize, truncate } from './string.js';
+export { unique, groupBy } from './array.js';
+export * from './number.js';                    // re-export all named exports
+export { default as createUser } from './user.js'; // re-export default as named
+
+// Consumers import from one place instead of digging into module structure
+import { capitalize, unique, groupBy } from './utils/index.js';
+```
+
+:::caution[Barrel File Performance]
+Deep barrel files can hurt tree shaking and cold-start performance in some bundlers. Prefer flat, feature-scoped barrel files over deeply nested chains. With Vite and modern bundlers this is mostly handled automatically.
+:::
+
+## Dynamic Import
+
+`import()` returns a Promise, allowing you to load modules on demand:
+
+```js
+// Static import — always loaded, can't be conditional
+import { heavyLibrary } from './heavy.js'; // loaded even if never used
+
+// Dynamic import — lazy, code-split, conditional
+async function loadEditor() {
+  const { default: Editor } = await import('./editor.js');
+  return new Editor();
+}
+
+// Load on user interaction
+document.querySelector('#open-editor').addEventListener('click', async () => {
+  const { initialize } = await import('./editor.js');
+  initialize(document.querySelector('#editor-container'));
+});
+
+// Conditional loading
+async function loadPolyfill() {
+  if (!window.IntersectionObserver) {
+    await import('intersection-observer'); // polyfill only when needed
+  }
+}
+
+// Load based on route
+async function handleRoute(route) {
+  const modules = {
+    '/dashboard': () => import('./pages/Dashboard.js'),
+    '/profile': () => import('./pages/Profile.js'),
+    '/settings': () => import('./pages/Settings.js'),
+  };
+
+  const loader = modules[route];
+  if (!loader) throw new Error(`Unknown route: ${route}`);
+
+  const { default: Page } = await loader();
+  renderPage(new Page());
+}
+
+// Load multiple modules in parallel
+const [{ Chart }, { DataTable }] = await Promise.all([
+  import('./components/Chart.js'),
+  import('./components/DataTable.js'),
+]);
+```
+
+## import.meta
+
+`import.meta` provides information about the current module:
+
+```js
+// import.meta.url — the full URL of the current module
+console.log(import.meta.url);
+// output: file:///home/user/project/src/app.js (Node.js)
+// output: http://localhost:3000/src/app.js (browser)
+
+// Resolve relative paths from the current module
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const configPath = join(__dirname, '../config.json');
+
+// import.meta.env — provided by bundlers (Vite, etc.)
+console.log(import.meta.env.MODE);         // output: 'development' or 'production'
+console.log(import.meta.env.VITE_API_URL); // output: 'https://api.example.com'
+console.log(import.meta.env.DEV);          // output: true (in development)
+console.log(import.meta.env.PROD);         // output: false (in development)
+
+// import.meta.resolve — resolve a module specifier to a URL
+const url = import.meta.resolve('./utils.js');
+console.log(url); // output: file:///path/to/current/utils.js
+```
+
+## CommonJS vs ES Modules
+
+<Tabs>
+  <TabItem label="CommonJS (CJS)">
+```js
+// Synchronous require — executes immediately
+const fs = require('fs');
+const path = require('path');
+const { EventEmitter } = require('events');
+
+// exports
+function add(a, b) { return a + b; }
+const PI = 3.14;
+
+module.exports = { add, PI };      // replace exports object
+// OR
+module.exports.add = add;          // add individual exports
+exports.PI = PI;                   // shorthand for module.exports.PI
+
+// Dynamic require (works at runtime)
+const config = require(`./config.${process.env.NODE_ENV}.js`);
+```
+  </TabItem>
+  <TabItem label="ES Modules (ESM)">
+```js
+// Asynchronous (evaluated statically)
+import fs from 'fs/promises';
+import path from 'path';
+import { EventEmitter } from 'events';
+
+// exports
+export function add(a, b) { return a + b; }
+export const PI = 3.14;
+export default { add, PI };
+
+// Dynamic import (async, returns Promise)
+const config = await import(`./config.${env}.js`);
+```
+  </TabItem>
+  <TabItem label="Key Differences">
+| Feature | CommonJS | ES Modules |
+|---------|----------|-----------|
+| Loading | Synchronous | Asynchronous |
+| Evaluation | Runtime | Parse time (static analysis) |
+| `this` at top level | `module.exports` | `undefined` |
+| `__dirname` / `__filename` | Available | Not available (use `import.meta.url`) |
+| Tree shaking | Not supported | Supported |
+| Named exports | Via destructure | Native |
+| Conditional imports | Yes (`require()` anywhere) | Only with dynamic `import()` |
+| Circular deps | Returns partial object | Handled via live bindings |
+  </TabItem>
+</Tabs>
+
+### `package.json` `type` Field
+
+```json
+{
+  "name": "my-package",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    }
+  }
+}
+```
+
+```
+"type": "module"   → .js files treated as ESM (require .cjs for CommonJS)
+"type": "commonjs" → .js files treated as CJS (require .mjs for ESM) — default
+.mjs extension     → always ESM, regardless of "type"
+.cjs extension     → always CommonJS, regardless of "type"
+```
+
+## Module Bundlers
+
+<CardGrid>
+  <Card title="Vite" icon="rocket">
+    **Development**: native ESM with instant HMR. **Production**: Rollup-based bundling with automatic code splitting, tree shaking, and asset optimization. The go-to choice for modern web apps.
+  </Card>
+  <Card title="Webpack" icon="puzzle">
+    Mature, highly configurable bundler. Supports any module format, complex code splitting, rich plugin ecosystem. Steeper learning curve — best for complex applications with non-standard requirements.
+  </Card>
+  <Card title="Rollup" icon="star">
+    Originally designed for library bundling. Excellent tree shaking, clean output, ES module-first. Used internally by Vite for production builds. Best for npm packages and libraries.
+  </Card>
+  <Card title="esbuild" icon="seti:bun">
+    Extremely fast bundler written in Go — 10-100x faster than webpack. Used internally by Vite for development transforms. Best for build tooling and when build speed is critical.
+  </Card>
+</CardGrid>
+
+### Vite Configuration Example
+
+```js
+// vite.config.js
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import { resolve } from 'path';
+
+export default defineConfig({
+  plugins: [react()],
+
+  resolve: {
+    alias: {
+      '@': resolve(__dirname, 'src'),
+      '@components': resolve(__dirname, 'src/components'),
+    },
+  },
+
+  build: {
+    rollupOptions: {
+      output: {
+        // Manual code splitting — vendor chunk
+        manualChunks: {
+          vendor: ['react', 'react-dom'],
+          utils: ['lodash', 'date-fns'],
+        },
+      },
+    },
+    chunkSizeWarningLimit: 500, // warn when chunk > 500kb
+  },
+});
+```
+
+## Tree Shaking
+
+Tree shaking removes dead (unused) code from bundles. It requires ES modules with static exports.
+
+```js
+// utils.js — a large utility library
+export function used() { return 'I am used'; }
+export function alsoUsed() { return 'Me too'; }
+export function neverUsed() {
+  // This entire function is removed from the bundle
+  return 'I will be tree-shaken away';
+}
+
+// app.js — only imports what it uses
+import { used, alsoUsed } from './utils.js';
+// neverUsed is never imported → bundler removes it from output
+```
+
+```js
+// Anti-pattern — importing the entire library prevents tree shaking
+import _ from 'lodash'; // imports ALL of lodash (~72kb gzipped)
+_.debounce(fn, 200);
+
+// Better — named import (if library supports it)
+import debounce from 'lodash/debounce'; // only debounce (~2kb)
+
+// Best — use lodash-es (ESM version, fully tree-shakeable)
+import { debounce, throttle } from 'lodash-es';
+// Only debounce and throttle end up in the bundle
+```
+
+## Circular Dependencies
+
+Circular imports (A imports B, B imports A) should be avoided — they create subtle bugs.
+
+```js
+// a.js
+import { b } from './b.js';
+export const a = 'A: ' + b; // b may be undefined at init time!
+
+// b.js
+import { a } from './a.js';
+export const b = 'B: ' + a; // a may be undefined at init time!
+
+// Both a and b end up as 'undefined' or 'NaN'
+```
+
+```js
+// Fix: extract shared code to a third module
+// shared.js — no imports from a.js or b.js
+export const BASE = 'base value';
+
+// a.js
+import { BASE } from './shared.js';
+export const a = 'A: ' + BASE;
+
+// b.js
+import { BASE } from './shared.js';
+export const b = 'B: ' + BASE;
+```
+
+:::caution[Detecting Circular Deps]
+Use `madge` to visualize and detect circular dependencies in your project:
+
+```bash
+npx madge --circular src/
+```
+:::
+
+## Import Maps (Browser)
+
+Import maps let browsers resolve bare module specifiers without a bundler:
+
+```html
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18",
+    "react-dom/client": "https://esm.sh/react-dom@18/client",
+    "lodash": "https://esm.sh/lodash-es",
+    "@/": "/src/"
+  }
+}
+</script>
+
+<script type="module">
+  // These bare specifiers now resolve via the import map
+  import React from 'react';
+  import { createRoot } from 'react-dom/client';
+  import { debounce } from 'lodash';
+  import { MyComponent } from '@/components/MyComponent.js';
+</script>
+```
+
+## Module Patterns in Practice
+
+```js
+// Singleton pattern — module is only ever initialized once
+// config.js
+let instance = null;
+
+class Config {
+  #settings;
+
+  constructor() {
+    if (instance) return instance; // return existing instance
+    this.#settings = {};
+    instance = this;
+  }
+
+  set(key, value) { this.#settings[key] = value; return this; }
+  get(key) { return this.#settings[key]; }
+}
+
+export const config = new Config(); // single shared instance
+
+// importer-a.js
+import { config } from './config.js';
+config.set('apiUrl', 'https://api.example.com');
+
+// importer-b.js
+import { config } from './config.js'; // same module instance!
+console.log(config.get('apiUrl')); // output: https://api.example.com
+```

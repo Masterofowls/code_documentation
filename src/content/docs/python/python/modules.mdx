@@ -1,0 +1,670 @@
+---
+title: Modules & Packages
+description: Import system, creating modules, building packages, __init__.py, and managing dependencies.
+sidebar:
+  order: 6
+tags: [python]
+---
+
+import { Aside, FileTree } from '@astrojs/starlight/components';
+
+Python's module and package system is how code is organised, reused, and distributed. Every `.py` file is a module. A directory of modules is a package. Understanding the import machinery lets you structure projects that scale cleanly.
+
+## Importing Modules
+
+### `import module`
+
+The most explicit form. Access names with dot notation.
+
+```python
+import math
+import os
+import sys
+
+print(math.pi)          # 3.141592653589793
+print(math.sqrt(16))    # 4.0
+print(os.getcwd())      # /home/user/project
+print(sys.version)      # 3.12.0 (main, Oct  2 2023, ...)
+```
+
+### `from module import name`
+
+Import a specific name directly into the local namespace.
+
+```python
+from math import sqrt, pi, floor
+
+print(sqrt(25))   # 5.0
+print(pi)         # 3.141592653589793
+print(floor(3.9)) # 3
+```
+
+### `import module as alias`
+
+Aliases are used to shorten long names or avoid naming conflicts. Some are conventional.
+
+```python
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+array = np.array([1, 2, 3])
+df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
+```
+
+### `from module import *`
+
+Imports all public names from a module. Avoid this in application code—it pollutes the namespace and makes it unclear where names come from.
+
+```python
+# ❌ Avoid — unclear where 'sin', 'cos', 'pi' come from
+from math import *
+
+# ✅ Explicit is better than implicit
+from math import sin, cos, pi
+```
+
+### Relative Imports
+
+Used inside a package to import from sibling or parent modules. The dot notation mirrors the directory structure.
+
+```python
+# Inside myapp/utils/formatting.py
+
+from . import helpers            # sibling module: myapp/utils/helpers.py
+from .validators import is_email  # sibling: myapp/utils/validators.py
+from .. import config            # parent package: myapp/config.py
+from ..models import User        # parent package sibling: myapp/models.py
+```
+
+<Aside type="caution">
+Relative imports only work inside packages. Running a file that uses relative imports directly with `python file.py` will raise `ImportError: attempted relative import with no known parent package`.
+</Aside>
+
+---
+
+## The Import System
+
+When you write `import foo`, Python follows a specific search process.
+
+### `sys.path`
+
+Python searches for modules in the directories listed in `sys.path`, in order.
+
+```python
+import sys
+
+for path in sys.path:
+    print(path)
+# (empty string — current directory)
+# /usr/lib/python312.zip
+# /usr/lib/python3.12
+# /usr/lib/python3.12/lib-dynload
+# /home/user/.local/lib/python3.12/site-packages
+# /usr/lib/python3.12/site-packages
+```
+
+The search order is:
+1. The directory containing the script (or `""` for the current directory in interactive mode)
+2. `PYTHONPATH` environment variable entries
+3. Installation-dependent defaults (standard library, site-packages)
+
+You can add to `sys.path` at runtime, but this is generally a code smell—use proper packaging instead.
+
+```python
+import sys
+sys.path.insert(0, "/path/to/my/modules")   # use sparingly
+import my_custom_module
+```
+
+### Module Caching with `sys.modules`
+
+Python caches every imported module in `sys.modules`. Re-importing a module returns the cached version instantly—the module code does not run again.
+
+```python
+import sys
+import math
+
+print("math" in sys.modules)   # True
+print(sys.modules["math"] is math)   # True
+
+# Force a re-import (rarely needed, usually for testing)
+import importlib
+importlib.reload(math)
+```
+
+### `__file__` and `__name__`
+
+Every module has special dunder attributes set by the import system.
+
+```python
+# Inside myapp/utils.py
+print(__file__)    # /home/user/myapp/utils.py
+print(__name__)    # myapp.utils  (when imported)
+                   # __main__     (when run directly)
+```
+
+---
+
+## `if __name__ == '__main__':`
+
+This guard is the standard way to make a Python file both **importable as a module** and **runnable as a script**.
+
+When you run `python utils.py`, Python sets `__name__ = "__main__"`. When you `import utils` from another file, `__name__ = "utils"`.
+
+```python
+# calculator.py
+
+def add(a: float, b: float) -> float:
+    return a + b
+
+def multiply(a: float, b: float) -> float:
+    return a * b
+
+if __name__ == "__main__":
+    # Only runs when executed directly: python calculator.py
+    print(add(3, 4))       # 7
+    print(multiply(3, 4))  # 12
+```
+
+```python
+# main.py — imports calculator without triggering the print statements
+from calculator import add, multiply
+
+result = add(10, 5)
+print(result)   # 15
+```
+
+**Use cases for `if __name__ == '__main__':`**
+
+```python
+# 1. Quick self-test / smoke test for a utility module
+# 2. CLI entry point
+# 3. Module demo / example
+
+import argparse
+
+def process_file(path: str) -> list[str]:
+    with open(path) as f:
+        return f.readlines()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Process a text file.")
+    parser.add_argument("path", help="Path to the file")
+    args = parser.parse_args()
+
+    lines = process_file(args.path)
+    print(f"Found {len(lines)} lines.")
+```
+
+---
+
+## Creating Modules
+
+Any `.py` file is a module. Name it with `snake_case`, keep it focused on a single concern.
+
+```python
+# stringutils.py
+
+"""Utility functions for string manipulation."""
+
+_VOWELS = set("aeiouAEIOU")   # private — convention: leading underscore
+
+def count_vowels(text: str) -> int:
+    """Return the number of vowel characters in text."""
+    return sum(1 for ch in text if ch in _VOWELS)
+
+def to_title_case(text: str) -> str:
+    """Convert text to title case."""
+    return text.title()
+
+def truncate(text: str, max_len: int, suffix: str = "…") -> str:
+    """Truncate text to max_len characters, appending suffix if truncated."""
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - len(suffix)] + suffix
+```
+
+```python
+# Using the module
+import stringutils
+
+print(stringutils.count_vowels("Hello, World!"))   # 3
+print(stringutils.to_title_case("hello world"))    # Hello World
+print(stringutils.truncate("A long sentence.", 10)) # A long s…
+```
+
+### Public vs Private Names
+
+Python uses convention, not access modifiers. A leading underscore signals "private" or "internal".
+
+```python
+# mymodule.py
+
+PUBLIC_CONSTANT = 42        # intended to be used by callers
+_INTERNAL_STATE = {}        # internal—don't rely on this
+
+def public_function():      # part of the public API
+    ...
+
+def _helper():              # internal utility, not part of the API
+    ...
+
+class PublicClass:          # public
+    def method(self): ...
+    def _private_method(self): ...  # internal to the class
+```
+
+### `__all__`
+
+Define `__all__` to explicitly control what is exported when someone does `from mymodule import *`. It also serves as documentation for the public API.
+
+```python
+# stringutils.py
+
+__all__ = ["count_vowels", "to_title_case", "truncate"]
+# _VOWELS and any future private names are excluded automatically
+
+_VOWELS = set("aeiouAEIOU")
+
+def count_vowels(text: str) -> int: ...
+def to_title_case(text: str) -> str: ...
+def truncate(text: str, max_len: int, suffix: str = "…") -> str: ...
+def _internal_normalise(text: str) -> str: ...   # not in __all__
+```
+
+---
+
+## Creating Packages
+
+A package is a **directory containing an `__init__.py` file** (for regular packages) and any number of module files.
+
+### Minimal Package
+
+```python
+# mypackage/__init__.py  (can be empty)
+
+# mypackage/greet.py
+def hello(name: str) -> str:
+    return f"Hello, {name}!"
+
+# mypackage/farewell.py
+def goodbye(name: str) -> str:
+    return f"Goodbye, {name}!"
+```
+
+```python
+# Importing from the package
+from mypackage import greet, farewell
+from mypackage.greet import hello
+
+print(hello("Alice"))              # Hello, Alice!
+print(farewell.goodbye("Bob"))     # Goodbye, Bob!
+```
+
+### `__init__.py` Contents
+
+`__init__.py` runs when the package is first imported. Use it to expose a clean public interface.
+
+```python
+# mypackage/__init__.py
+
+"""mypackage — utilities for greeting people."""
+
+from .greet import hello
+from .farewell import goodbye
+
+__version__ = "1.0.0"
+__all__ = ["hello", "goodbye"]
+```
+
+Now callers can do `from mypackage import hello` instead of `from mypackage.greet import hello`.
+
+### Namespace Packages
+
+Python 3.3+ supports **namespace packages**—packages without `__init__.py`. They allow a single package to be split across multiple directories or installed separately. Avoid them unless you specifically need that feature; use regular packages with `__init__.py` for clarity.
+
+---
+
+## Package Structure
+
+A well-structured Python project looks like this:
+
+<FileTree>
+- myapp/
+  - src/
+    - myapp/
+      - \_\_init\_\_.py
+      - \_\_main\_\_.py
+      - config.py
+      - exceptions.py
+      - models/
+        - \_\_init\_\_.py
+        - user.py
+        - product.py
+      - services/
+        - \_\_init\_\_.py
+        - auth.py
+        - email.py
+      - utils/
+        - \_\_init\_\_.py
+        - formatting.py
+        - validators.py
+  - tests/
+    - \_\_init\_\_.py
+    - test\_models.py
+    - test\_services.py
+    - conftest.py
+  - pyproject.toml
+  - README.md
+</FileTree>
+
+Key conventions:
+- `src/` layout prevents accidental imports of your package from the project root during development
+- `__main__.py` enables `python -m myapp` execution
+- `exceptions.py` centralises all custom exceptions
+- Mirror `src/myapp/` structure in `tests/` for easy navigation
+
+```python
+# myapp/__main__.py — enables: python -m myapp
+from myapp.cli import main
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+## Relative vs Absolute Imports
+
+### Absolute Imports
+
+Import using the full dotted path from the project root. PEP 8 recommends these for clarity.
+
+```python
+# Inside myapp/services/auth.py
+
+# ✅ Absolute — always clear where things come from
+from myapp.models.user import User
+from myapp.utils.validators import is_email
+from myapp.exceptions import AuthError
+```
+
+### Relative Imports
+
+Useful inside tightly coupled sub-packages. They make the code resilient to top-level renames.
+
+```python
+# Inside myapp/services/auth.py
+
+# ✅ Relative — works even if 'myapp' is renamed
+from ..models.user import User
+from ..utils.validators import is_email
+from ..exceptions import AuthError
+```
+
+**Rule of thumb:** Use absolute imports at the top level of your project. Use relative imports inside sub-packages when the siblings are tightly related.
+
+```python
+# ❌ Mixing can be confusing — pick one style per package
+from myapp.services import email      # absolute
+from ..utils import formatting         # relative
+```
+
+<Aside type="tip">
+PEP 8 says: *"Absolute imports are recommended, as they are usually more readable."* In practice, many well-maintained projects use relative imports within sub-packages—consistency matters more than the choice itself.
+</Aside>
+
+---
+
+## Circular Imports
+
+A circular import occurs when module A imports from module B, and module B imports from module A.
+
+```
+myapp/models.py  →  imports from  →  myapp/services.py
+myapp/services.py  →  imports from  →  myapp/models.py
+# ImportError or partially-initialised module
+```
+
+### Why They Happen
+
+```python
+# models.py
+from myapp.services import validate   # ← imports services
+
+class User:
+    def save(self):
+        validate(self)
+
+# services.py
+from myapp.models import User   # ← imports models
+                                # circular!
+def validate(user: "User"):
+    ...
+```
+
+### Fix 1: Restructure — Extract Shared Code
+
+Move shared types/interfaces to a third module that neither depends on:
+
+```python
+# types.py — no imports from models or services
+from typing import Protocol
+
+class Saveable(Protocol):
+    def save(self) -> None: ...
+
+# models.py
+from myapp.types import Saveable   # no circular dependency
+
+# services.py
+from myapp.types import Saveable
+```
+
+### Fix 2: Import Inside the Function
+
+Defer the import to the point of use. The module is cached after the first import, so there's no performance hit on subsequent calls.
+
+```python
+# services.py
+def validate(user):
+    from myapp.models import User   # imported when validate() is called
+    assert isinstance(user, User)
+    ...
+```
+
+### Fix 3: Type-Checking-Only Import
+
+For type annotations only, guard the import under `TYPE_CHECKING` so it never runs at runtime.
+
+```python
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from myapp.models import User   # only imported by type checkers, not at runtime
+
+def validate(user: "User") -> bool:
+    ...
+```
+
+---
+
+## `__init__.py` Patterns
+
+### Re-exporting for a Clean Public API
+
+```python
+# myapp/models/__init__.py
+
+from .user import User, UserRole
+from .product import Product, ProductStatus
+from .order import Order
+
+__all__ = ["User", "UserRole", "Product", "ProductStatus", "Order"]
+```
+
+Callers write `from myapp.models import User` instead of `from myapp.models.user import User`. You can refactor the internals without breaking the public API.
+
+### Lazy Imports
+
+Avoid importing heavy dependencies (numpy, PIL, etc.) at package load time. Import them only when needed.
+
+```python
+# myapp/images/__init__.py
+
+def load_image(path: str):
+    from PIL import Image   # imported lazily — only when this function is called
+    return Image.open(path)
+
+def to_array(image):
+    import numpy as np
+    return np.array(image)
+```
+
+### Version String
+
+```python
+# myapp/__init__.py
+
+__version__ = "2.1.0"
+__author__ = "Your Name"
+__email__ = "you@example.com"
+```
+
+```python
+import myapp
+print(myapp.__version__)   # 2.1.0
+```
+
+### Conditional Imports
+
+Handle optional dependencies gracefully:
+
+```python
+# myapp/__init__.py
+
+try:
+    import ujson as json
+except ImportError:
+    import json   # fall back to stdlib
+
+try:
+    from myapp._speedups import fast_hash   # optional C extension
+    HAS_SPEEDUPS = True
+except ImportError:
+    from myapp._pure import fast_hash
+    HAS_SPEEDUPS = False
+```
+
+---
+
+## Distribution
+
+### `pyproject.toml`
+
+The modern standard for project metadata and build configuration, replacing `setup.py` and `setup.cfg`.
+
+```toml
+# pyproject.toml
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "myapp"
+version = "1.0.0"
+description = "A sample Python application."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Alice Smith", email = "alice@example.com" },
+]
+keywords = ["cli", "utilities"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+  "httpx>=0.27",
+  "pydantic>=2.0",
+  "rich>=13.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff", "mypy"]
+docs = ["mkdocs", "mkdocs-material"]
+
+[project.scripts]
+myapp = "myapp.cli:main"   # installs a 'myapp' command
+
+[project.urls]
+Homepage = "https://github.com/alice/myapp"
+Documentation = "https://myapp.readthedocs.io"
+Repository = "https://github.com/alice/myapp"
+"Bug Tracker" = "https://github.com/alice/myapp/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/myapp"]
+```
+
+### Building a Distribution
+
+```bash
+# Install build frontend
+pip install build
+
+# Build both a source distribution (.tar.gz) and wheel (.whl)
+python -m build
+
+# dist/
+#   myapp-1.0.0.tar.gz
+#   myapp-1.0.0-py3-none-any.whl
+```
+
+### Uploading to PyPI
+
+```bash
+# Install Twine (upload tool)
+pip install twine
+
+# Check the distribution for common issues
+twine check dist/*
+
+# Upload to TestPyPI first (safe to experiment)
+twine upload --repository testpypi dist/*
+
+# Upload to the real PyPI
+twine upload dist/*
+# Prompts for your PyPI username and password (or API token)
+```
+
+After uploading, your package is installable with:
+
+```bash
+pip install myapp
+```
+
+<Aside type="tip">
+Use an API token instead of your password for uploads. Create one at [pypi.org/manage/account/token/](https://pypi.org/manage/account/token/) and store it in `~/.pypirc` or as the `TWINE_PASSWORD` environment variable in your CI pipeline.
+</Aside>
+
+### Installing in Development Mode
+
+While developing, install your package in editable mode so changes are reflected immediately without reinstalling.
+
+```bash
+pip install -e .            # editable install from current directory
+pip install -e ".[dev]"     # with optional dev dependencies
+```
+
+```python
+# Now you can import your package from anywhere
+import myapp
+print(myapp.__version__)   # 1.0.0
+```

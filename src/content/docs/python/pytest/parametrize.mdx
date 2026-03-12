@@ -1,0 +1,491 @@
+---
+title: Parametrize
+description: Drive tests with multiple inputs using @pytest.mark.parametrize, pytest.param, and indirect fixtures.
+sidebar:
+  order: 5
+tags:
+  - python
+  - testing
+---
+
+`@pytest.mark.parametrize` lets you run a single test function against many input combinations without duplicating test code. It is one of pytest's most powerful features for data-driven testing.
+
+## Basic Usage
+
+Decorate a test with `@pytest.mark.parametrize`, providing the parameter name(s) and a list of argument values:
+
+```python
+import pytest
+from myapp.calculator import add
+
+
+@pytest.mark.parametrize("a, b, expected", [
+    (1, 2, 3),
+    (0, 0, 0),
+    (-1, -1, -2),
+    (100, 200, 300),
+    (1.5, 2.5, 4.0),
+])
+def test_add(a, b, expected):
+    assert add(a, b) == expected
+```
+
+Running `pytest -v`:
+
+```
+tests/test_calculator.py::test_add[1-2-3] PASSED
+tests/test_calculator.py::test_add[0-0-0] PASSED
+tests/test_calculator.py::test_add[-1--1--2] PASSED
+tests/test_calculator.py::test_add[100-200-300] PASSED
+tests/test_calculator.py::test_add[1.5-2.5-4.0] PASSED
+
+5 passed in 0.03s
+```
+
+Each combination runs as an independent test item with its own pass/fail status. If `test_add[-1--1--2]` fails, the others still run.
+
+## Single Parameter
+
+For a single parameter, pass a flat list of scalar values:
+
+```python
+import pytest
+from myapp.validators import is_valid_email
+
+
+@pytest.mark.parametrize("email", [
+    "user@example.com",
+    "user.name+tag@example.co.uk",
+    "user123@sub.domain.org",
+    "user@xn--nxasmq6b.com",          # international domain
+])
+def test_valid_emails(email):
+    assert is_valid_email(email) is True
+
+
+@pytest.mark.parametrize("email", [
+    "not-an-email",
+    "@no-local-part.com",
+    "no-at-sign",
+    "spaces in@local.com",
+    "",
+    None,
+])
+def test_invalid_emails(email):
+    assert is_valid_email(email) is False
+```
+
+## Multiple Parameters
+
+Separate multiple parameter names with a comma in the first argument string. Each row in the list maps to the parameters in order:
+
+```python
+import pytest
+from myapp.text import truncate
+
+
+@pytest.mark.parametrize("text, max_len, expected", [
+    ("hello world", 5, "hello"),
+    ("hello world", 11, "hello world"),
+    ("hello world", 100, "hello world"),   # longer than string
+    ("", 5, ""),
+    ("hi", 0, ""),
+])
+def test_truncate(text, max_len, expected):
+    assert truncate(text, max_len) == expected
+```
+
+## Custom Test IDs
+
+By default, pytest generates IDs from the parameter values (e.g., `1-2-3`). For complex values or long strings, provide explicit IDs for readable output:
+
+```python
+import pytest
+from myapp.calculator import divide
+
+
+@pytest.mark.parametrize("a, b, expected", [
+    (10, 2, 5.0),
+    (7, 2, 3.5),
+    (100, 4, 25.0),
+], ids=["ten-by-two", "seven-by-two", "hundred-by-four"])
+def test_divide(a, b, expected):
+    assert divide(a, b) == pytest.approx(expected)
+```
+
+```
+tests/test_calculator.py::test_divide[ten-by-two] PASSED
+tests/test_calculator.py::test_divide[seven-by-two] PASSED
+tests/test_calculator.py::test_divide[hundred-by-four] PASSED
+```
+
+### IDs from a Callable
+
+Pass a callable to generate IDs dynamically:
+
+```python
+@pytest.mark.parametrize(
+    "n, expected",
+    [(0, 0), (1, 1), (2, 1), (3, 2), (4, 3), (5, 5), (6, 8), (10, 55)],
+    ids=lambda n: f"fib({n})",
+)
+def test_fibonacci(n, expected):
+    assert fibonacci(n) == expected
+```
+
+```
+test_math.py::test_fibonacci[fib(0)] PASSED
+test_math.py::test_fibonacci[fib(1)] PASSED
+test_math.py::test_fibonacci[fib(2)] PASSED
+...
+```
+
+## `pytest.param` — Per-Parameter Metadata
+
+`pytest.param` lets you associate an ID, marks, or other metadata with an individual parameter set:
+
+```python
+import pytest
+
+
+@pytest.mark.parametrize("a, b, expected", [
+    pytest.param(10, 2, 5.0, id="normal-case"),
+    pytest.param(7, 2, 3.5, id="float-result"),
+    pytest.param(
+        1_000_000, 2, 500_000.0,
+        id="large-numbers",
+        marks=pytest.mark.slow,
+    ),
+    pytest.param(
+        0, 0, None,
+        id="both-zero",
+        marks=pytest.mark.xfail(
+            reason="ZeroDivisionError — tracked in issue #42",
+            raises=ZeroDivisionError,
+        ),
+    ),
+    pytest.param(
+        10, 0, None,
+        id="divide-by-zero",
+        marks=pytest.mark.xfail(raises=ZeroDivisionError, strict=True),
+    ),
+])
+def test_divide(a, b, expected):
+    assert divide(a, b) == pytest.approx(expected)
+```
+
+```
+test_calculator.py::test_divide[normal-case] PASSED
+test_calculator.py::test_divide[float-result] PASSED
+test_calculator.py::test_divide[large-numbers] PASSED
+test_calculator.py::test_divide[both-zero] XFAIL
+test_calculator.py::test_divide[divide-by-zero] XFAIL
+```
+
+### Available Marks Inside `pytest.param`
+
+```python
+pytest.param(..., marks=pytest.mark.skip(reason="not ready"))
+pytest.param(..., marks=pytest.mark.skipif(sys.platform == "win32", reason="POSIX only"))
+pytest.param(..., marks=pytest.mark.xfail(raises=ValueError))
+pytest.param(..., marks=pytest.mark.slow)
+pytest.param(..., marks=[pytest.mark.slow, pytest.mark.integration])
+```
+
+## Combining Parametrize with Fixtures
+
+Parametrize and fixtures compose naturally. pytest creates the fixture once per parameter combination:
+
+```python
+import pytest
+
+
+@pytest.fixture
+def authenticated_user(db):
+    """Create and return a fresh authenticated user."""
+    user = User.create(name="Alice", role="user")
+    yield user
+    user.delete()
+
+
+@pytest.mark.parametrize("endpoint, expected_status", [
+    ("/api/profile", 200),
+    ("/api/settings", 200),
+    ("/api/admin", 403),
+    ("/api/billing", 200),
+    ("/api/nonexistent", 404),
+])
+def test_user_endpoint_access(authenticated_user, client, endpoint, expected_status):
+    client.force_login(authenticated_user)
+    response = client.get(endpoint)
+    assert response.status_code == expected_status
+```
+
+## Stacking `@pytest.mark.parametrize`
+
+Stack multiple `@pytest.mark.parametrize` decorators to run the **Cartesian product** of parameters:
+
+```python
+import pytest
+
+
+@pytest.mark.parametrize("x", [1, 2, 3])
+@pytest.mark.parametrize("y", [10, 100])
+def test_multiply(x, y):
+    assert multiply(x, y) == x * y
+```
+
+This generates 6 tests (3 × 2):
+
+```
+test_math.py::test_multiply[10-1] PASSED
+test_math.py::test_multiply[10-2] PASSED
+test_math.py::test_multiply[10-3] PASSED
+test_math.py::test_multiply[100-1] PASSED
+test_math.py::test_multiply[100-2] PASSED
+test_math.py::test_multiply[100-3] PASSED
+```
+
+:::caution[Combinatorial explosion]
+Stacking three 5-item parametrize decorators creates 125 tests (5 × 5 × 5). Use stacking intentionally — it is powerful but can slow down your suite quickly and produce hard-to-navigate output.
+:::
+
+## Parametrize on a Class
+
+Apply `@pytest.mark.parametrize` to a class to parametrize **all** test methods within it:
+
+```python
+import pytest
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres", "redis"])
+class TestCacheBackend:
+    def test_set_and_get(self, backend):
+        cache = Cache(backend=backend)
+        cache.set("key", "value", ttl=60)
+        assert cache.get("key") == "value"
+
+    def test_ttl_expiry(self, backend):
+        cache = Cache(backend=backend)
+        cache.set("key", "value", ttl=1)
+        time.sleep(2)
+        assert cache.get("key") is None
+
+    def test_delete(self, backend):
+        cache = Cache(backend=backend)
+        cache.set("key", "value")
+        cache.delete("key")
+        assert cache.get("key") is None
+```
+
+This runs 9 tests total (3 methods × 3 backends):
+
+```
+test_cache.py::TestCacheBackend::test_set_and_get[sqlite] PASSED
+test_cache.py::TestCacheBackend::test_ttl_expiry[sqlite] PASSED
+test_cache.py::TestCacheBackend::test_delete[sqlite] PASSED
+test_cache.py::TestCacheBackend::test_set_and_get[postgres] PASSED
+... (and so on)
+```
+
+## Indirect Parametrize
+
+With `indirect=True`, the parameter value is passed to the named fixture via `request.param` instead of directly to the test. This lets you parametrize the **setup** of a fixture:
+
+```python
+import pytest
+
+
+@pytest.fixture
+def user(request):
+    """Create a user with the role specified by the parametrize value."""
+    role = request.param
+    u = User.create(name="TestUser", role=role)
+    yield u
+    u.delete()
+
+
+@pytest.mark.parametrize("user", ["admin", "editor", "viewer"], indirect=True)
+def test_user_is_active(user):
+    assert user.is_active
+    assert user.role in ("admin", "editor", "viewer")
+
+
+@pytest.mark.parametrize("user", ["admin"], indirect=True)
+def test_admin_can_publish(user):
+    assert user.can_publish()
+
+
+@pytest.mark.parametrize("user", ["viewer"], indirect=True)
+def test_viewer_cannot_publish(user):
+    assert not user.can_publish()
+```
+
+### Partial Indirect
+
+Specify which parameters should be indirect, passing others directly to the test:
+
+```python
+@pytest.fixture
+def user(request):
+    return User.create(role=request.param)
+
+
+@pytest.mark.parametrize("user, can_delete", [
+    ("admin", True),
+    ("editor", False),
+    ("viewer", False),
+], indirect=["user"])   # only 'user' goes through the fixture; 'can_delete' is direct
+def test_delete_permission(user, can_delete):
+    assert user.has_permission("delete") == can_delete
+```
+
+## Data-Driven Testing Patterns
+
+### Loading Parameters from a JSON File
+
+For large datasets, load parameters from an external file rather than embedding them in source:
+
+```python
+# tests/data/string_cases.json
+[
+  {"input": "hello",  "expected": "HELLO"},
+  {"input": "world",  "expected": "WORLD"},
+  {"input": "pytest", "expected": "PYTEST"},
+  {"input": "",       "expected": ""},
+  {"input": "123abc", "expected": "123ABC"}
+]
+```
+
+```python
+import json
+import pytest
+from pathlib import Path
+
+
+def load_string_cases():
+    data_file = Path(__file__).parent / "data" / "string_cases.json"
+    cases = json.loads(data_file.read_text())
+    return [
+        pytest.param(c["input"], c["expected"], id=repr(c["input"]))
+        for c in cases
+    ]
+
+
+@pytest.mark.parametrize("input_str, expected", load_string_cases())
+def test_to_uppercase(input_str, expected):
+    assert input_str.upper() == expected
+```
+
+### Loading Parameters from a CSV File
+
+```python
+import csv
+import pytest
+from pathlib import Path
+
+
+def load_csv_cases(filename: str) -> list:
+    data_file = Path(__file__).parent / "data" / filename
+    with data_file.open() as f:
+        reader = csv.DictReader(f)
+        return [
+            pytest.param(
+                int(row["a"]),
+                int(row["b"]),
+                int(row["expected"]),
+                id=f"{row['a']}+{row['b']}",
+            )
+            for row in reader
+        ]
+
+
+@pytest.mark.parametrize("a, b, expected", load_csv_cases("add_cases.csv"))
+def test_add_from_csv(a, b, expected):
+    assert add(a, b) == expected
+```
+
+### Generating Parameters Programmatically
+
+```python
+import pytest
+
+
+def fibonacci_sequence(n: int):
+    """Yield (index, value) pairs for the first n Fibonacci numbers."""
+    a, b = 0, 1
+    for i in range(n):
+        yield i, a
+        a, b = b, a + b
+
+
+@pytest.mark.parametrize(
+    "n, expected",
+    list(fibonacci_sequence(12)),
+    ids=[f"fib({i})" for i, _ in fibonacci_sequence(12)],
+)
+def test_fibonacci(n, expected):
+    assert compute_fibonacci(n) == expected
+```
+
+### Boundary and Edge Case Organization
+
+Use `pytest.param` and comments to organize test cases by category:
+
+```python
+import pytest
+
+
+@pytest.mark.parametrize("value, is_valid", [
+    # --- Valid range (1–999) ---
+    pytest.param(1,   True,  id="minimum"),
+    pytest.param(500, True,  id="middle"),
+    pytest.param(999, True,  id="maximum"),
+
+    # --- Boundary violations ---
+    pytest.param(0,    False, id="below-minimum"),
+    pytest.param(1000, False, id="above-maximum"),
+
+    # --- Edge cases ---
+    pytest.param(-1,   False, id="negative"),
+    pytest.param(None, False, id="none-value",
+                 marks=pytest.mark.xfail(raises=TypeError)),
+    pytest.param("5",  False, id="string-input",
+                 marks=pytest.mark.xfail(raises=TypeError)),
+])
+def test_validate_quantity(value, is_valid):
+    assert validate_quantity(value) == is_valid
+```
+
+:::tip[Descriptive IDs matter in CI]
+Clear IDs like `"minimum"`, `"above-maximum"`, and `"none-value"` make failures immediately actionable in CI logs. Auto-generated IDs like `0-False-3` force you to cross-reference the source code to understand what failed.
+:::
+
+## Running Specific Parametrize Cases
+
+Select individual parametrize cases on the command line using `-k` or by node ID:
+
+```bash
+# Run all test_add cases where a equals 0
+pytest -k "test_add and 0-0-0"
+
+# Run a specific case by its full node ID
+pytest "tests/test_calculator.py::test_add[0-0-0]"
+
+# Run all cases with IDs matching a pattern
+pytest -k "fib"
+pytest -k "minimum or maximum"
+```
+
+## Summary
+
+| Pattern | Use when |
+| --- | --- |
+| Basic list | Testing one function with multiple known inputs |
+| Custom `ids=` | Making test output readable in CI logs |
+| `pytest.param` with marks | Marking specific cases as `xfail`, `skip`, or `slow` |
+| Stacked decorators | Testing the Cartesian product of independent parameters |
+| Class-level parametrize | Running an entire test class against multiple backends |
+| `indirect=True` | The parameter requires complex setup via a fixture |
+| External file loading | Large datasets that belong outside source code |
+| Programmatic generation | Parameters derived from algorithms or sequences |

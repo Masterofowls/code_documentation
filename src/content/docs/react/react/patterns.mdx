@@ -1,0 +1,703 @@
+---
+title: React Design Patterns
+description: Master essential React design patterns — compound components, render props, HOCs, provider pattern, custom hooks as logic extraction, headless UI, and more.
+sidebar:
+  order: 10
+tags: [react, javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Design patterns are reusable solutions to common problems. In React, the right pattern makes components more flexible, testable, and composable. This guide covers the most important patterns used in production React codebases.
+
+## Container / Presentational Pattern
+
+Separate data-fetching logic from rendering logic:
+
+```tsx
+// Presentational component — pure, testable, no side effects
+interface UserListViewProps {
+  users:     User[];
+  loading:   boolean;
+  error:     Error | null;
+  onDelete:  (id: string) => void;
+  onRefresh: () => void;
+}
+
+function UserListView({ users, loading, error, onDelete, onRefresh }: UserListViewProps) {
+  if (loading) return <Spinner />;
+  if (error)   return <ErrorCard error={error} onRetry={onRefresh} />;
+  if (!users.length) return <EmptyState message="No users found" />;
+
+  return (
+    <ul className="user-list">
+      {users.map(user => (
+        <li key={user.id} className="user-list__item">
+          <Avatar src={user.avatarUrl} alt={user.name} />
+          <div>
+            <strong>{user.name}</strong>
+            <span>{user.email}</span>
+          </div>
+          <button
+            onClick={() => onDelete(user.id)}
+            aria-label={`Delete ${user.name}`}
+          >
+            Delete
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// Container component — fetches data, handles state, passes to presentational
+function UserListContainer() {
+  const { data: users = [], isLoading, error, refetch } = useQuery({
+    queryKey: ['users'],
+    queryFn:  () => fetch('/api/users').then(r => r.json()),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => fetch(`/api/users/${id}`, { method: 'DELETE' }),
+    onSuccess:  () => refetch(),
+  });
+
+  return (
+    <UserListView
+      users={users}
+      loading={isLoading}
+      error={error as Error | null}
+      onDelete={id => deleteMutation.mutate(id)}
+      onRefresh={refetch}
+    />
+  );
+}
+```
+
+:::tip[Custom Hooks Replace Container Components]
+In modern React, a custom hook often replaces the container component. The hook handles data fetching and returns everything the presentational component needs, allowing the two to be composed anywhere.
+:::
+
+## Custom Hooks as Logic Extraction
+
+Extract stateful logic into custom hooks so any component can use it:
+
+```tsx
+// Logic hook — no JSX
+function useUserList() {
+  const queryClient = useQueryClient();
+
+  const { data: users = [], isLoading, error, refetch } = useQuery<User[]>({
+    queryKey: ['users'],
+    queryFn:  () => fetch('/api/users').then(r => r.json() as Promise<User[]>),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) =>
+      fetch(`/api/users/${id}`, { method: 'DELETE' }).then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['users'] }),
+  });
+
+  return {
+    users,
+    isLoading,
+    error: error as Error | null,
+    refetch,
+    deleteUser:   deleteMutation.mutate,
+    isDeleting:   deleteMutation.isPending,
+    deleteError:  deleteMutation.error as Error | null,
+  };
+}
+
+// Any component can now use this logic
+function UserListPage() {
+  const { users, isLoading, error, deleteUser, refetch } = useUserList();
+  return <UserListView users={users} loading={isLoading} error={error} onDelete={deleteUser} onRefresh={refetch} />;
+}
+
+function UserSidebar() {
+  const { users, isLoading } = useUserList();
+  if (isLoading) return null;
+  return <ul>{users.slice(0, 5).map(u => <li key={u.id}>{u.name}</li>)}</ul>;
+}
+```
+
+## Compound Components (Advanced)
+
+A complete Tabs compound component with accessible keyboard navigation:
+
+```tsx
+import { createContext, useContext, useState, useId, useRef, KeyboardEvent } from 'react';
+
+// --- Context ---
+interface TabsContextValue {
+  activeTab:    string;
+  setActiveTab: (id: string) => void;
+  baseId:       string;
+}
+
+const TabsContext = createContext<TabsContextValue | null>(null);
+
+function useTabsContext() {
+  const ctx = useContext(TabsContext);
+  if (!ctx) throw new Error('Tabs subcomponents must be used within <Tabs>');
+  return ctx;
+}
+
+// --- Root ---
+interface TabsProps {
+  defaultTab?: string;
+  children: React.ReactNode;
+}
+
+function Tabs({ defaultTab, children }: TabsProps) {
+  const baseId = useId();
+  const [activeTab, setActiveTab] = useState(defaultTab ?? '');
+
+  return (
+    <TabsContext.Provider value={{ activeTab, setActiveTab, baseId }}>
+      <div className="tabs">{children}</div>
+    </TabsContext.Provider>
+  );
+}
+
+// --- Tab List ---
+function TabList({ children }: { children: React.ReactNode }) {
+  const listRef = useRef<HTMLDivElement>(null);
+
+  const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    const tabs = listRef.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]');
+    if (!tabs) return;
+    const current = document.activeElement as HTMLButtonElement;
+    const idx = Array.from(tabs).indexOf(current);
+
+    if (e.key === 'ArrowRight') {
+      tabs[(idx + 1) % tabs.length]?.focus();
+    } else if (e.key === 'ArrowLeft') {
+      tabs[(idx - 1 + tabs.length) % tabs.length]?.focus();
+    } else if (e.key === 'Home') {
+      tabs[0]?.focus();
+    } else if (e.key === 'End') {
+      tabs[tabs.length - 1]?.focus();
+    }
+  };
+
+  return (
+    <div
+      ref={listRef}
+      role="tablist"
+      className="tabs__list"
+      onKeyDown={handleKeyDown}
+    >
+      {children}
+    </div>
+  );
+}
+
+// --- Tab Trigger ---
+function Tab({ id, children }: { id: string; children: React.ReactNode }) {
+  const { activeTab, setActiveTab, baseId } = useTabsContext();
+  const isActive = activeTab === id;
+
+  return (
+    <button
+      id={`${baseId}-tab-${id}`}
+      role="tab"
+      aria-selected={isActive}
+      aria-controls={`${baseId}-panel-${id}`}
+      tabIndex={isActive ? 0 : -1}
+      className={`tabs__tab ${isActive ? 'tabs__tab--active' : ''}`}
+      onClick={() => setActiveTab(id)}
+    >
+      {children}
+    </button>
+  );
+}
+
+// --- Tab Panel ---
+function TabPanel({ id, children }: { id: string; children: React.ReactNode }) {
+  const { activeTab, baseId } = useTabsContext();
+
+  return (
+    <div
+      id={`${baseId}-panel-${id}`}
+      role="tabpanel"
+      aria-labelledby={`${baseId}-tab-${id}`}
+      hidden={activeTab !== id}
+      className="tabs__panel"
+    >
+      {children}
+    </div>
+  );
+}
+
+// Compose sub-components onto root
+Tabs.List  = TabList;
+Tabs.Tab   = Tab;
+Tabs.Panel = TabPanel;
+
+// --- Usage ---
+function Documentation() {
+  return (
+    <Tabs defaultTab="overview">
+      <Tabs.List>
+        <Tabs.Tab id="overview">Overview</Tabs.Tab>
+        <Tabs.Tab id="api">API Reference</Tabs.Tab>
+        <Tabs.Tab id="examples">Examples</Tabs.Tab>
+      </Tabs.List>
+      <Tabs.Panel id="overview"><p>Overview content here.</p></Tabs.Panel>
+      <Tabs.Panel id="api"><pre>{'function() {}'}</pre></Tabs.Panel>
+      <Tabs.Panel id="examples"><code>Example usage</code></Tabs.Panel>
+    </Tabs>
+  );
+}
+```
+
+## Render Props Pattern
+
+```tsx
+// Generic data fetcher with render prop
+interface DataFetcherProps<T> {
+  url:       string;
+  children:  (state: { data: T | null; loading: boolean; error: Error | null }) => React.ReactNode;
+}
+
+function DataFetcher<T>({ url, children }: DataFetcherProps<T>) {
+  const [data,    setData]    = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState<Error | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(url)
+      .then(r => r.json() as Promise<T>)
+      .then(d => { if (!cancelled) { setData(d); setLoading(false); } })
+      .catch(e => { if (!cancelled) { setError(e); setLoading(false); } });
+    return () => { cancelled = true; };
+  }, [url]);
+
+  return <>{children({ data, loading, error })}</>;
+}
+
+// Usage — consumer controls rendering
+function UserDashboard() {
+  return (
+    <DataFetcher<User[]> url="/api/users">
+      {({ data: users, loading, error }) => {
+        if (loading) return <Spinner />;
+        if (error)   return <p>Error: {error.message}</p>;
+        return <ul>{users?.map(u => <li key={u.id}>{u.name}</li>)}</ul>;
+      }}
+    </DataFetcher>
+  );
+}
+```
+
+## Higher-Order Component (HOC) Pattern
+
+A HOC is a function that takes a component and returns an enhanced version:
+
+```tsx
+import { ComponentType, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
+
+// HOC: require authentication
+function withAuth<P extends object>(
+  WrappedComponent: ComponentType<P>,
+  requiredRole?: 'admin' | 'user'
+) {
+  function WithAuthComponent(props: P) {
+    const { user, isAuthenticated } = useAuth();
+    const navigate = useNavigate();
+
+    useEffect(() => {
+      if (!isAuthenticated) {
+        navigate('/login');
+      } else if (requiredRole && user?.role !== requiredRole) {
+        navigate('/403');
+      }
+    }, [isAuthenticated, user, navigate]);
+
+    if (!isAuthenticated) return null;
+    return <WrappedComponent {...props} />;
+  }
+
+  // Preserve display name for DevTools
+  WithAuthComponent.displayName = `withAuth(${WrappedComponent.displayName ?? WrappedComponent.name})`;
+  return WithAuthComponent;
+}
+
+// HOC: track analytics
+function withAnalytics<P extends object>(
+  WrappedComponent: ComponentType<P>,
+  eventName: string
+) {
+  return function WithAnalytics(props: P) {
+    useEffect(() => {
+      trackPageView(eventName);
+    }, []);
+
+    return <WrappedComponent {...props} />;
+  };
+}
+
+// Compose multiple HOCs
+const AdminDashboard = withAuth(withAnalytics(Dashboard, 'dashboard_view'), 'admin');
+```
+
+:::caution[HOC Pitfalls]
+HOCs can cause **display name loss**, **prop collision**, and **ref forwarding issues**. In modern React, prefer custom hooks for logic reuse. Use HOCs only when you specifically need to wrap a component's render output.
+:::
+
+## Provider Pattern
+
+Build configurable, injectable dependencies:
+
+```tsx
+// Feature flags provider
+interface FeatureFlags {
+  darkMode:      boolean;
+  newDashboard:  boolean;
+  betaFeatures:  boolean;
+  aiAssistant:   boolean;
+}
+
+const defaultFlags: FeatureFlags = {
+  darkMode:     false,
+  newDashboard: false,
+  betaFeatures: false,
+  aiAssistant:  false,
+};
+
+const FeatureFlagContext = createContext<FeatureFlags>(defaultFlags);
+
+function FeatureFlagProvider({
+  flags,
+  children,
+}: {
+  flags: Partial<FeatureFlags>;
+  children: React.ReactNode;
+}) {
+  const merged = useMemo(
+    () => ({ ...defaultFlags, ...flags }),
+    [flags]
+  );
+
+  return (
+    <FeatureFlagContext.Provider value={merged}>
+      {children}
+    </FeatureFlagContext.Provider>
+  );
+}
+
+function useFeatureFlag(flag: keyof FeatureFlags): boolean {
+  return useContext(FeatureFlagContext)[flag];
+}
+
+// Usage
+function App() {
+  return (
+    <FeatureFlagProvider flags={{ darkMode: true, betaFeatures: true }}>
+      <Router />
+    </FeatureFlagProvider>
+  );
+}
+
+function Navigation() {
+  const showBeta = useFeatureFlag('betaFeatures');
+  return (
+    <nav>
+      <NavLink to="/dashboard">Dashboard</NavLink>
+      {showBeta && <NavLink to="/beta">Beta Features</NavLink>}
+    </nav>
+  );
+}
+```
+
+## Slots Pattern (Children as Object)
+
+Pass named slots as a prop to enable flexible layout composition:
+
+```tsx
+interface PageLayoutSlots {
+  header?:  React.ReactNode;
+  sidebar?: React.ReactNode;
+  main:     React.ReactNode;
+  footer?:  React.ReactNode;
+}
+
+function PageLayout({ header, sidebar, main, footer }: PageLayoutSlots) {
+  return (
+    <div className="page">
+      {header  && <header className="page__header">{header}</header>}
+      <div className="page__body">
+        {sidebar && <aside className="page__sidebar">{sidebar}</aside>}
+        <main className="page__main">{main}</main>
+      </div>
+      {footer && <footer className="page__footer">{footer}</footer>}
+    </div>
+  );
+}
+
+// Explicit, self-documenting usage
+function DashboardPage() {
+  return (
+    <PageLayout
+      header={<Navbar />}
+      sidebar={<DashboardNav />}
+      main={<DashboardContent />}
+      footer={<Footer />}
+    />
+  );
+}
+
+function FullWidthPage() {
+  // No sidebar — layout adapts automatically
+  return (
+    <PageLayout
+      header={<Navbar />}
+      main={<BlogPost />}
+      footer={<Footer />}
+    />
+  );
+}
+```
+
+## Headless UI Components
+
+A headless component provides behaviour and accessibility without any styling. Consumers own the visual design:
+
+```tsx
+// Headless toggle — behaviour only, no styles
+interface UseToggleReturn {
+  isOn:      boolean;
+  toggle:    () => void;
+  turnOn:    () => void;
+  turnOff:   () => void;
+  getButtonProps: () => {
+    role:       'switch';
+    'aria-checked': boolean;
+    onClick:    () => void;
+    onKeyDown:  (e: React.KeyboardEvent) => void;
+  };
+}
+
+function useToggle(initial = false): UseToggleReturn {
+  const [isOn, setIsOn] = useState(initial);
+
+  const getButtonProps = useCallback(() => ({
+    role:           'switch' as const,
+    'aria-checked': isOn,
+    onClick:        () => setIsOn(v => !v),
+    onKeyDown:      (e: React.KeyboardEvent) => {
+      if (e.key === ' ' || e.key === 'Enter') {
+        e.preventDefault();
+        setIsOn(v => !v);
+      }
+    },
+  }), [isOn]);
+
+  return {
+    isOn,
+    toggle:   () => setIsOn(v => !v),
+    turnOn:   () => setIsOn(true),
+    turnOff:  () => setIsOn(false),
+    getButtonProps,
+  };
+}
+
+// Consumer 1: Switch UI
+function SwitchToggle({ label }: { label: string }) {
+  const { isOn, getButtonProps } = useToggle(false);
+  return (
+    <label className="switch-label">
+      {label}
+      <button
+        {...getButtonProps()}
+        className={`switch ${isOn ? 'switch--on' : 'switch--off'}`}
+      >
+        <span className="switch__thumb" />
+      </button>
+    </label>
+  );
+}
+
+// Consumer 2: Checkbox UI
+function CheckboxToggle({ label }: { label: string }) {
+  const { isOn, getButtonProps } = useToggle(false);
+  return (
+    <div>
+      <input
+        type="checkbox"
+        checked={isOn}
+        onChange={() => {}} // controlled via getButtonProps
+        {...getButtonProps()}
+      />
+      <label>{label}</label>
+    </div>
+  );
+}
+```
+
+## Controlled vs Uncontrolled Component Design
+
+When building reusable components, support both controlled and uncontrolled modes:
+
+```tsx
+interface RatingProps {
+  // Uncontrolled
+  defaultValue?: number;
+  // Controlled
+  value?:    number;
+  onChange?: (value: number) => void;
+  max?:      number;
+}
+
+function Rating({ defaultValue = 0, value: controlledValue, onChange, max = 5 }: RatingProps) {
+  const [internalValue, setInternalValue] = useState(defaultValue);
+
+  // If controlled, use external value; otherwise use internal
+  const isControlled = controlledValue !== undefined;
+  const value = isControlled ? controlledValue : internalValue;
+
+  const handleChange = (newValue: number) => {
+    if (!isControlled) {
+      setInternalValue(newValue);
+    }
+    onChange?.(newValue);
+  };
+
+  return (
+    <div className="rating" role="group" aria-label="Rating">
+      {Array.from({ length: max }, (_, i) => i + 1).map(star => (
+        <button
+          key={star}
+          type="button"
+          className={`rating__star ${star <= value ? 'rating__star--filled' : ''}`}
+          onClick={() => handleChange(star)}
+          aria-label={`Rate ${star} out of ${max}`}
+          aria-pressed={star <= value}
+        >
+          ★
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Uncontrolled usage
+<Rating defaultValue={3} onChange={v => console.log(v)} />
+
+// Controlled usage
+function ReviewForm() {
+  const [rating, setRating] = useState(0);
+  return (
+    <form>
+      <Rating value={rating} onChange={setRating} max={5} />
+      <p>You selected: {rating} stars</p>
+    </form>
+  );
+}
+```
+
+## Observer Pattern with useEffect
+
+Implement a simple event bus for cross-component communication:
+
+```tsx
+type EventMap = {
+  'user:login':  { userId: string; name: string };
+  'user:logout': undefined;
+  'cart:update': { itemCount: number };
+  'toast:show':  { message: string; type: 'success' | 'error' | 'info' };
+};
+
+type EventListener<K extends keyof EventMap> =
+  (payload: EventMap[K]) => void;
+
+class TypedEventBus {
+  private listeners = new Map<keyof EventMap, Set<EventListener<keyof EventMap>>>();
+
+  on<K extends keyof EventMap>(event: K, listener: EventListener<K>) {
+    if (!this.listeners.has(event)) this.listeners.set(event, new Set());
+    this.listeners.get(event)!.add(listener as EventListener<keyof EventMap>);
+    return () => this.off(event, listener);
+  }
+
+  off<K extends keyof EventMap>(event: K, listener: EventListener<K>) {
+    this.listeners.get(event)?.delete(listener as EventListener<keyof EventMap>);
+  }
+
+  emit<K extends keyof EventMap>(event: K, payload: EventMap[K]) {
+    this.listeners.get(event)?.forEach(l => l(payload));
+  }
+}
+
+export const eventBus = new TypedEventBus();
+
+// Custom hook
+function useEvent<K extends keyof EventMap>(
+  event: K,
+  handler: EventListener<K>
+) {
+  const stableHandler = useCallback(handler, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    return eventBus.on(event, stableHandler);
+  }, [event, stableHandler]);
+}
+
+// Usage
+function Toaster() {
+  const [toasts, setToasts] = useState<{ id: string; message: string; type: string }[]>([]);
+
+  useEvent('toast:show', ({ message, type }) => {
+    const id = crypto.randomUUID();
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
+  });
+
+  return (
+    <div className="toaster" aria-live="polite">
+      {toasts.map(t => (
+        <div key={t.id} className={`toast toast--${t.type}`}>{t.message}</div>
+      ))}
+    </div>
+  );
+}
+
+// Anywhere in the app
+eventBus.emit('toast:show', { message: 'Saved successfully!', type: 'success' });
+```
+
+## Pattern Selection Guide
+
+<CardGrid>
+  <Card title="Custom Hook" icon="seti:hook">
+    Logic needs to be shared between components. No shared render output needed.
+    Examples: data fetching, event listeners, form validation.
+  </Card>
+  <Card title="Compound Components" icon="puzzle">
+    Building a reusable UI component with multiple related sub-parts that share implicit state.
+    Examples: Tabs, Accordion, Menu, Modal.
+  </Card>
+  <Card title="Render Props" icon="right-arrow">
+    You need to invert control of rendering to the consumer, or render in multiple different locations.
+    Examples: data fetchers, drag-and-drop wrappers.
+  </Card>
+  <Card title="Provider Pattern" icon="setting">
+    Injecting configuration, services, or capabilities into a component subtree.
+    Examples: theme, feature flags, DI containers.
+  </Card>
+  <Card title="Slots Pattern" icon="list-format">
+    Creating flexible layout components where consumers control content in specific regions.
+    Examples: PageLayout, Card, Dialog.
+  </Card>
+  <Card title="Headless Components" icon="open-book">
+    Building library-quality components where consumers own 100% of the styling.
+    Examples: accessible dropdowns, comboboxes, toggles.
+  </Card>
+</CardGrid>

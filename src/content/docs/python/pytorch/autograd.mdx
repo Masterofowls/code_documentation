@@ -1,0 +1,498 @@
+---
+title: Autograd — Automatic Differentiation
+description: Understand PyTorch's autograd engine — computational graphs, gradient flow, custom backward functions, and practical gradient techniques.
+sidebar:
+  order: 4
+tags: [python, ml]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Autograd is PyTorch's automatic differentiation engine. It records every operation performed on tensors with `requires_grad=True`, builds a dynamic computational graph, and can compute exact gradients via the chain rule in a single `.backward()` call.
+
+## requires_grad
+
+Setting `requires_grad=True` on a tensor tells PyTorch to track all computations involving that tensor:
+
+```python
+import torch
+
+# requires_grad=True enables gradient tracking
+x = torch.tensor(3.0, requires_grad=True)
+print(x.requires_grad)    # True
+
+# Operations on x produce tensors that track their origin
+y = x ** 2           # y = x²
+z = 2 * y + 1        # z = 2x² + 1
+
+print(y)              # tensor(9., grad_fn=<PowBackward0>)
+print(z)              # tensor(19., grad_fn=<AddBackward0>)
+
+# Compute dz/dx  (should be 4x = 12 at x=3)
+z.backward()
+print(x.grad)         # tensor(12.)
+
+# Parameters in nn.Module always have requires_grad=True by default
+import torch.nn as nn
+linear = nn.Linear(3, 2)
+for name, p in linear.named_parameters():
+    print(f'{name}: requires_grad={p.requires_grad}')
+# weight: requires_grad=True
+# bias:   requires_grad=True
+```
+
+## The Computational Graph
+
+Every tensor operation builds a directed acyclic graph (DAG). Leaf nodes are user-created tensors; non-leaf nodes are the results of operations.
+
+```python
+import torch
+
+# Trace the graph manually
+x = torch.tensor(2.0, requires_grad=True)
+w = torch.tensor(3.0, requires_grad=True)
+b = torch.tensor(1.0, requires_grad=True)
+
+# Forward pass
+y   = w * x        # y = wx
+out = y + b        # out = wx + b
+
+# Inspect the graph via grad_fn
+print(out.grad_fn)          # <AddBackward0>
+print(out.grad_fn.next_functions)
+# ((<MulBackward0>, 0), (<AccumulateGrad>, 0))
+
+# Leaf check
+print(x.is_leaf)    # True  — created by user
+print(y.is_leaf)    # False — result of operation
+print(out.is_leaf)  # False
+
+# Graph is freed after backward (by default)
+out.backward()
+print(x.grad)   # tensor(3.)  ← d(out)/dx = w = 3
+print(w.grad)   # tensor(2.)  ← d(out)/dw = x = 2
+print(b.grad)   # tensor(1.)  ← d(out)/db = 1
+```
+
+### Retaining the Graph
+
+```python
+import torch
+
+x   = torch.tensor(2.0, requires_grad=True)
+out = x ** 3   # out = x³
+
+# By default, the graph is freed after backward
+# Pass retain_graph=True to call backward multiple times
+out.backward(retain_graph=True)
+print(x.grad)   # tensor(12.)  ← 3x² at x=2
+
+x.grad.zero_()  # must zero grad before second backward
+out.backward(retain_graph=True)
+print(x.grad)   # tensor(12.)  ← same result
+
+x.grad.zero_()
+out.backward()  # last call — graph freed
+print(x.grad)   # tensor(12.)
+```
+
+## .backward() and Vector Jacobians
+
+```python
+import torch
+
+# Scalar output → standard backward
+x    = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+loss = (x ** 2).sum()   # scalar: 1 + 4 + 9 = 14
+loss.backward()
+print(x.grad)   # tensor([2., 4., 6.])  ← 2x element-wise
+
+# Non-scalar output → must pass gradient tensor (Jacobian-vector product)
+x = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+y = x ** 2              # shape: (3,) — not a scalar!
+
+# This would raise: y.backward()  ← RuntimeError: grad can be implicitly...
+# Instead, pass a vector of same shape (acts as incoming gradient)
+y.backward(torch.ones(3))   # equivalent to y.sum().backward()
+print(x.grad)   # tensor([2., 4., 6.])
+
+# Weighted gradient
+x.grad.zero_()
+y.backward(torch.tensor([0.1, 0.5, 2.0]))   # different weights
+print(x.grad)   # tensor([0.2000, 2.0000, 12.0000])  ← 2x * weight
+```
+
+## torch.no_grad and inference_mode
+
+```python
+import torch
+import torch.nn as nn
+
+model = nn.Linear(10, 5)
+x     = torch.randn(4, 10)
+
+# ── torch.no_grad() ── stops gradient tracking (saves memory and time)
+with torch.no_grad():
+    out = model(x)
+    print(out.requires_grad)   # False  — no graph built
+    print(out.shape)           # torch.Size([4, 5])
+
+# As a decorator
+@torch.no_grad()
+def predict(model, inputs):
+    return model(inputs)
+
+# ── torch.inference_mode() ── even faster (PyTorch 1.9+)
+# Disallows any in-place modification to view tensors.
+# Preferred for inference / evaluation loops.
+with torch.inference_mode():
+    out2 = model(x)
+    print(out2.requires_grad)  # False
+
+# Benchmark: no_grad vs inference_mode
+# inference_mode is ~5–15% faster due to less bookkeeping
+```
+
+:::tip[Use inference_mode in Evaluation Loops]
+Prefer `torch.inference_mode()` over `torch.no_grad()` in evaluation and inference code. It prevents even more overhead and is the recommended pattern in PyTorch 1.9+.
+:::
+
+## detach()
+
+```python
+import torch
+
+x    = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+y    = x ** 2                    # tracked
+z    = y * 2
+
+# detach — create a new tensor that shares data but has no gradient
+y_det = y.detach()
+print(y_det.requires_grad)       # False
+print(y_det)                     # tensor([1., 4., 9.])
+
+# Common use: when passing activations to a loss that shouldn't affect part of graph
+# (e.g., stop-gradient in self-supervised learning)
+target    = y.detach()           # treat y as a fixed target
+loss      = ((z - target) ** 2).mean()
+loss.backward()
+print(x.grad)   # gradient only flows through z, not through target
+
+# detach for logging without affecting graph
+step_loss = loss.detach().item()   # Python float, no graph reference
+```
+
+## grad_fn Inspection
+
+```python
+import torch
+
+x = torch.randn(3, requires_grad=True)
+a = x * 2          # MulBackward0
+b = a + 1          # AddBackward0
+c = b.relu()       # ReluBackward0
+d = c.sum()        # SumBackward0
+
+def print_graph(t, depth=0):
+    if t.grad_fn is not None:
+        print(' ' * depth + str(t.grad_fn))
+        for child, _ in t.grad_fn.next_functions:
+            if child is not None:
+                print_graph(child, depth + 2)
+
+print_graph(d)
+# SumBackward0
+#   ReluBackward0
+#     AddBackward0
+#       MulBackward0
+#         AccumulateGrad  ← leaf node x
+```
+
+## Gradient Accumulation
+
+Gradient accumulation simulates a larger batch size without requiring more GPU memory:
+
+```python
+import torch
+import torch.nn as nn
+
+model     = nn.Linear(16, 4)
+criterion = nn.MSELoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+# Simulate batch_size=64 using 4 micro-batches of 16
+MICRO_BATCH = 16
+ACCUM_STEPS = 4    # effective batch = 16 * 4 = 64
+
+optimizer.zero_grad()                  # zero once per effective batch
+
+for step, (x, y) in enumerate(data_loader):   # x: (16, 16), y: (16, 4)
+    out  = model(x)
+    loss = criterion(out, y) / ACCUM_STEPS     # scale loss
+
+    loss.backward()   # gradients accumulate in .grad buffers
+
+    if (step + 1) % ACCUM_STEPS == 0:
+        optimizer.step()
+        optimizer.zero_grad()
+        print(f'Step {step+1}: effective batch updated')
+```
+
+:::caution[Always zero_grad() Before the Forward Pass]
+This is one of the most common PyTorch bugs. If you forget `optimizer.zero_grad()`, gradients from **previous batches** accumulate in the `.grad` buffers, producing incorrect parameter updates. Call it once per update step, **before** the forward pass (or just after `optimizer.step()`).
+:::
+
+## Gradient Clipping
+
+Gradient clipping prevents exploding gradients — a common problem in RNNs and Transformers:
+
+```python
+import torch
+import torch.nn as nn
+
+model     = nn.LSTM(64, 128, num_layers=2, batch_first=True)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+x   = torch.randn(32, 20, 64)   # (batch, seq_len, input_size)
+h0  = torch.zeros(2, 32, 128)   # (num_layers, batch, hidden)
+c0  = torch.zeros(2, 32, 128)
+out, _ = model(x, (h0, c0))     # out shape: (32, 20, 128)
+
+loss = out.mean()
+optimizer.zero_grad()
+loss.backward()
+
+# ── Clip by global norm ───────────────────────────────────────────────────────
+# Returns the total norm before clipping (useful for logging)
+total_norm = nn.utils.clip_grad_norm_(
+    model.parameters(),
+    max_norm=1.0    # clips so that ||grad||₂ ≤ 1.0
+)
+print(f'Grad norm before clip: {total_norm:.4f}')
+
+# ── Clip by value ─────────────────────────────────────────────────────────────
+nn.utils.clip_grad_value_(model.parameters(), clip_value=0.5)
+# Clips each gradient component to [-0.5, 0.5]
+
+optimizer.step()
+```
+
+## Custom Autograd Function
+
+Implement custom forward and backward passes using `torch.autograd.Function`:
+
+```python
+import torch
+
+class ClampedReLU(torch.autograd.Function):
+    """ReLU clamped to [0, max_val], with straight-through estimator below 0."""
+
+    @staticmethod
+    def forward(ctx, input: torch.Tensor, max_val: float = 6.0) -> torch.Tensor:
+        # ctx is used to stash info for backward
+        ctx.save_for_backward(input)
+        ctx.max_val = max_val
+        return input.clamp(min=0, max=max_val)   # output = clamp(x, 0, 6)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        (input,) = ctx.saved_tensors
+        max_val  = ctx.max_val
+
+        # Gradient is 1 where 0 < x < max_val, 0 elsewhere
+        mask = (input > 0) & (input < max_val)
+        grad_input = grad_output * mask.float()
+
+        return grad_input, None   # None for the max_val (non-tensor arg)
+
+# Use exactly like a built-in function
+clamped_relu = ClampedReLU.apply
+
+x    = torch.tensor([-1.0, 0.5, 3.0, 7.0], requires_grad=True)
+out  = clamped_relu(x, 6.0)
+print(out)   # tensor([0.0000, 0.5000, 3.0000, 6.0000])
+
+out.sum().backward()
+print(x.grad)   # tensor([0., 1., 1., 0.])  ← 0 at -1 and 7 (out of range)
+```
+
+### Another Example: Log-Sum-Exp (numerically stable)
+
+```python
+import torch
+
+class LogSumExp(torch.autograd.Function):
+    """Numerically stable log-sum-exp with custom backward."""
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor) -> torch.Tensor:
+        m   = x.max()           # subtract max for numerical stability
+        out = m + (x - m).exp().sum().log()
+        ctx.save_for_backward(x, out)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> torch.Tensor:
+        x, out = ctx.saved_tensors
+        return grad_output * (x - out).exp()
+
+x = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+y = LogSumExp.apply(x)
+print(y)            # tensor(3.4076)
+y.backward()
+print(x.grad)       # tensor([0.0900, 0.2447, 0.6652])  ← softmax weights
+```
+
+## Second-Order Gradients
+
+PyTorch supports second (and higher) derivatives by differentiating through the backward pass:
+
+```python
+import torch
+
+x    = torch.tensor(2.0, requires_grad=True)
+y    = x ** 4          # y = x⁴
+
+# First-order gradient: dy/dx = 4x³ = 32
+dy_dx, = torch.autograd.grad(y, x, create_graph=True)   # keep graph for 2nd order
+print(dy_dx)   # tensor(32., grad_fn=<MulBackward0>)
+
+# Second-order gradient: d²y/dx² = 12x² = 48
+d2y_dx2, = torch.autograd.grad(dy_dx, x)
+print(d2y_dx2)   # tensor(48.)
+
+# Practical use: Hessian diagonal for optimisers like L-BFGS
+# torch.autograd.functional.hessian computes the full Hessian
+from torch.autograd.functional import hessian
+
+def f(x):
+    return (x ** 4).sum()
+
+x_v = torch.tensor([1.0, 2.0, 3.0])
+H   = hessian(f, x_v)
+print(H.shape)   # torch.Size([3, 3])
+print(H.diagonal())   # tensor([ 12.,  48., 108.])  ← 12x² per element
+```
+
+## Manual Gradient Descent Step-by-Step
+
+Understanding autograd from first principles — no `nn.Module`, no optimizer:
+
+```python
+import torch
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+torch.manual_seed(7)
+X = torch.randn(50, 2)                             # (50, 2)
+y = (X[:, 0] * 2 - X[:, 1] * 0.5 + 0.3           # true: w=[2,-0.5], b=0.3
+     + 0.1 * torch.randn(50))                       # (50,)
+
+# ── Parameters (manually created leaf tensors) ────────────────────────────────
+W = torch.zeros(2, requires_grad=True)             # weights
+b = torch.zeros(1, requires_grad=True)             # bias
+lr = 0.05
+
+# ── Training loop ─────────────────────────────────────────────────────────────
+for epoch in range(200):
+    # Forward pass — entirely manual
+    y_hat = X @ W + b          # (50, 2) @ (2,) + (1,) → (50,)
+    loss  = ((y_hat - y) ** 2).mean()              # MSE scalar
+
+    # Backward pass — autograd computes ∂loss/∂W and ∂loss/∂b
+    loss.backward()
+
+    # Gradient descent update — wrapped in no_grad so update isn't tracked
+    with torch.no_grad():
+        W -= lr * W.grad
+        b -= lr * b.grad
+
+    # CRITICAL: zero gradients before next iteration
+    W.grad.zero_()
+    b.grad.zero_()
+
+    if (epoch + 1) % 50 == 0:
+        print(f'Epoch {epoch+1:3d} | Loss: {loss.item():.5f} | '
+              f'W: [{W[0].item():.3f}, {W[1].item():.3f}] | b: {b.item():.3f}')
+
+# Expected output (last line):
+# Epoch 200 | Loss: 0.01024 | W: [1.994, -0.497] | b: 0.299
+```
+
+## Practical Gradient Inspection
+
+```python
+import torch
+import torch.nn as nn
+
+# A small network for gradient analysis
+model = nn.Sequential(
+    nn.Linear(8, 16),
+    nn.ReLU(),
+    nn.Linear(16, 4)
+)
+
+x    = torch.randn(32, 8)
+y    = torch.randint(0, 4, (32,))
+loss = nn.CrossEntropyLoss()(model(x), y)
+loss.backward()
+
+# Inspect gradients for each parameter
+for name, p in model.named_parameters():
+    if p.grad is not None:
+        g = p.grad
+        print(f'{name:20s}  shape={str(p.shape):15s}  '
+              f'|grad|={g.abs().mean():.5f}  '
+              f'max={g.abs().max():.5f}  '
+              f'has_nan={g.isnan().any().item()}')
+
+# Output:
+# 0.weight               shape=torch.Size([16, 8])   |grad|=0.01234  max=0.05678  has_nan=False
+# 0.bias                 shape=torch.Size([16])      |grad|=0.00987  max=0.03456  has_nan=False
+# 2.weight               shape=torch.Size([4, 16])   |grad|=0.01567  max=0.06789  has_nan=False
+# 2.bias                 shape=torch.Size([4])       |grad|=0.01234  max=0.04321  has_nan=False
+
+# Check for vanishing / exploding gradients
+total_norm = 0.0
+for p in model.parameters():
+    if p.grad is not None:
+        total_norm += p.grad.data.norm(2).item() ** 2
+total_norm = total_norm ** 0.5
+print(f'Total gradient L2 norm: {total_norm:.4f}')
+```
+
+:::tip[Gradient Norms as a Training Signal]
+Log the total gradient norm every N steps. A norm consistently near 0 indicates vanishing gradients. A norm growing unboundedly indicates exploding gradients. The healthy range is typically 0.1–10 for most architectures.
+:::
+
+## torch.autograd.grad
+
+For fine-grained gradient control without calling `.backward()`:
+
+```python
+import torch
+import torch.nn as nn
+
+model = nn.Linear(4, 2)
+x     = torch.randn(8, 4)
+y     = torch.randn(8, 2)
+loss  = nn.MSELoss()(model(x), y)
+
+# Compute gradient of loss w.r.t. specific parameters only
+grads = torch.autograd.grad(
+    loss,
+    model.parameters(),      # which parameters to differentiate w.r.t.
+    create_graph=False,       # True for higher-order gradients
+    allow_unused=False        # raise error if any param not used
+)
+
+for (name, _), g in zip(model.named_parameters(), grads):
+    print(f'{name}: grad shape = {g.shape}')
+# weight: grad shape = torch.Size([2, 4])
+# bias:   grad shape = torch.Size([2])
+
+# Gradient of loss w.r.t. input (useful for adversarial attacks)
+x_adv = torch.randn(1, 4, requires_grad=True)
+out   = model(x_adv)
+g_in, = torch.autograd.grad(out.sum(), x_adv)
+print(g_in.shape)   # torch.Size([1, 4])
+```

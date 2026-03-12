@@ -1,0 +1,753 @@
+---
+title: Django Models & ORM
+description: Define database models with Django's ORM, run migrations, and master the QuerySet API for filtering, querying, and optimizing database access.
+sidebar:
+  order: 3
+tags: [python, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Django's Object-Relational Mapper (ORM) lets you interact with your database using Python classes and methods instead of raw SQL. Every model is a Python class that subclasses `django.db.models.Model`, and every attribute of that class maps to a database column.
+
+---
+
+## Defining a Model
+
+```python
+# blog/models.py
+from django.db import models
+from django.contrib.auth import get_user_model
+from django.utils.text import slugify
+
+User = get_user_model()
+
+
+class Category(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    slug = models.SlugField(max_length=100, unique=True)
+
+    class Meta:
+        verbose_name_plural = "categories"
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.name)
+        super().save(*args, **kwargs)
+
+
+class Post(models.Model):
+    STATUS_DRAFT = "draft"
+    STATUS_PUBLISHED = "published"
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, "Draft"),
+        (STATUS_PUBLISHED, "Published"),
+    ]
+
+    title = models.CharField(max_length=250)
+    slug = models.SlugField(max_length=250, unique_for_date="publish_date")
+    author = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="posts",
+    )
+    category = models.ForeignKey(
+        Category,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="posts",
+    )
+    tags = models.ManyToManyField("Tag", blank=True, related_name="posts")
+    body = models.TextField()
+    excerpt = models.TextField(blank=True)
+    cover_image = models.ImageField(
+        upload_to="posts/%Y/%m/",
+        blank=True,
+        null=True,
+    )
+    status = models.CharField(
+        max_length=10,
+        choices=STATUS_CHOICES,
+        default=STATUS_DRAFT,
+        db_index=True,
+    )
+    publish_date = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    views_count = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["-publish_date"]
+        verbose_name = "post"
+        verbose_name_plural = "posts"
+        indexes = [
+            models.Index(fields=["status", "publish_date"]),
+            models.Index(fields=["author", "status"]),
+        ]
+
+    def __str__(self):
+        return self.title
+
+    def is_published(self):
+        return self.status == self.STATUS_PUBLISHED
+
+
+class Tag(models.Model):
+    name = models.CharField(max_length=50, unique=True)
+    slug = models.SlugField(unique=True)
+
+    def __str__(self):
+        return self.name
+```
+
+---
+
+## Field Types Reference
+
+### Text Fields
+
+| Field | Use Case | Key Options |
+|-------|----------|-------------|
+| `CharField` | Short text, max 255 chars | `max_length` (required) |
+| `TextField` | Long text, no max | `blank=True` |
+| `SlugField` | URL-safe text | `max_length`, `allow_unicode` |
+| `EmailField` | Email addresses | Validates email format |
+| `URLField` | Web URLs | Validates URL format |
+| `UUIDField` | UUID values | `default=uuid.uuid4` |
+| `JSONField` | JSON data (PostgreSQL) | `default=dict` |
+
+### Numeric Fields
+
+| Field | Use Case | Key Options |
+|-------|----------|-------------|
+| `IntegerField` | Integer values | — |
+| `PositiveIntegerField` | Non-negative integers | — |
+| `BigIntegerField` | Large integers | — |
+| `FloatField` | Floating-point | — |
+| `DecimalField` | Precise decimals | `max_digits`, `decimal_places` |
+
+### Date / Time Fields
+
+| Field | Use Case | Key Options |
+|-------|----------|-------------|
+| `DateField` | Date only | `auto_now`, `auto_now_add` |
+| `TimeField` | Time only | `auto_now`, `auto_now_add` |
+| `DateTimeField` | Date + time | `auto_now`, `auto_now_add` |
+| `DurationField` | Time spans | — |
+
+```python
+# auto_now_add: set once at creation, never changes
+created_at = models.DateTimeField(auto_now_add=True)
+
+# auto_now: updated every time save() is called
+updated_at = models.DateTimeField(auto_now=True)
+
+# Manually controlled
+publish_date = models.DateTimeField(null=True, blank=True)
+```
+
+### Relationship Fields
+
+```python
+# Many-to-One: each Post has one Author; Author can have many Posts
+author = models.ForeignKey(
+    User,
+    on_delete=models.CASCADE,    # Delete posts if user deleted
+    related_name="posts",        # user.posts.all()
+    null=True,
+    blank=True,
+)
+
+# One-to-One: User has exactly one Profile
+profile = models.OneToOneField(
+    User,
+    on_delete=models.CASCADE,
+    related_name="profile",
+    primary_key=True,           # Use this as PK (optional)
+)
+
+# Many-to-Many: Post can have many Tags; Tag can be on many Posts
+tags = models.ManyToManyField(
+    Tag,
+    blank=True,
+    related_name="posts",
+    through="PostTag",          # Custom through/join table (optional)
+)
+```
+
+#### `on_delete` Options
+
+| Option | Behavior |
+|--------|----------|
+| `CASCADE` | Delete child when parent deleted |
+| `PROTECT` | Raise `ProtectedError` if parent has children |
+| `RESTRICT` | Like PROTECT but allows cascade via other relations |
+| `SET_NULL` | Set FK to NULL (requires `null=True`) |
+| `SET_DEFAULT` | Set FK to default value |
+| `SET(value)` | Set FK to a callable or value |
+| `DO_NOTHING` | Do nothing (risky — can break DB integrity) |
+
+### File Fields
+
+```python
+from django.db import models
+
+
+class Document(models.Model):
+    # Upload to media/documents/2024/01/
+    file = models.FileField(upload_to="documents/%Y/%m/")
+
+    # Only accepts image files; requires Pillow
+    thumbnail = models.ImageField(
+        upload_to="thumbnails/",
+        width_field="thumbnail_width",    # Auto-populate with image dimensions
+        height_field="thumbnail_height",
+        blank=True,
+        null=True,
+    )
+    thumbnail_width = models.PositiveIntegerField(null=True)
+    thumbnail_height = models.PositiveIntegerField(null=True)
+```
+
+---
+
+## Universal Field Options
+
+```python
+models.CharField(
+    max_length=100,
+    null=False,          # DB NULL (use blank=True for optional strings, not null=True)
+    blank=True,          # Allow empty value in forms/validation
+    default="unknown",   # Default value (or callable: default=list)
+    unique=True,         # DB UNIQUE constraint
+    db_index=True,       # Create a DB index for this column
+    verbose_name="Full name",  # Human-readable label
+    help_text="Enter the full name of the person.",
+    choices=MY_CHOICES,  # Restrict to valid values
+    editable=False,      # Exclude from forms and admin
+    db_column="custom_col_name",  # Override column name in DB
+)
+```
+
+:::tip[null vs blank]
+- `blank=True` — allows empty value in **forms** (validation layer)
+- `null=True` — stores **NULL** in the **database**
+
+For string-based fields (`CharField`, `TextField`), use only `blank=True`. Django stores empty strings `""` for missing text, not NULL. Use `null=True` for numeric, date, and FK fields.
+:::
+
+---
+
+## Meta Class Options
+
+```python
+class Post(models.Model):
+    ...
+
+    class Meta:
+        # Default ordering (prefix with "-" for descending)
+        ordering = ["-publish_date", "title"]
+
+        # Human-readable names for admin
+        verbose_name = "blog post"
+        verbose_name_plural = "blog posts"
+
+        # Database table name (default: <app>_<model>)
+        db_table = "blog_posts"
+
+        # Composite unique constraints
+        unique_together = [["author", "slug"]]  # Legacy
+        constraints = [
+            models.UniqueConstraint(
+                fields=["author", "slug"],
+                name="unique_author_slug"
+            ),
+            models.CheckConstraint(
+                check=models.Q(views_count__gte=0),
+                name="views_count_non_negative"
+            ),
+        ]
+
+        # Database indexes
+        indexes = [
+            models.Index(fields=["status", "-publish_date"]),
+            models.Index(fields=["author"], name="post_author_idx"),
+        ]
+
+        # Abstract base class (not stored in DB)
+        abstract = True  # Subclasses get their own tables
+
+        # App label (useful for models outside apps)
+        app_label = "blog"
+```
+
+---
+
+## Migrations
+
+Migrations are version-controlled scripts that apply model changes to your database schema.
+
+<Steps>
+
+1. **Create migration files** after any model change
+
+   ```bash
+   python manage.py makemigrations
+   # Migrations for 'blog':
+   #   blog/migrations/0001_initial.py
+   #     - Create model Category
+   #     - Create model Tag
+   #     - Create model Post
+
+   # For a specific app only
+   python manage.py makemigrations blog
+
+   # With a custom name
+   python manage.py makemigrations --name add_views_count
+   ```
+
+2. **Preview the SQL** before applying
+
+   ```bash
+   python manage.py sqlmigrate blog 0001
+   ```
+
+   ```sql
+   BEGIN;
+   --
+   -- Create model Category
+   --
+   CREATE TABLE "blog_category" (
+     "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT,
+     "name" varchar(100) NOT NULL UNIQUE,
+     "slug" varchar(100) NOT NULL UNIQUE
+   );
+   COMMIT;
+   ```
+
+3. **Apply migrations**
+
+   ```bash
+   python manage.py migrate
+   # Operations to perform:
+   #   Apply all migrations: blog, auth, admin, ...
+   # Running migrations:
+   #   Applying blog.0001_initial... OK
+
+   # Migrate to a specific migration (rollback)
+   python manage.py migrate blog 0001
+
+   # Roll back all migrations for an app
+   python manage.py migrate blog zero
+   ```
+
+4. **Check migration status**
+
+   ```bash
+   python manage.py showmigrations
+   # blog
+   #  [X] 0001_initial
+   #  [X] 0002_add_views_count
+   #  [ ] 0003_post_cover_image   ← not yet applied
+   ```
+
+</Steps>
+
+### Squashing Migrations
+
+After many migrations accumulate, squash them for performance:
+
+```bash
+python manage.py squashmigrations blog 0001 0010
+# Will squash migrations 0001 through 0010 into one file
+```
+
+:::caution[Squashing in Production]
+Never squash migrations that have already been applied to a production database without a careful deployment plan. The squashed migration and the originals both exist until all environments have applied the squash.
+:::
+
+---
+
+## QuerySet API
+
+Every model has a default `Manager` accessible via `Model.objects` that returns `QuerySet` objects. QuerySets are lazy — they don't hit the database until evaluated.
+
+### Basic CRUD
+
+```python
+from blog.models import Post, Category, Tag
+from django.contrib.auth import get_user_model
+
+User = get_user_model()
+
+# ── CREATE ─────────────────────────────────────────────────────────────
+# Method 1: create() — single DB call
+post = Post.objects.create(
+    title="Hello Django",
+    slug="hello-django",
+    author=user,
+    body="Django is fantastic.",
+    status=Post.STATUS_PUBLISHED,
+)
+
+# Method 2: save() — useful when you need the object before saving
+post = Post(title="Hello", author=user)
+post.slug = "hello"
+post.save()
+
+# ── READ ───────────────────────────────────────────────────────────────
+# All objects (lazy — no DB hit yet)
+all_posts = Post.objects.all()
+
+# Evaluates the QuerySet (hits DB)
+for p in all_posts:
+    print(p.title)
+
+# Single object — raises DoesNotExist or MultipleObjectsReturned
+post = Post.objects.get(pk=1)
+post = Post.objects.get(slug="hello-django")
+
+# Safe single object — returns None if not found
+post = Post.objects.filter(pk=99).first()  # None if not found
+
+# Count
+count = Post.objects.filter(status="published").count()  # SELECT COUNT(*)
+
+# Exists (cheaper than count)
+exists = Post.objects.filter(author=user).exists()  # True or False
+
+# ── UPDATE ─────────────────────────────────────────────────────────────
+# Single object
+post = Post.objects.get(pk=1)
+post.title = "Updated Title"
+post.save()
+
+# Update specific fields only (cheaper)
+post.save(update_fields=["title", "updated_at"])
+
+# Bulk update — single SQL UPDATE
+Post.objects.filter(status="draft").update(status="published")
+
+# ── DELETE ─────────────────────────────────────────────────────────────
+Post.objects.get(pk=1).delete()
+Post.objects.filter(author=user).delete()
+# Returns: (3, {'blog.Post': 3})
+```
+
+### Filtering and Lookups
+
+```python
+# Exact match (default)
+Post.objects.filter(status="published")
+Post.objects.filter(status__exact="published")
+
+# Case-insensitive
+Post.objects.filter(title__iexact="hello django")
+
+# Contains
+Post.objects.filter(title__contains="Django")
+Post.objects.filter(title__icontains="django")  # case-insensitive
+
+# Starts/ends with
+Post.objects.filter(title__startswith="Hello")
+Post.objects.filter(slug__endswith="-guide")
+
+# Numeric comparisons
+Post.objects.filter(views_count__gt=100)    # greater than
+Post.objects.filter(views_count__gte=100)   # greater than or equal
+Post.objects.filter(views_count__lt=10)     # less than
+Post.objects.filter(views_count__lte=10)
+
+# In list
+Post.objects.filter(status__in=["published", "featured"])
+
+# Date lookups
+from django.utils import timezone
+Post.objects.filter(publish_date__year=2024)
+Post.objects.filter(publish_date__month=12)
+Post.objects.filter(publish_date__date=timezone.now().date())
+Post.objects.filter(publish_date__range=("2024-01-01", "2024-12-31"))
+
+# NULL
+Post.objects.filter(cover_image__isnull=True)
+Post.objects.exclude(cover_image__isnull=True)
+
+# Traversing relationships (JOIN)
+Post.objects.filter(author__username="alice")
+Post.objects.filter(category__name="Technology")
+Post.objects.filter(tags__name__in=["python", "django"])
+
+# Chaining filters (AND)
+Post.objects.filter(status="published").filter(views_count__gte=100)
+# Equivalent:
+Post.objects.filter(status="published", views_count__gte=100)
+
+# Exclude (NOT)
+Post.objects.exclude(status="draft")
+```
+
+### Q Objects — Complex Lookups
+
+```python
+from django.db.models import Q
+
+# OR condition
+Post.objects.filter(Q(status="published") | Q(author=user))
+
+# AND
+Post.objects.filter(Q(status="published") & Q(views_count__gt=50))
+
+# NOT
+Post.objects.filter(~Q(status="draft"))
+
+# Complex: (published AND views>50) OR (author=me)
+Post.objects.filter(
+    (Q(status="published") & Q(views_count__gt=50)) | Q(author=user)
+)
+```
+
+### F Expressions — Reference Column Values
+
+```python
+from django.db.models import F
+
+# Increment views_count without fetching the object
+Post.objects.filter(pk=1).update(views_count=F("views_count") + 1)
+
+# Find posts where views_count exceeds reply_count (same row comparison)
+Post.objects.filter(views_count__gt=F("reply_count"))
+
+# Annotate with computed values
+from django.db.models import ExpressionWrapper, DurationField
+from django.utils import timezone
+
+Post.objects.annotate(
+    age=ExpressionWrapper(
+        timezone.now() - F("created_at"),
+        output_field=DurationField()
+    )
+)
+```
+
+### Aggregation and Annotation
+
+```python
+from django.db.models import Count, Avg, Sum, Max, Min
+
+# Aggregate across all rows
+Post.objects.aggregate(total=Count("id"))
+# {'total': 42}
+
+Post.objects.aggregate(avg_views=Avg("views_count"), max_views=Max("views_count"))
+# {'avg_views': 128.5, 'max_views': 9823}
+
+# Annotate: add a computed field to each object in the QuerySet
+categories = Category.objects.annotate(post_count=Count("posts"))
+for cat in categories:
+    print(f"{cat.name}: {cat.post_count} posts")
+
+# Combining annotation with filtering
+popular_categories = (
+    Category.objects
+    .annotate(post_count=Count("posts"))
+    .filter(post_count__gte=5)
+    .order_by("-post_count")
+)
+```
+
+### Ordering, Slicing, Values
+
+```python
+# Ordering
+Post.objects.order_by("-publish_date")       # newest first
+Post.objects.order_by("author__username")    # by related field
+Post.objects.order_by("?")                   # random (slow on large tables)
+
+# Remove default ordering
+Post.objects.order_by()
+
+# Slicing (uses LIMIT / OFFSET)
+Post.objects.all()[:10]       # LIMIT 10
+Post.objects.all()[10:20]     # LIMIT 10 OFFSET 10
+
+# Values — returns dicts, not model instances (lighter)
+Post.objects.values("id", "title", "status")
+# <QuerySet [{'id': 1, 'title': 'Hello', 'status': 'published'}, ...]>
+
+# Values list — returns tuples
+Post.objects.values_list("id", "title")
+# <QuerySet [(1, 'Hello'), (2, 'World'), ...]>
+
+# Flat values list — returns a flat list
+Post.objects.values_list("title", flat=True)
+# <QuerySet ['Hello', 'World', ...]>
+
+# Distinct
+Post.objects.values_list("author", flat=True).distinct()
+```
+
+---
+
+## select_related and prefetch_related
+
+:::caution[The N+1 Problem]
+Without optimization, accessing related objects in a loop triggers one extra query per row. For 100 posts, that's 101 queries!
+:::
+
+```python
+# ❌ BAD: N+1 problem
+posts = Post.objects.all()
+for post in posts:
+    print(post.author.username)  # Each iteration hits the DB!
+
+# ✅ GOOD: select_related — SQL JOIN for ForeignKey / OneToOneField
+posts = Post.objects.select_related("author", "category").all()
+for post in posts:
+    print(post.author.username)  # No extra query — already loaded
+
+# ✅ GOOD: prefetch_related — separate query + Python join for M2M / reverse FK
+posts = Post.objects.prefetch_related("tags").all()
+for post in posts:
+    for tag in post.tags.all():  # No extra query per post
+        print(tag.name)
+
+# Combine both
+posts = (
+    Post.objects
+    .select_related("author", "category")
+    .prefetch_related("tags")
+    .filter(status="published")
+)
+```
+
+---
+
+## Custom Managers
+
+```python
+# blog/managers.py
+from django.db import models
+from django.utils import timezone
+
+
+class PublishedManager(models.Manager):
+    """Returns only published posts."""
+
+    def get_queryset(self):
+        return super().get_queryset().filter(status="published")
+
+    def recent(self, n=5):
+        return self.get_queryset().order_by("-publish_date")[:n]
+
+
+# blog/models.py
+class Post(models.Model):
+    ...
+    objects = models.Manager()          # Default manager (always keep first)
+    published = PublishedManager()      # Custom manager
+
+# Usage
+Post.published.all()                    # All published posts
+Post.published.recent(10)              # 10 most recent published posts
+Post.objects.all()                     # All posts regardless of status
+```
+
+---
+
+## Model Signals
+
+Signals let you execute code when certain model events occur.
+
+```python
+# blog/signals.py
+from django.db.models.signals import post_save, pre_delete, m2m_changed
+from django.dispatch import receiver
+from .models import Post, User
+
+
+@receiver(post_save, sender=Post)
+def post_saved(sender, instance, created, **kwargs):
+    """Called after any Post save."""
+    if created:
+        print(f"New post created: {instance.title}")
+        # Send notification email, create audit log, etc.
+    else:
+        print(f"Post updated: {instance.title}")
+
+
+@receiver(pre_delete, sender=Post)
+def post_deleted(sender, instance, **kwargs):
+    """Called before a Post is deleted."""
+    # Clean up associated media files
+    if instance.cover_image:
+        instance.cover_image.delete(save=False)
+
+
+# Auto-create a Profile when a User is created
+from .models import UserProfile
+
+@receiver(post_save, sender=User)
+def create_user_profile(sender, instance, created, **kwargs):
+    if created:
+        UserProfile.objects.create(user=instance)
+
+@receiver(post_save, sender=User)
+def save_user_profile(sender, instance, **kwargs):
+    instance.profile.save()
+```
+
+Wire up signals in your app's `ready()` method:
+
+```python
+# blog/apps.py
+from django.apps import AppConfig
+
+
+class BlogConfig(AppConfig):
+    default_auto_field = "django.db.models.BigAutoField"
+    name = "blog"
+
+    def ready(self):
+        import blog.signals  # noqa: F401 — registers all signal handlers
+```
+
+---
+
+## Admin Registration
+
+```python
+# blog/admin.py
+from django.contrib import admin
+from .models import Post, Category, Tag
+
+
+@admin.register(Post)
+class PostAdmin(admin.ModelAdmin):
+    list_display = ["title", "author", "status", "publish_date", "views_count"]
+    list_filter = ["status", "created_at", "author"]
+    search_fields = ["title", "body", "author__username"]
+    prepopulated_fields = {"slug": ("title",)}
+    raw_id_fields = ["author"]
+    date_hierarchy = "publish_date"
+    ordering = ["-publish_date"]
+
+    fieldsets = [
+        ("Content", {"fields": ["title", "slug", "body", "excerpt"]}),
+        ("Media", {"fields": ["cover_image"]}),
+        ("Publishing", {"fields": ["status", "publish_date", "author", "category", "tags"]}),
+    ]
+
+
+@admin.register(Category)
+class CategoryAdmin(admin.ModelAdmin):
+    list_display = ["name", "slug"]
+    prepopulated_fields = {"slug": ("name",)}
+
+
+admin.site.register(Tag)
+```

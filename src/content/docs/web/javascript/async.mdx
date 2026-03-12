@@ -1,0 +1,522 @@
+---
+title: Async JavaScript
+description: Master asynchronous JavaScript — callbacks, Promises, async/await, Promise combinators, the fetch API, AbortController, parallel vs sequential execution, and Web Workers.
+sidebar:
+  order: 6
+tags: [javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+JavaScript is single-threaded, but it handles asynchronous work (network requests, file I/O, timers) through callbacks, Promises, and async/await — all powered by the event loop.
+
+## Callbacks and Callback Hell
+
+The original approach to async — pass a function to be called when the operation completes.
+
+```js
+// Simple callback
+function fetchUser(id, callback) {
+  setTimeout(() => {
+    const user = { id, name: 'Alice', role: 'admin' };
+    callback(null, user); // Node.js convention: error first
+  }, 100);
+}
+
+fetchUser(1, (err, user) => {
+  if (err) return console.error(err);
+  console.log(user); // output: { id: 1, name: 'Alice', role: 'admin' }
+});
+```
+
+Callbacks nest deeply when operations depend on each other — this is "callback hell" or the "pyramid of doom":
+
+```js
+// Callback hell — hard to read, hard to handle errors
+getUser(userId, (err, user) => {
+  if (err) return handleError(err);
+  getOrders(user.id, (err, orders) => {
+    if (err) return handleError(err);
+    getOrderDetails(orders[0].id, (err, details) => {
+      if (err) return handleError(err);
+      getShipping(details.shippingId, (err, shipping) => {
+        if (err) return handleError(err);
+        console.log(shipping); // finally got the data
+      });
+    });
+  });
+});
+```
+
+:::tip[Promises Solve Callback Hell]
+Promises allow you to chain async operations linearly, vastly improving readability and error handling. `async/await` makes them look like synchronous code.
+:::
+
+## Promises
+
+A `Promise` represents a value that will be available in the future — it is in one of three states: **pending**, **fulfilled**, or **rejected**.
+
+```js
+// Creating a Promise
+const promise = new Promise((resolve, reject) => {
+  const success = Math.random() > 0.5;
+
+  setTimeout(() => {
+    if (success) {
+      resolve({ data: 'some result' }); // fulfills the promise
+    } else {
+      reject(new Error('Operation failed')); // rejects the promise
+    }
+  }, 1000);
+});
+
+// Consuming a Promise
+promise
+  .then(result => {
+    console.log('Success:', result.data); // output: Success: some result
+    return result.data.toUpperCase();     // return value passed to next .then
+  })
+  .then(upper => {
+    console.log('Transformed:', upper);   // output: Transformed: SOME RESULT
+  })
+  .catch(err => {
+    console.error('Error:', err.message); // output: Error: Operation failed
+  })
+  .finally(() => {
+    console.log('Always runs — clean up here');
+  });
+```
+
+```js
+// Promisifying a callback-based function
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function fetchData(url) {
+  return new Promise((resolve, reject) => {
+    // Simulating an HTTP request
+    setTimeout(() => {
+      if (url.startsWith('https://')) {
+        resolve({ status: 200, data: `Data from ${url}` });
+      } else {
+        reject(new Error('Only HTTPS URLs are supported'));
+      }
+    }, 200);
+  });
+}
+
+fetchData('https://api.example.com/users')
+  .then(res => console.log(res.data)) // output: Data from https://api.example.com/users
+  .catch(err => console.error(err.message));
+```
+
+## Promise Combinators
+
+```js
+const p1 = Promise.resolve(1);
+const p2 = delay(100).then(() => 2);
+const p3 = delay(50).then(() => 3);
+const pFail = Promise.reject(new Error('oops'));
+
+// Promise.all — resolves when ALL resolve, rejects if ANY rejects
+Promise.all([p1, p2, p3])
+  .then(values => console.log(values)) // output: [1, 2, 3]
+  .catch(err => console.error(err));
+
+Promise.all([p1, pFail, p3])
+  .catch(err => console.error(err.message)); // output: oops (entire .all rejects)
+
+// Promise.allSettled — waits for ALL to settle (ES2020)
+Promise.allSettled([p1, pFail, p3])
+  .then(results => {
+    results.forEach(result => {
+      if (result.status === 'fulfilled') {
+        console.log('Value:', result.value);
+      } else {
+        console.log('Error:', result.reason.message);
+      }
+    });
+  });
+// output: Value: 1
+// output: Error: oops
+// output: Value: 3
+
+// Promise.race — settles with the first to settle (fulfilled OR rejected)
+Promise.race([delay(200).then(() => 'slow'), delay(50).then(() => 'fast')])
+  .then(result => console.log(result)); // output: fast
+
+// Promise.any — resolves with FIRST fulfilled, rejects only if ALL reject (ES2021)
+Promise.any([pFail, delay(100).then(() => 'second'), delay(50).then(() => 'first')])
+  .then(result => console.log(result)); // output: first
+
+Promise.any([pFail, Promise.reject(new Error('two'))])
+  .catch(err => console.log(err instanceof AggregateError)); // output: true
+```
+
+## async / await
+
+`async/await` makes async code look synchronous — it is syntax sugar over Promises.
+
+```js
+// async function always returns a Promise
+async function fetchUser(id) {
+  return { id, name: 'Alice' }; // same as return Promise.resolve({...})
+}
+
+fetchUser(1).then(u => console.log(u)); // output: { id: 1, name: 'Alice' }
+
+// await pauses execution until the promise settles
+async function loadUserData(userId) {
+  try {
+    const user = await fetchUser(userId);
+    console.log('User loaded:', user.name); // output: User loaded: Alice
+
+    await delay(100); // await any promise — even just a delay
+
+    const orders = await fetchOrders(userId);
+    return { user, orders };
+  } catch (err) {
+    console.error('Failed:', err.message);
+    throw err; // re-throw to propagate
+  }
+}
+```
+
+### Parallel vs Sequential — Critical Performance Pattern
+
+```js
+// ❌ SEQUENTIAL — each await waits for the previous to finish
+async function loadSequential(userIds) {
+  console.time('sequential');
+  const results = [];
+  for (const id of userIds) {
+    const user = await fetchUser(id); // waits 100ms per user
+    results.push(user);
+  }
+  console.timeEnd('sequential'); // output: sequential: ~300ms for 3 users
+  return results;
+}
+
+// ✅ PARALLEL — all requests fire at the same time
+async function loadParallel(userIds) {
+  console.time('parallel');
+  const promises = userIds.map(id => fetchUser(id));
+  const results = await Promise.all(promises);
+  console.timeEnd('parallel'); // output: parallel: ~100ms for 3 users (max of all)
+  return results;
+}
+
+// ✅ PARALLEL with error handling per-item
+async function loadParallelSafe(userIds) {
+  const results = await Promise.allSettled(userIds.map(id => fetchUser(id)));
+  return results.map((r, i) => ({
+    id: userIds[i],
+    ...(r.status === 'fulfilled' ? { user: r.value } : { error: r.reason.message }),
+  }));
+}
+```
+
+:::caution[await in loops]
+Using `await` inside a `for` loop creates sequential execution. If the operations are independent, use `Promise.all()` with `.map()` to run them in parallel and dramatically improve performance.
+:::
+
+```js
+// ❌ Sequential — don't do this for independent async operations
+for (const url of urls) {
+  const data = await fetch(url).then(r => r.json()); // waits for each one
+}
+
+// ✅ Parallel
+const results = await Promise.all(urls.map(url => fetch(url).then(r => r.json())));
+```
+
+## AbortController
+
+`AbortController` lets you cancel fetch requests and other async operations.
+
+```js
+async function fetchWithTimeout(url, timeoutMs = 5000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      throw new Error(`Request to ${url} timed out after ${timeoutMs}ms`);
+    }
+    throw err;
+  }
+}
+
+// Cancel when no longer needed (e.g., user navigates away)
+const controller = new AbortController();
+
+// Abort all requests with one controller
+Promise.all([
+  fetch('/api/users', { signal: controller.signal }),
+  fetch('/api/posts', { signal: controller.signal }),
+]);
+
+// Later — cancel everything
+controller.abort('User navigated away');
+```
+
+## The Fetch API
+
+`fetch` is the modern browser and Node.js 18+ API for HTTP requests, returning a Promise.
+
+<Tabs>
+  <TabItem label="GET Request">
+```js
+async function getUsers() {
+  const response = await fetch('https://jsonplaceholder.typicode.com/users');
+
+  // Always check response.ok before parsing!
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  }
+
+  const users = await response.json();
+  console.log(users.length);  // output: 10
+  return users;
+}
+```
+  </TabItem>
+  <TabItem label="POST Request">
+```js
+async function createUser(userData) {
+  const response = await fetch('https://jsonplaceholder.typicode.com/users', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${getToken()}`,
+    },
+    body: JSON.stringify(userData),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ message: response.statusText }));
+    throw new Error(error.message ?? `HTTP ${response.status}`);
+  }
+
+  return response.json(); // output: { id: 11, ...userData }
+}
+```
+  </TabItem>
+  <TabItem label="Response Methods">
+```js
+const response = await fetch('/api/data');
+
+// Consume the body — can only be read ONCE
+await response.json();     // parse as JSON
+await response.text();     // read as string
+await response.blob();     // read as Blob (files, images)
+await response.arrayBuffer(); // read as ArrayBuffer (binary)
+await response.formData(); // read as FormData
+
+// Response metadata
+console.log(response.ok);          // output: true (status 200-299)
+console.log(response.status);      // output: 200
+console.log(response.statusText);  // output: OK
+console.log(response.headers.get('content-type')); // output: application/json
+console.log(response.url);         // output: https://...
+```
+  </TabItem>
+</Tabs>
+
+### A Complete API Client
+
+```js
+class ApiClient {
+  #baseUrl;
+  #defaultHeaders;
+
+  constructor(baseUrl, options = {}) {
+    this.#baseUrl = baseUrl;
+    this.#defaultHeaders = {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    };
+  }
+
+  async #request(path, options = {}) {
+    const url = `${this.#baseUrl}${path}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), options.timeout ?? 10000);
+
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+        headers: { ...this.#defaultHeaders, ...options.headers },
+      });
+
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        const err = new Error(body?.message ?? `HTTP ${response.status}`);
+        err.status = response.status;
+        err.body = body;
+        throw err;
+      }
+
+      return response.status === 204 ? null : response.json();
+    } catch (err) {
+      clearTimeout(timeout);
+      if (err.name === 'AbortError') throw new Error(`Request timed out: ${url}`);
+      throw err;
+    }
+  }
+
+  get(path, params = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.#request(`${path}${query ? `?${query}` : ''}`);
+  }
+
+  post(path, body) {
+    return this.#request(path, { method: 'POST', body: JSON.stringify(body) });
+  }
+
+  put(path, body) {
+    return this.#request(path, { method: 'PUT', body: JSON.stringify(body) });
+  }
+
+  patch(path, body) {
+    return this.#request(path, { method: 'PATCH', body: JSON.stringify(body) });
+  }
+
+  delete(path) {
+    return this.#request(path, { method: 'DELETE' });
+  }
+}
+
+const api = new ApiClient('https://api.example.com', {
+  headers: { 'Authorization': 'Bearer my-token' },
+});
+
+const users = await api.get('/users', { page: 1, limit: 20 });
+const newUser = await api.post('/users', { name: 'Alice', email: 'alice@example.com' });
+```
+
+## Top-Level `await`
+
+In ES modules (`.mjs` files or `<script type="module">`), `await` can be used at the top level:
+
+```js
+// config.mjs — top-level await
+const config = await fetch('/api/config').then(r => r.json());
+export const API_URL = config.apiUrl;
+export const FEATURES = config.features;
+
+// Any module that imports from config.mjs will wait for these to resolve
+```
+
+```js
+// app.mjs
+import { API_URL, FEATURES } from './config.mjs'; // waits for config.mjs to complete
+
+console.log(API_URL);    // output: https://api.example.com (fully resolved)
+console.log(FEATURES);   // output: { darkMode: true, ... }
+```
+
+## Web Workers
+
+Web Workers run JavaScript on a separate thread, keeping the main thread responsive.
+
+```js
+// main.js — create a worker
+const worker = new Worker('worker.js');
+
+// Send data to the worker
+worker.postMessage({ type: 'PROCESS', payload: largeDataArray });
+
+// Receive results
+worker.onmessage = (event) => {
+  console.log('Result from worker:', event.data);
+};
+
+worker.onerror = (event) => {
+  console.error('Worker error:', event.message);
+};
+
+// Terminate when done
+worker.terminate();
+```
+
+```js
+// worker.js — runs on a separate thread
+self.onmessage = (event) => {
+  const { type, payload } = event.data;
+
+  if (type === 'PROCESS') {
+    // This runs on a separate thread — won't block the UI
+    const result = heavyComputation(payload);
+    self.postMessage({ type: 'RESULT', payload: result });
+  }
+};
+
+function heavyComputation(data) {
+  // CPU-intensive work that would freeze the browser if on main thread
+  return data
+    .filter(item => item.value > 100)
+    .map(item => ({ ...item, processed: true }))
+    .sort((a, b) => b.value - a.value);
+}
+```
+
+:::caution[Worker Limitations]
+Workers have no access to the DOM, `window`, or `document`. They communicate only via `postMessage`. Data is copied (structured clone), not shared, by default — use `SharedArrayBuffer` with `Atomics` for true shared memory.
+:::
+
+## Async Iteration
+
+```js
+// Async generators — yield promises
+async function* paginate(fetchPage) {
+  let page = 1;
+  let hasMore = true;
+
+  while (hasMore) {
+    const { data, nextPage } = await fetchPage(page);
+    yield* data; // yield each item individually
+    hasMore = !!nextPage;
+    page = nextPage;
+  }
+}
+
+// Use with for await...of
+async function processAllUsers() {
+  for await (const user of paginate(fetchUsersPage)) {
+    await processUser(user);
+  }
+}
+
+// Reading a stream line-by-line
+async function* readLines(stream) {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        if (buffer) yield buffer;
+        return;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? ''; // keep incomplete line
+      yield* lines;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+```

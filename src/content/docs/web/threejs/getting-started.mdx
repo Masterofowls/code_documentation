@@ -1,0 +1,368 @@
+---
+title: Getting Started with Three.js
+description: Install Three.js with Vite, build your first rotating cube scene, add OrbitControls, and configure stats and debug tools.
+sidebar:
+  order: 2
+tags: [javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+This guide walks you from zero to a fully working Three.js scene with a rotating cube, responsive canvas, orbit controls, and a performance monitor — a solid foundation for any 3D project.
+
+---
+
+## Installation
+
+<Tabs>
+<TabItem label="Vite (recommended)">
+```bash
+# Create a new project
+npm create vite@latest my-threejs-app -- --template vanilla
+cd my-threejs-app
+
+# Install Three.js
+npm install three
+
+# Install dev dependencies
+npm install --save-dev lil-gui stats.js
+
+# Start dev server
+npm run dev
+```
+</TabItem>
+<TabItem label="CDN Import Map">
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Three.js via CDN</title>
+  <style>body { margin: 0; overflow: hidden; }</style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <script type="module" src="main.js"></script>
+</body>
+</html>
+```
+</TabItem>
+<TabItem label="React Three Fiber">
+```bash
+npm create vite@latest my-r3f-app -- --template react-ts
+cd my-r3f-app
+npm install three @react-three/fiber @react-three/drei
+npm run dev
+```
+</TabItem>
+</Tabs>
+
+---
+
+## Project Structure
+
+```
+my-threejs-app/
+├── index.html
+├── main.js            ← entry point
+├── src/
+│   ├── scene.js       ← scene setup
+│   ├── camera.js      ← camera factory
+│   └── utils/
+│       └── resize.js  ← resize handler
+├── public/
+│   ├── models/        ← GLTF / OBJ files
+│   └── textures/      ← image files
+├── vite.config.js
+└── package.json
+```
+
+---
+
+## The Three.js Mental Model
+
+Every Three.js scene needs four things:
+
+| Component | Purpose | Class |
+|---|---|---|
+| **Scene** | Container for all objects | `THREE.Scene` |
+| **Camera** | Defines what is visible | `THREE.PerspectiveCamera` |
+| **Renderer** | Draws the scene to a `<canvas>` | `THREE.WebGLRenderer` |
+| **Mesh** | A visible 3D object | `THREE.Mesh` |
+
+And a `requestAnimationFrame` loop to update and re-render each frame.
+
+---
+
+## First Scene — Complete Example
+
+```js
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import Stats from 'stats.js';
+import GUI from 'lil-gui';
+
+// ─── Scene ───────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#111827');
+
+// ─── Camera ──────────────────────────────────────────────────────────────────
+const camera = new THREE.PerspectiveCamera(
+  75,                          // field of view (degrees)
+  window.innerWidth / window.innerHeight, // aspect ratio
+  0.1,                         // near clipping plane
+  1000,                        // far clipping plane
+);
+camera.position.set(0, 1, 4);
+
+// ─── Renderer ────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({
+  canvas: document.querySelector('#canvas'),
+  antialias: true,
+});
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+
+// ─── Lights ───────────────────────────────────────────────────────────────────
+const ambientLight = new THREE.AmbientLight('#ffffff', 0.4);
+scene.add(ambientLight);
+
+const dirLight = new THREE.DirectionalLight('#ffffff', 2.0);
+dirLight.position.set(5, 8, 5);
+dirLight.castShadow = true;
+dirLight.shadow.mapSize.set(2048, 2048);
+dirLight.shadow.camera.near = 0.1;
+dirLight.shadow.camera.far = 50;
+dirLight.shadow.camera.left = -10;
+dirLight.shadow.camera.right = 10;
+dirLight.shadow.camera.top = 10;
+dirLight.shadow.camera.bottom = -10;
+scene.add(dirLight);
+
+// ─── Geometry & Material ─────────────────────────────────────────────────────
+const geometry = new THREE.BoxGeometry(1, 1, 1);
+const material = new THREE.MeshStandardMaterial({
+  color: '#4f46e5',
+  roughness: 0.3,
+  metalness: 0.2,
+});
+const cube = new THREE.Mesh(geometry, material);
+cube.castShadow = true;
+cube.position.set(0, 0.5, 0);
+scene.add(cube);
+
+// Floor plane
+const floorGeo = new THREE.PlaneGeometry(20, 20);
+const floorMat = new THREE.MeshStandardMaterial({ color: '#374151' });
+const floor = new THREE.Mesh(floorGeo, floorMat);
+floor.rotation.x = -Math.PI / 2;
+floor.receiveShadow = true;
+scene.add(floor);
+
+// ─── Controls ────────────────────────────────────────────────────────────────
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;  // smooth inertia
+controls.dampingFactor = 0.05;
+controls.minDistance = 1;
+controls.maxDistance = 20;
+controls.maxPolarAngle = Math.PI / 2; // prevent going below the floor
+
+// ─── Stats (FPS monitor) ──────────────────────────────────────────────────────
+const stats = new Stats();
+stats.showPanel(0); // 0 = FPS, 1 = ms per frame, 2 = memory
+document.body.appendChild(stats.dom);
+
+// ─── Debug GUI ────────────────────────────────────────────────────────────────
+const gui = new GUI();
+const cubeFolder = gui.addFolder('Cube');
+cubeFolder.addColor({ color: '#4f46e5' }, 'color').onChange(v => {
+  material.color.set(v);
+});
+cubeFolder.add(material, 'roughness', 0, 1, 0.01);
+cubeFolder.add(material, 'metalness', 0, 1, 0.01);
+cubeFolder.add(cube.rotation, 'x', 0, Math.PI * 2, 0.01).name('rotX');
+cubeFolder.add(cube.rotation, 'y', 0, Math.PI * 2, 0.01).name('rotY');
+cubeFolder.open();
+
+// ─── Clock (delta time) ──────────────────────────────────────────────────────
+const clock = new THREE.Clock();
+
+// ─── Resize Handler ──────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+});
+
+// ─── Animation Loop ──────────────────────────────────────────────────────────
+function animate() {
+  requestAnimationFrame(animate);
+
+  const delta = clock.getDelta(); // seconds since last frame
+
+  // Animate
+  cube.rotation.x += delta * 0.5;
+  cube.rotation.y += delta * 0.8;
+
+  controls.update(); // required when dampingFactor > 0
+
+  stats.begin();
+  renderer.render(scene, camera);
+  stats.end();
+}
+animate();
+```
+
+---
+
+## Canvas Sizing and Pixel Ratio
+
+Always set the pixel ratio so the canvas is crisp on high-DPI (Retina) screens:
+
+```js
+// Cap at 2 — higher ratios waste GPU performance with minimal visual gain
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+```
+
+For a canvas that fills only part of the page:
+
+```js
+const container = document.querySelector('#threejs-container');
+const width  = container.clientWidth;
+const height = container.clientHeight;
+
+renderer.setSize(width, height);
+camera.aspect = width / height;
+camera.updateProjectionMatrix();
+```
+
+---
+
+## Resize Handler
+
+The renderer's canvas and the camera's aspect ratio must be updated on every resize:
+
+```js
+// Debounced resize — avoids flooding on rapid resize drags
+let resizeTimeout;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimeout);
+  resizeTimeout = setTimeout(() => {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+
+    renderer.setSize(w, h);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  }, 100);
+});
+```
+
+---
+
+## OrbitControls
+
+OrbitControls is the most common camera control. It provides mouse/touch orbit, zoom, and pan:
+
+```js
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const controls = new OrbitControls(camera, renderer.domElement);
+
+// Behaviour
+controls.enableDamping = true;     // smooth deceleration
+controls.dampingFactor = 0.05;
+controls.enableZoom = true;
+controls.enablePan = true;
+controls.enableRotate = true;
+controls.autoRotate = false;       // set true for auto-spin
+controls.autoRotateSpeed = 2.0;    // degrees per second at 60fps
+
+// Constraints
+controls.minDistance = 1;
+controls.maxDistance = 100;
+controls.minPolarAngle = 0;                // 0 = top-down
+controls.maxPolarAngle = Math.PI / 2;      // 90° = horizon
+
+// Target (point the camera orbits around)
+controls.target.set(0, 0.5, 0);
+controls.update();
+
+// IMPORTANT: call controls.update() in the animation loop when damping is enabled
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+```
+
+:::tip[Other Control Types]
+Three.js ships many control flavors in `three/addons/controls/`:
+- `FlyControls` — first-person flight
+- `PointerLockControls` — FPS-style locked cursor
+- `TrackballControls` — unconstrained trackball orbit
+- `TransformControls` — move/rotate/scale objects with a gizmo
+:::
+
+---
+
+## Vite Configuration for Three.js
+
+Vite works with Three.js out of the box. A minimal config:
+
+```js
+// vite.config.js
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+  build: {
+    target: 'esnext',
+  },
+  server: {
+    open: true,
+  },
+  // Optimise Three.js chunks in production
+  optimizeDeps: {
+    include: ['three'],
+  },
+});
+```
+
+For large projects, use manual chunk splitting to separate the Three.js core from add-ons:
+
+```js
+build: {
+  rollupOptions: {
+    output: {
+      manualChunks: {
+        three: ['three'],
+        'three-addons': [
+          'three/addons/controls/OrbitControls.js',
+          'three/addons/loaders/GLTFLoader.js',
+        ],
+      },
+    },
+  },
+},
+```
+
+:::caution[Avoid tree-shaking pitfalls]
+If you import `import * as THREE from 'three'`, bundlers include the entire Three.js library. For production, consider named imports (`import { WebGLRenderer, Scene } from 'three'`) to enable tree-shaking of unused classes.
+:::

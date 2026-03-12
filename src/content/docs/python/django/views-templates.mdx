@@ -1,0 +1,679 @@
+---
+title: Views & Templates
+description: Master Django's function-based and class-based views, the Django template language, template inheritance, and the messages framework.
+sidebar:
+  order: 4
+tags: [python, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Django views are the "controllers" of the MTV pattern. They receive an `HttpRequest`, perform business logic (often querying the database), and return an `HttpResponse`. Templates provide the presentation layer, using Django's template language to render HTML from a Python context.
+
+---
+
+## The Request / Response Cycle
+
+```
+Browser ──GET /posts/──▶ Django URL Dispatcher
+                              │
+                              ▼
+                         views.post_list(request)
+                              │
+                    ┌─────────┼──────────┐
+                    │         │          │
+               query DB   process    read GET
+               via ORM    business   params
+                    │       logic
+                    └─────────┬──────────┘
+                              │
+                         context = {"posts": posts}
+                              │
+                              ▼
+                    render(request, "blog/post_list.html", context)
+                              │
+                              ▼
+                         HttpResponse (HTML)
+                              │
+Browser ◀──200 OK─────────────┘
+```
+
+---
+
+## Function-Based Views (FBV)
+
+FBVs are simple Python functions. They accept `request` as the first argument and return an `HttpResponse`.
+
+### Basic Response Types
+
+```python
+# blog/views.py
+from django.http import (
+    HttpResponse,
+    HttpResponseRedirect,
+    HttpResponseNotFound,
+    Http404,
+    JsonResponse,
+)
+from django.shortcuts import render, get_object_or_404, redirect
+from django.urls import reverse
+from django.contrib.auth.decorators import login_required
+from .models import Post, Category
+
+
+def simple_view(request):
+    """Minimal view returning raw HTML."""
+    return HttpResponse("<h1>Hello, World!</h1>")
+
+
+def post_list(request):
+    """List published posts with optional category filter."""
+    category_slug = request.GET.get("category")
+    posts = Post.published.select_related("author", "category").prefetch_related("tags")
+
+    if category_slug:
+        posts = posts.filter(category__slug=category_slug)
+
+    categories = Category.objects.all()
+
+    context = {
+        "posts": posts,
+        "categories": categories,
+        "selected_category": category_slug,
+    }
+    return render(request, "blog/post_list.html", context)
+
+
+def post_detail(request, slug):
+    """Single post detail — 404 if not found or not published."""
+    post = get_object_or_404(Post, slug=slug, status=Post.STATUS_PUBLISHED)
+
+    # Increment view counter without fetching first
+    Post.objects.filter(pk=post.pk).update(views_count=post.views_count + 1)
+
+    related_posts = (
+        Post.published
+        .filter(category=post.category)
+        .exclude(pk=post.pk)[:3]
+    )
+
+    return render(request, "blog/post_detail.html", {
+        "post": post,
+        "related_posts": related_posts,
+    })
+
+
+def redirect_example(request):
+    """Redirect to another URL."""
+    # Named URL
+    return redirect("post-list")
+
+    # URL with arguments
+    return redirect("post-detail", slug="my-post")
+
+    # Hard-coded URL
+    return HttpResponseRedirect("/posts/")
+
+    # reverse() builds the URL from name + args
+    url = reverse("post-detail", kwargs={"slug": "my-post"})
+    return redirect(url)
+
+
+def json_view(request):
+    """Return JSON data."""
+    data = {"status": "ok", "count": Post.published.count()}
+    return JsonResponse(data)
+
+    # For a list, set safe=False
+    posts = list(Post.published.values("id", "title"))
+    return JsonResponse(posts, safe=False)
+```
+
+### Handling HTTP Methods
+
+```python
+def post_create(request):
+    """Handle both GET (show form) and POST (process form)."""
+    if request.method == "POST":
+        from .forms import PostForm
+        form = PostForm(request.POST, request.FILES)
+        if form.is_valid():
+            post = form.save(commit=False)
+            post.author = request.user
+            post.save()
+            form.save_m2m()  # Save M2M fields after the instance
+            return redirect("post-detail", slug=post.slug)
+    else:
+        form = PostForm()
+
+    return render(request, "blog/post_form.html", {"form": form})
+```
+
+### Decorators
+
+```python
+from django.contrib.auth.decorators import login_required, permission_required
+from django.views.decorators.http import require_GET, require_POST, require_http_methods
+from django.views.decorators.cache import cache_page
+from django.views.decorators.vary import vary_on_headers
+
+
+# Require login — redirect to LOGIN_URL if anonymous
+@login_required
+def dashboard(request):
+    return render(request, "dashboard.html")
+
+
+# Require a specific permission
+@permission_required("blog.add_post", raise_exception=True)
+def post_create(request):
+    ...
+
+
+# Only allow specific HTTP methods
+@require_GET
+def api_posts(request):
+    ...
+
+
+@require_http_methods(["GET", "POST"])
+def post_form(request):
+    ...
+
+
+# Cache the view for 15 minutes
+@cache_page(60 * 15)
+def post_list(request):
+    ...
+```
+
+---
+
+## Class-Based Views (CBV)
+
+CBVs use Python classes to organize view logic. Django ships with many generic CBVs that handle common patterns with minimal code.
+
+### Generic Display Views
+
+```python
+# blog/views.py
+from django.views.generic import (
+    ListView, DetailView, TemplateView,
+    CreateView, UpdateView, DeleteView,
+)
+from django.contrib.auth.mixins import LoginRequiredMixin, PermissionRequiredMixin
+from django.urls import reverse_lazy
+from .models import Post
+from .forms import PostForm
+
+
+class PostListView(ListView):
+    model = Post
+    template_name = "blog/post_list.html"  # Default: blog/post_list.html
+    context_object_name = "posts"          # Default: object_list
+    paginate_by = 10                        # Enables pagination
+
+    def get_queryset(self):
+        """Override to filter the queryset."""
+        qs = Post.published.select_related("author", "category")
+        category = self.request.GET.get("category")
+        if category:
+            qs = qs.filter(category__slug=category)
+        return qs
+
+    def get_context_data(self, **kwargs):
+        """Add extra context variables."""
+        context = super().get_context_data(**kwargs)
+        context["categories"] = Category.objects.all()
+        return context
+
+
+class PostDetailView(DetailView):
+    model = Post
+    template_name = "blog/post_detail.html"
+    context_object_name = "post"
+    slug_field = "slug"        # Model field to look up by
+    slug_url_kwarg = "slug"    # URL kwarg name
+
+    def get_queryset(self):
+        return Post.published.select_related("author", "category")
+
+    def get_object(self):
+        obj = super().get_object()
+        # Track view counts
+        Post.objects.filter(pk=obj.pk).update(views_count=obj.views_count + 1)
+        return obj
+
+
+class PostCreateView(LoginRequiredMixin, CreateView):
+    model = Post
+    form_class = PostForm
+    template_name = "blog/post_form.html"
+    success_url = reverse_lazy("post-list")  # Redirect after success
+
+    def form_valid(self, form):
+        """Set author before saving."""
+        form.instance.author = self.request.user
+        return super().form_valid(form)
+
+
+class PostUpdateView(LoginRequiredMixin, PermissionRequiredMixin, UpdateView):
+    model = Post
+    form_class = PostForm
+    template_name = "blog/post_form.html"
+    permission_required = "blog.change_post"
+
+    def get_success_url(self):
+        return reverse_lazy("post-detail", kwargs={"slug": self.object.slug})
+
+    def get_queryset(self):
+        # Users can only edit their own posts (unless staff)
+        qs = super().get_queryset()
+        if not self.request.user.is_staff:
+            qs = qs.filter(author=self.request.user)
+        return qs
+
+
+class PostDeleteView(LoginRequiredMixin, DeleteView):
+    model = Post
+    template_name = "blog/post_confirm_delete.html"
+    success_url = reverse_lazy("post-list")
+
+
+class AboutView(TemplateView):
+    template_name = "about.html"
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["post_count"] = Post.published.count()
+        return context
+```
+
+### Wiring CBV URLs
+
+```python
+# blog/urls.py
+from django.urls import path
+from . import views
+
+urlpatterns = [
+    path("", views.PostListView.as_view(), name="post-list"),
+    path("<slug:slug>/", views.PostDetailView.as_view(), name="post-detail"),
+    path("create/", views.PostCreateView.as_view(), name="post-create"),
+    path("<slug:slug>/edit/", views.PostUpdateView.as_view(), name="post-update"),
+    path("<slug:slug>/delete/", views.PostDeleteView.as_view(), name="post-delete"),
+]
+```
+
+### FBV vs CBV Decision Guide
+
+| Situation | Recommendation |
+|-----------|---------------|
+| Simple one-off logic | FBV |
+| Standard CRUD operations | CBV (generic views) |
+| Reusing view logic across multiple views | CBV (mixins) |
+| Complex conditional branching | FBV |
+| REST API endpoints | FBV or `APIView` (DRF) |
+| You're new to Django | FBV first |
+
+---
+
+## Django Template Language
+
+### Variables and Filters
+
+```html
+<!-- Variables: {{ variable_name }} -->
+<h1>{{ post.title }}</h1>
+<p>By {{ post.author.get_full_name }}</p>
+
+<!-- Filters: {{ value|filter_name:argument }} -->
+<p>{{ post.created_at|date:"N j, Y" }}</p>          <!-- Dec 1, 2024 -->
+<p>{{ post.created_at|timesince }} ago</p>           <!-- 3 days ago -->
+<p>{{ post.title|truncatechars:50 }}</p>             <!-- Truncate to 50 chars -->
+<p>{{ post.body|truncatewords:30 }}</p>               <!-- Truncate to 30 words -->
+<p>{{ post.title|upper }}</p>                         <!-- TITLE -->
+<p>{{ post.title|lower|capfirst }}</p>                <!-- Capitalized title -->
+<p>{{ post.body|linebreaks }}</p>                     <!-- \n → <p> and <br> -->
+<p>{{ post.body|linebreaksbr }}</p>                   <!-- \n → <br> -->
+<p>{{ post.body|safe }}</p>                           <!-- Trust HTML — use carefully -->
+<p>{{ post.body|striptags }}</p>                      <!-- Remove all HTML tags -->
+<p>{{ value|default:"Not provided" }}</p>             <!-- Fallback if falsy -->
+<p>{{ value|default_if_none:"N/A" }}</p>              <!-- Fallback if None only -->
+<p>{{ items|length }}</p>                             <!-- Length of list/string -->
+<p>{{ price|floatformat:2 }}</p>                     <!-- 9.99 (2 decimal places) -->
+<p>{{ number|intcomma }}</p>                          <!-- 1,234,567 -->
+<p>{{ email|urlize }}</p>                             <!-- mailto: link -->
+<p>{{ url|urlencode }}</p>                            <!-- URL-encode a string -->
+<p>{{ list|join:", " }}</p>                           <!-- Join list with separator -->
+<p>{{ list|first }}</p>                               <!-- First item -->
+<p>{{ list|last }}</p>                                <!-- Last item -->
+<p>{{ list|slice:":3" }}</p>                          <!-- First 3 items -->
+```
+
+### Template Tags
+
+```html
+<!-- if / elif / else -->
+{% if user.is_authenticated %}
+  <p>Welcome, {{ user.username }}!</p>
+{% elif user.is_anonymous %}
+  <p>Please <a href="{% url 'login' %}">log in</a>.</p>
+{% else %}
+  <p>Unknown state.</p>
+{% endif %}
+
+<!-- Comparison operators -->
+{% if post.views_count > 1000 %}Popular{% endif %}
+{% if post.status == "published" %}Live{% endif %}
+{% if post.tags|length >= 3 %}Well-tagged{% endif %}
+{% if not post.is_draft %}Visible{% endif %}
+{% if post.author == user or user.is_staff %}Edit{% endif %}
+
+<!-- for loop -->
+{% for post in posts %}
+  <article>
+    <h2>{{ post.title }}</h2>
+    <!-- Loop variables -->
+    <small>{{ forloop.counter }} of {{ forloop.revcounter }}</small>
+    {% if forloop.first %}<strong>Latest!</strong>{% endif %}
+    {% if forloop.last %}<em>End of list</em>{% endif %}
+  </article>
+{% empty %}
+  <p>No posts found.</p>
+{% endfor %}
+
+<!-- url tag -->
+<a href="{% url 'post-detail' slug=post.slug %}">Read more</a>
+<a href="{% url 'post-list' %}?category=python">Python posts</a>
+
+<!-- static tag -->
+{% load static %}
+<link rel="stylesheet" href="{% static 'css/main.css' %}">
+<img src="{% static 'images/logo.png' %}" alt="Logo">
+
+<!-- with — create a short alias -->
+{% with total=posts|length %}
+  <p>Showing {{ total }} post{{ total|pluralize }}</p>
+{% endwith %}
+
+<!-- comment -->
+{# This is a single-line comment — not rendered #}
+{% comment "Optional note" %}
+  Multi-line comment block.
+  Nothing here is rendered.
+{% endcomment %}
+
+<!-- Escaping -->
+{{ user_input|escape }}  <!-- Force escaping (default behavior) -->
+{{ safe_html|safe }}     <!-- Mark as safe (skip escaping) -->
+{% autoescape off %}{{ raw_html }}{% endautoescape %}
+```
+
+---
+
+## Template Inheritance
+
+Inheritance lets you define a base skeleton and override specific blocks in child templates.
+
+```html
+<!-- templates/base.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}My Site{% endblock %}</title>
+  {% load static %}
+  <link rel="stylesheet" href="{% static 'css/main.css' %}">
+  {% block extra_css %}{% endblock %}
+</head>
+<body>
+  <nav>
+    <a href="{% url 'post-list' %}">Blog</a>
+    {% if user.is_authenticated %}
+      <a href="{% url 'logout' %}">Logout ({{ user.username }})</a>
+    {% else %}
+      <a href="{% url 'login' %}">Login</a>
+    {% endif %}
+  </nav>
+
+  <main>
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}
+          <li class="{{ message.tags }}">{{ message }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+
+    {% block content %}
+      <!-- Child templates override this block -->
+    {% endblock %}
+  </main>
+
+  <footer>
+    {% block footer %}&copy; 2024 My Site{% endblock %}
+  </footer>
+
+  {% block extra_js %}{% endblock %}
+</body>
+</html>
+```
+
+```html
+<!-- blog/templates/blog/post_list.html -->
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Blog Posts — My Site{% endblock %}
+
+{% block extra_css %}
+  <link rel="stylesheet" href="{% static 'css/blog.css' %}">
+{% endblock %}
+
+{% block content %}
+  <h1>Latest Posts</h1>
+
+  {% include "blog/_category_filter.html" %}
+
+  <div class="post-grid">
+    {% for post in posts %}
+      {% include "blog/_post_card.html" with post=post only %}
+    {% empty %}
+      <p>No posts found.</p>
+    {% endfor %}
+  </div>
+
+  {% include "blog/_pagination.html" with page_obj=page_obj %}
+{% endblock %}
+```
+
+```html
+<!-- blog/templates/blog/_post_card.html (partial / include) -->
+<article class="post-card">
+  {% if post.cover_image %}
+    <img src="{{ post.cover_image.url }}" alt="{{ post.title }}">
+  {% endif %}
+  <h2><a href="{% url 'post-detail' slug=post.slug %}">{{ post.title }}</a></h2>
+  <p>{{ post.excerpt|default:post.body|truncatewords:20 }}</p>
+  <small>
+    By {{ post.author.get_full_name|default:post.author.username }}
+    on {{ post.publish_date|date:"M j, Y" }}
+  </small>
+</article>
+```
+
+:::tip[Template Naming Convention]
+Use `_` prefix for partials (included templates): `_post_card.html`. This distinguishes full-page templates from reusable fragments.
+:::
+
+---
+
+## Context Processors
+
+Context processors inject variables into every template context automatically.
+
+```python
+# myapp/context_processors.py
+from .models import Category
+
+
+def global_categories(request):
+    """Make all categories available in every template."""
+    return {
+        "global_categories": Category.objects.all(),
+        "site_name": "My Blog",
+    }
+```
+
+```python
+# settings.py
+TEMPLATES = [{
+    ...
+    "OPTIONS": {
+        "context_processors": [
+            "django.template.context_processors.debug",
+            "django.template.context_processors.request",
+            "django.contrib.auth.context_processors.auth",
+            "django.contrib.messages.context_processors.messages",
+            "myapp.context_processors.global_categories",  # ← add yours
+        ],
+    },
+}]
+```
+
+Default context processors provide:
+
+| Processor | Variables |
+|-----------|-----------|
+| `debug` | `debug`, `sql_queries` |
+| `request` | `request` |
+| `auth` | `user`, `perms` |
+| `messages` | `messages` |
+
+---
+
+## Static Files in Templates
+
+```html
+{% load static %}
+
+<!-- Images -->
+<img src="{% static 'images/hero.jpg' %}" alt="Hero">
+
+<!-- CSS -->
+<link rel="stylesheet" href="{% static 'css/main.css' %}">
+
+<!-- JS -->
+<script src="{% static 'js/app.js' %}"></script>
+
+<!-- Dynamic media (user-uploaded files) -->
+{% if post.cover_image %}
+  <img src="{{ post.cover_image.url }}" alt="{{ post.title }}">
+{% endif %}
+```
+
+Serve media files in development:
+
+```python
+# mysite/urls.py
+from django.conf import settings
+from django.conf.urls.static import static
+
+urlpatterns = [
+    ...
+] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+```
+
+---
+
+## Messages Framework
+
+Django's messages framework provides one-time notification messages (flash messages) that persist for exactly one request.
+
+```python
+# views.py
+from django.contrib import messages
+
+
+def post_create(request):
+    if request.method == "POST":
+        form = PostForm(request.POST)
+        if form.is_valid():
+            post = form.save()
+            messages.success(request, f'Post "{post.title}" published successfully.')
+            return redirect("post-detail", slug=post.slug)
+        else:
+            messages.error(request, "Please correct the errors below.")
+    else:
+        form = PostForm()
+    return render(request, "blog/post_form.html", {"form": form})
+
+
+# Available message levels:
+messages.debug(request, "Debug info")
+messages.info(request, "For your information")
+messages.success(request, "Action completed!")
+messages.warning(request, "Caution: this may have side effects")
+messages.error(request, "Something went wrong.")
+
+# With extra_tags for CSS classes
+messages.success(request, "Saved!", extra_tags="toast auto-dismiss")
+```
+
+```html
+<!-- templates/base.html -->
+{% if messages %}
+  {% for message in messages %}
+    <div class="alert alert-{{ message.tags }}
+                {% if message.level == DEFAULT_MESSAGE_LEVELS.SUCCESS %}alert-success
+                {% elif message.level == DEFAULT_MESSAGE_LEVELS.ERROR %}alert-danger
+                {% elif message.level == DEFAULT_MESSAGE_LEVELS.WARNING %}alert-warning
+                {% else %}alert-info{% endif %}">
+      {{ message }}
+    </div>
+  {% endfor %}
+{% endif %}
+```
+
+---
+
+## Pagination
+
+```python
+# views.py
+from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
+
+
+def post_list(request):
+    all_posts = Post.published.all()
+    paginator = Paginator(all_posts, 10)  # 10 posts per page
+
+    page_number = request.GET.get("page", 1)
+    try:
+        page_obj = paginator.page(page_number)
+    except PageNotAnInteger:
+        page_obj = paginator.page(1)
+    except EmptyPage:
+        page_obj = paginator.page(paginator.num_pages)
+
+    return render(request, "blog/post_list.html", {"page_obj": page_obj})
+```
+
+```html
+<!-- templates/blog/_pagination.html -->
+{% if page_obj.has_other_pages %}
+<nav aria-label="Pagination">
+  {% if page_obj.has_previous %}
+    <a href="?page={{ page_obj.previous_page_number }}">&laquo; Previous</a>
+  {% endif %}
+
+  <span>Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
+
+  {% if page_obj.has_next %}
+    <a href="?page={{ page_obj.next_page_number }}">Next &raquo;</a>
+  {% endif %}
+</nav>
+{% endif %}
+```

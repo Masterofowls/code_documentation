@@ -1,0 +1,504 @@
+---
+title: NumPy Arrays In Depth
+description: Comprehensive coverage of dtypes, reshaping, flattening, transposing, concatenating, splitting, broadcasting, structured arrays, and memory management.
+sidebar:
+  order: 3
+tags: [python, data]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+This page dives into the full lifecycle of NumPy arrays: how data types work, how to reshape and
+rearrange data, how to combine and split arrays, and how NumPy's broadcasting rules allow operations
+on arrays of different shapes.
+
+---
+
+## The dtype System in Detail
+
+Every `ndarray` has exactly one `dtype`. NumPy supports a rich set of fixed-size primitive types.
+
+### Complete dtype Reference
+
+| dtype | Alias | Bytes | Range / Precision |
+|---|---|---|---|
+| `np.int8` | `i1` | 1 | −128 to 127 |
+| `np.int16` | `i2` | 2 | −32 768 to 32 767 |
+| `np.int32` | `i4` | 4 | −2 147 483 648 to 2 147 483 647 |
+| `np.int64` | `i8` | 8 | −9.2×10¹⁸ to 9.2×10¹⁸ |
+| `np.uint8` | `u1` | 1 | 0 to 255 |
+| `np.uint16` | `u2` | 2 | 0 to 65 535 |
+| `np.uint32` | `u4` | 4 | 0 to 4 294 967 295 |
+| `np.uint64` | `u8` | 8 | 0 to 1.8×10¹⁹ |
+| `np.float16` | `f2` | 2 | ±6.55×10⁴, ~3 decimal digits |
+| `np.float32` | `f4` | 4 | ±3.4×10³⁸, ~7 decimal digits |
+| `np.float64` | `f8` | 8 | ±1.8×10³⁰⁸, ~15 decimal digits |
+| `np.complex64` | `c8` | 8 | two `float32` components |
+| `np.complex128` | `c16` | 16 | two `float64` components |
+| `np.bool_` | `?` | 1 | `True` or `False` |
+| `np.str_` | `U` | varies | Fixed-width Unicode |
+| `np.bytes_` | `S` | varies | Fixed-width byte string |
+| `np.object_` | `O` | 8 | Pointer to arbitrary Python object |
+
+```python
+import numpy as np
+
+# Inspect dtype details
+dt = np.dtype(np.float32)
+print(dt.kind)       # 'f'  — float
+print(dt.itemsize)   # 4
+print(dt.byteorder)  # '='  — native endian
+
+# Type info for integers and floats
+print(np.iinfo(np.int8))
+# iinfo(min=-128, max=127, dtype=int8)
+
+print(np.finfo(np.float16))
+# finfo(resolution=0.001, min=-6.55040e+04, max=6.55040e+04, dtype=float16)
+```
+
+### dtype Conversion with `astype()`
+
+`astype()` always returns a **copy** with the new dtype.
+
+```python
+import numpy as np
+
+a = np.array([1.7, 2.9, 3.1, 4.8])
+print(a.dtype)                   # float64
+
+# Convert to int (truncates, does NOT round)
+b = a.astype(np.int32)
+print(b)                         # array([1, 2, 3, 4])
+
+# Convert to string
+s = a.astype(str)
+print(s)                         # array(['1.7', '2.9', '3.1', '4.8'], dtype='<U32')
+
+# bool → int
+flags = np.array([True, False, True, True])
+print(flags.astype(np.int8))     # array([1, 0, 1, 1], dtype=int8)
+
+# Safe casting check
+print(np.can_cast(np.float64, np.float32))   # True (lossy but allowed)
+print(np.can_cast(np.float64, np.int32, casting='safe'))  # False
+
+# result_type — find minimal dtype that can hold both
+print(np.result_type(np.int8, np.float32))   # float32
+```
+
+:::caution[astype Truncates, Not Rounds]
+Converting `float64` to an integer dtype truncates toward zero. If you need rounding,
+call `np.round()` before `astype()`:
+```python
+a = np.array([1.7, 2.5, -1.5])
+print(a.astype(int))              # array([ 1,  2, -1]) — truncated
+print(np.round(a).astype(int))    # array([ 2,  2, -2]) — rounded (banker's rounding)
+```
+:::
+
+---
+
+## Reshaping Arrays
+
+Reshaping returns a **view** whenever possible (i.e., when the array is contiguous).
+
+```python
+import numpy as np
+
+a = np.arange(24)
+print(a)       # array([ 0,  1,  2, ..., 23])
+
+# 1D → 2D
+b = a.reshape(4, 6)
+print(b)
+# array([[ 0,  1,  2,  3,  4,  5],
+#        [ 6,  7,  8,  9, 10, 11],
+#        [12, 13, 14, 15, 16, 17],
+#        [18, 19, 20, 21, 22, 23]])
+
+# 1D → 3D
+c = a.reshape(2, 3, 4)
+print(c.shape)   # (2, 3, 4)
+
+# Use -1 to infer one dimension automatically
+d = a.reshape(6, -1)      # 6 rows, NumPy infers 4 cols
+print(d.shape)    # (6, 4)
+
+e = a.reshape(-1, 8)      # NumPy infers 3 rows, 8 cols
+print(e.shape)    # (3, 8)
+
+# Reshape is a view — modifying changes original
+b[0, 0] = 999
+print(a[0])      # 999  — original changed!
+```
+
+---
+
+## Flatten vs Ravel
+
+Both collapse an N-D array to 1-D, but differ in memory behaviour.
+
+```python
+import numpy as np
+
+a = np.array([[1, 2, 3],
+              [4, 5, 6]])
+
+# flatten() — ALWAYS returns a copy
+flat = a.flatten()
+flat[0] = 999
+print(a[0, 0])    # 1  — original unchanged
+
+# ravel() — returns a VIEW when possible
+rav = a.ravel()
+rav[0] = 999
+print(a[0, 0])    # 999  — original changed!
+
+# ravel with Fortran order (column-major)
+print(a.ravel(order='F'))   # array([1, 4, 2, 5, 3, 6])  ← column by column
+print(a.ravel(order='C'))   # array([1, 2, 3, 4, 5, 6])  ← row by row (default)
+```
+
+| Method | Returns | Memory | Order |
+|---|---|---|---|
+| `flatten()` | Copy | New allocation | C, F, A, K |
+| `ravel()` | View if contiguous | Shares data | C, F, A, K |
+
+---
+
+## Transpose and Axis Manipulation
+
+```python
+import numpy as np
+
+a = np.arange(12).reshape(3, 4)
+print(a)
+# array([[ 0,  1,  2,  3],
+#        [ 4,  5,  6,  7],
+#        [ 8,  9, 10, 11]])
+
+# .T — transpose (view)
+print(a.T)
+# array([[ 0,  4,  8],
+#        [ 1,  5,  9],
+#        [ 2,  6, 10],
+#        [ 3,  7, 11]])
+
+# np.transpose with explicit axis order
+b = np.arange(24).reshape(2, 3, 4)
+print(b.shape)                         # (2, 3, 4)
+print(np.transpose(b, (1, 0, 2)).shape)  # (3, 2, 4)
+print(np.transpose(b, (2, 1, 0)).shape)  # (4, 3, 2)
+
+# swapaxes
+print(b.swapaxes(0, 2).shape)          # (4, 3, 2)
+
+# moveaxis
+print(np.moveaxis(b, 0, -1).shape)     # (3, 4, 2) — move axis 0 to last
+```
+
+---
+
+## Adding Dimensions with `np.newaxis`
+
+```python
+import numpy as np
+
+a = np.array([1, 2, 3])      # shape (3,)
+
+row = a[np.newaxis, :]        # shape (1, 3) — row vector
+col = a[:, np.newaxis]        # shape (3, 1) — column vector
+
+print(row)       # array([[1, 2, 3]])
+print(col)
+# array([[1],
+#        [2],
+#        [3]])
+
+# Equivalent with expand_dims
+print(np.expand_dims(a, axis=0).shape)   # (1, 3)
+print(np.expand_dims(a, axis=1).shape)   # (3, 1)
+
+# squeeze — remove axes of size 1
+x = np.zeros((1, 3, 1, 4, 1))
+print(x.shape)              # (1, 3, 1, 4, 1)
+print(np.squeeze(x).shape)  # (3, 4)
+```
+
+---
+
+## Concatenating Arrays
+
+```python
+import numpy as np
+
+a = np.array([[1, 2], [3, 4]])
+b = np.array([[5, 6], [7, 8]])
+
+# concatenate along axis 0 (stack rows)
+c = np.concatenate([a, b], axis=0)
+print(c)
+# array([[1, 2],
+#        [3, 4],
+#        [5, 6],
+#        [7, 8]])
+
+# concatenate along axis 1 (stack columns)
+d = np.concatenate([a, b], axis=1)
+print(d)
+# array([[1, 2, 5, 6],
+#        [3, 4, 7, 8]])
+
+# vstack — equivalent to concatenate(axis=0)
+print(np.vstack([a, b]))
+# array([[1, 2],
+#        [3, 4],
+#        [5, 6],
+#        [7, 8]])
+
+# hstack — equivalent to concatenate(axis=1)
+print(np.hstack([a, b]))
+# array([[1, 2, 5, 6],
+#        [3, 4, 7, 8]])
+
+# dstack — stack along 3rd axis (depth)
+print(np.dstack([a, b]).shape)   # (2, 2, 2)
+
+# stack — new axis insertion point
+x = np.array([1, 2, 3])
+y = np.array([4, 5, 6])
+print(np.stack([x, y], axis=0))
+# array([[1, 2, 3],
+#        [4, 5, 6]])
+print(np.stack([x, y], axis=1))
+# array([[1, 4],
+#        [2, 5],
+#        [3, 6]])
+```
+
+---
+
+## Splitting Arrays
+
+```python
+import numpy as np
+
+a = np.arange(12).reshape(3, 4)
+# array([[ 0,  1,  2,  3],
+#        [ 4,  5,  6,  7],
+#        [ 8,  9, 10, 11]])
+
+# split into 2 equal parts along axis 1
+parts = np.hsplit(a, 2)
+print(parts[0])
+# array([[0, 1],
+#        [4, 5],
+#        [8, 9]])
+print(parts[1])
+# array([[ 2,  3],
+#        [ 6,  7],
+#        [10, 11]])
+
+# vsplit — split along rows
+rows = np.vsplit(a, 3)
+print(rows[0])    # array([[0, 1, 2, 3]])
+
+# split at specific indices
+b = np.arange(10)
+p = np.split(b, [2, 5, 8])
+print(p[0])   # array([0, 1])
+print(p[1])   # array([2, 3, 4])
+print(p[2])   # array([5, 6, 7])
+print(p[3])   # array([8, 9])
+```
+
+---
+
+## Tile and Repeat
+
+```python
+import numpy as np
+
+a = np.array([1, 2, 3])
+
+# tile — repeats the whole array N times
+print(np.tile(a, 3))          # array([1, 2, 3, 1, 2, 3, 1, 2, 3])
+print(np.tile(a, (2, 3)))
+# array([[1, 2, 3, 1, 2, 3, 1, 2, 3],
+#        [1, 2, 3, 1, 2, 3, 1, 2, 3]])
+
+# repeat — repeats individual elements
+print(np.repeat(a, 3))        # array([1, 1, 1, 2, 2, 2, 3, 3, 3])
+print(np.repeat(a, [1, 2, 3]))# array([1, 2, 2, 3, 3, 3])
+
+# 2D repeat
+m = np.array([[1, 2], [3, 4]])
+print(np.repeat(m, 2, axis=1))
+# array([[1, 1, 2, 2],
+#        [3, 3, 4, 4]])
+```
+
+---
+
+## Broadcasting Rules
+
+Broadcasting allows NumPy to operate on arrays with different shapes without copying data.
+The rule is applied dimension-by-dimension from the **right**.
+
+```
+Rule:
+1. If arrays have different ndim, prepend 1s to the shape of the smaller one.
+2. Dimensions of size 1 are stretched to match the other array.
+3. If sizes differ and neither is 1 → ValueError.
+
+Example:
+  A:        (3, 4, 5)
+  B:              (5)   →  (1, 1, 5)  after step 1
+  B stretched: (3, 4, 5)  ✓
+
+  A:   (3, 1, 5)
+  B:   (1, 4, 1)
+  Out: (3, 4, 5)  ✓  both dimensions broadcast
+
+  A:   (3, 4)
+  B:      (3)   →  (1, 3)
+  Out: ERROR — 4 ≠ 3, neither is 1
+```
+
+```python
+import numpy as np
+
+# Scalar broadcast
+a = np.array([1, 2, 3, 4])
+print(a + 10)          # array([11, 12, 13, 14])
+print(a * 2.5)         # array([ 2.5,  5. ,  7.5, 10. ])
+
+# 1D + 2D broadcast
+row = np.array([0, 10, 20, 30])          # shape (4,)
+col = np.array([[0], [1], [2]])          # shape (3, 1)
+print(row + col)
+# array([[ 0, 10, 20, 30],
+#        [ 1, 11, 21, 31],
+#        [ 2, 12, 22, 32]])
+
+# Outer-product style broadcasting
+a = np.arange(3)[:, np.newaxis]   # (3, 1)
+b = np.arange(4)[np.newaxis, :]   # (1, 4)
+print(a + b)
+# array([[0, 1, 2, 3],
+#        [1, 2, 3, 4],
+#        [2, 3, 4, 5]])
+
+# Normalise rows of a matrix (subtract row mean)
+M = np.array([[1, 2, 3],
+              [4, 5, 6],
+              [7, 8, 9]], dtype=float)
+row_means = M.mean(axis=1, keepdims=True)   # shape (3, 1)
+M_centred = M - row_means
+print(M_centred)
+# array([[-1.,  0.,  1.],
+#        [-1.,  0.,  1.],
+#        [-1.,  0.,  1.]])
+```
+
+:::tip[keepdims=True]
+When you aggregate along an axis (e.g., `sum`, `mean`), use `keepdims=True` to preserve the
+dimension as size 1. This makes the result broadcastable back against the original array, avoiding
+the need to manually add `np.newaxis`.
+:::
+
+---
+
+## Structured Arrays
+
+Structured arrays allow each element to contain multiple fields of different types — analogous to a
+C struct or a row in a database table.
+
+```python
+import numpy as np
+
+# Define a dtype with named fields
+dt = np.dtype([
+    ('name',   'U20'),     # Unicode string, max 20 chars
+    ('age',    np.int32),
+    ('height', np.float64),
+    ('active', np.bool_),
+])
+
+people = np.array([
+    ('Alice', 30, 1.65, True),
+    ('Bob',   25, 1.80, False),
+    ('Carol', 35, 1.72, True),
+], dtype=dt)
+
+# Access by field name
+print(people['name'])      # array(['Alice', 'Bob', 'Carol'], dtype='<U20')
+print(people['age'])       # array([30, 25, 35], dtype=int32)
+
+# Access by row index
+print(people[0])           # ('Alice', 30, 1.65, True)
+
+# Boolean mask on a field
+active = people[people['active']]
+print(active['name'])      # array(['Alice', 'Carol'], dtype='<U20')
+
+# Sort by a field
+sorted_by_age = np.sort(people, order='age')
+print(sorted_by_age['name'])   # array(['Bob', 'Alice', 'Carol'], dtype='<U20')
+
+# Modify a field
+people['age'][0] = 31
+print(people['age'])       # array([31, 25, 35], dtype=int32)
+```
+
+### Record Arrays (recarrays)
+
+Record arrays wrap structured arrays and allow field access via attribute notation.
+
+```python
+import numpy as np
+
+rec = np.rec.array([
+    ('Alice', 30, 1.65),
+    ('Bob',   25, 1.80),
+], dtype=[('name', 'U20'), ('age', 'i4'), ('height', 'f8')])
+
+# Attribute access instead of bracket access
+print(rec.name)      # rec.array(['Alice', 'Bob'], dtype='<U20')
+print(rec.age)       # rec.array([30, 25], dtype=int32)
+print(rec[0].name)   # Alice
+
+# Convert structured array to recarray
+import numpy.lib.recfunctions as rfn
+print(rfn.structured_to_unstructured(rec[['age', 'height']]))
+# array([[ 30.  ,   1.65],
+#        [ 25.  ,   1.80]])
+```
+
+---
+
+## Array Flags and Writability
+
+```python
+import numpy as np
+
+a = np.arange(6)
+
+# Make read-only
+a.flags.writeable = False
+try:
+    a[0] = 99
+except ValueError as e:
+    print(e)   # assignment destination is read-only
+
+# Restore writability
+a.flags.writeable = True
+a[0] = 99
+print(a)       # array([99,  1,  2,  3,  4,  5])
+
+# Check if array owns its data
+b = a[1:4]          # view
+print(b.flags['OWNDATA'])   # False
+print(a.flags['OWNDATA'])   # True
+```

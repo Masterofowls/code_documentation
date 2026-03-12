@@ -1,0 +1,539 @@
+---
+title: Packaging & Distribution
+description: Build Tauri installers, sign your app for macOS and Windows, configure auto-updates, and automate multi-platform releases with GitHub Actions.
+sidebar:
+  order: 7
+tags: [rust, javascript, desktop]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Tauri produces native installers for every major platform from a single codebase. The `tauri build` command compiles your Rust backend, bundles your frontend, and generates platform-specific distributable files.
+
+## Build Command
+
+```bash
+# Build for the current platform
+npm run tauri build
+
+# Build with verbose output (useful for debugging)
+npm run tauri build -- --verbose
+
+# Build in debug mode (faster compilation, larger binary)
+npm run tauri build -- --debug
+
+# Build specific bundle types
+npm run tauri build -- --bundles nsis,msi      # Windows
+npm run tauri build -- --bundles dmg,updater   # macOS
+npm run tauri build -- --bundles appimage,deb  # Linux
+```
+
+Output is in `src-tauri/target/release/bundle/`.
+
+## Output by Platform
+
+| Platform | Format | Location |
+|----------|--------|----------|
+| **Windows** | `.exe` (NSIS installer) | `bundle/nsis/` |
+| **Windows** | `.msi` (WiX installer) | `bundle/msi/` |
+| **macOS** | `.app` (application bundle) | `bundle/macos/` |
+| **macOS** | `.dmg` (disk image) | `bundle/dmg/` |
+| **Linux** | `.AppImage` (portable) | `bundle/appimage/` |
+| **Linux** | `.deb` (Debian/Ubuntu) | `bundle/deb/` |
+| **Linux** | `.rpm` (Fedora/RHEL) | `bundle/rpm/` |
+
+## `tauri.conf.json` — Bundle Configuration
+
+```json
+{
+  "productName": "MyApp",
+  "version": "1.0.0",
+  "identifier": "com.yourcompany.myapp",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Utility",
+    "copyright": "Copyright © 2024 Your Company",
+    "longDescription": "A detailed description of what your app does, displayed in app stores and package managers.",
+    "shortDescription": "A short description of your app.",
+    "publisher": "Your Company, Inc.",
+
+    "windows": {
+      "digestAlgorithm": "sha256",
+      "certificateThumbprint": null,
+      "timestampUrl": "",
+      "wix": {
+        "language": ["en-US"],
+        "bannerPath": "assets/wix-banner.bmp",
+        "dialogImagePath": "assets/wix-dialog.bmp",
+        "upgradeCode": "PUT-A-UNIQUE-GUID-HERE"
+      },
+      "nsis": {
+        "license": "LICENSE",
+        "headerImage": "assets/nsis-header.bmp",
+        "sidebarImage": "assets/nsis-sidebar.bmp",
+        "installMode": "currentUser",
+        "languages": ["English"],
+        "displayLanguageSelector": false
+      }
+    },
+
+    "macOS": {
+      "frameworks": [],
+      "minimumSystemVersion": "10.13",
+      "entitlements": "assets/entitlements.plist",
+      "dmg": {
+        "background": "assets/dmg-background.png",
+        "windowSize": { "width": 660, "height": 400 },
+        "appPosition": { "x": 180, "y": 170 },
+        "applicationFolderPosition": { "x": 480, "y": 170 }
+      }
+    },
+
+    "linux": {
+      "deb": {
+        "depends": [],
+        "section": "utils",
+        "priority": "optional"
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      },
+      "rpm": {
+        "epoch": 0,
+        "release": "1",
+        "requiresProvides": []
+      }
+    }
+  }
+}
+```
+
+## Generating Icons
+
+Create all required icon sizes from a single 1024×1024 PNG:
+
+```bash
+# Using the Tauri CLI icon generator
+npm run tauri icon assets/app-icon-1024.png
+
+# This generates:
+# src-tauri/icons/32x32.png
+# src-tauri/icons/128x128.png
+# src-tauri/icons/128x128@2x.png
+# src-tauri/icons/icon.icns     (macOS)
+# src-tauri/icons/icon.ico      (Windows)
+# src-tauri/icons/Square*Logo.png (Windows store)
+# src-tauri/icons/StoreLogo.png
+```
+
+:::tip[Icon Requirements]
+Start with a **1024×1024 PNG** with a transparent or white background. Make sure the icon is square and the design is recognizable at small sizes (32×32). The Tauri CLI handles all resizing automatically.
+:::
+
+## Code Signing
+
+### Windows Code Signing
+
+<Tabs>
+  <TabItem label="Standard PFX Certificate">
+    ```json
+    // tauri.conf.json
+    {
+      "bundle": {
+        "windows": {
+          "certificateThumbprint": null,
+          "digestAlgorithm": "sha256",
+          "timestampUrl": "http://timestamp.sectigo.com"
+        }
+      }
+    }
+    ```
+
+    ```bash
+    # Set environment variables before building
+    $env:TAURI_SIGNING_PRIVATE_KEY = "path/to/private-key.pem"
+    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "your-key-password"
+
+    # Or using signtool directly via beforeBundleCommand
+    npm run tauri build
+    ```
+
+    ```json
+    // Alternative: use signtool via bundle hooks
+    {
+      "bundle": {
+        "windows": {
+          "signtoolOptions": {
+            "certificateThumbprint": "YOUR_CERT_THUMBPRINT",
+            "digestAlgorithm": "sha256",
+            "timestampUrl": "http://timestamp.sectigo.com"
+          }
+        }
+      }
+    }
+    ```
+  </TabItem>
+  <TabItem label="Environment Variables">
+    ```bash
+    # Windows — set before tauri build
+    $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content "signing-key.pem" -Raw
+    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "password123"
+
+    npm run tauri build
+    ```
+  </TabItem>
+</Tabs>
+
+### macOS Code Signing + Notarization
+
+<Steps>
+
+1. **Prepare entitlements** (`src-tauri/assets/entitlements.plist`):
+
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+     "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0">
+     <dict>
+       <key>com.apple.security.cs.allow-jit</key><true/>
+       <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+       <key>com.apple.security.cs.disable-library-validation</key><true/>
+       <key>com.apple.security.network.client</key><true/>
+     </dict>
+   </plist>
+   ```
+
+2. **Configure `tauri.conf.json`**:
+
+   ```json
+   {
+     "bundle": {
+       "macOS": {
+         "entitlements": "assets/entitlements.plist",
+         "signingIdentity": "Developer ID Application: Your Name (TEAMID)"
+       }
+     }
+   }
+   ```
+
+3. **Set notarization environment variables**:
+
+   ```bash
+   $env:APPLE_ID = "your@apple.id"
+   $env:APPLE_CERTIFICATE = Get-Content "cert.p12" -Encoding Byte | [Convert]::ToBase64String($_)
+   $env:APPLE_CERTIFICATE_PASSWORD = "cert-password"
+   $env:APPLE_SIGNING_IDENTITY = "Developer ID Application: Your Name (TEAMID)"
+   $env:APPLE_TEAM_ID = "YOURTEAMID"
+
+   npm run tauri build
+   ```
+
+</Steps>
+
+## Tauri Action — GitHub Actions
+
+The official `tauri-apps/tauri-action` handles building, signing, and releasing on all platforms:
+
+```yaml
+# .github/workflows/release.yml
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  publish-tauri:
+    permissions:
+      contents: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 'macos-latest'
+            args: '--target aarch64-apple-darwin'   # Apple Silicon
+          - platform: 'macos-latest'
+            args: '--target x86_64-apple-darwin'    # Intel Mac
+          - platform: 'ubuntu-22.04'
+            args: ''
+          - platform: 'windows-latest'
+            args: ''
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and release (macOS)
+        if: matrix.platform == 'macos-latest'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'MyApp ${{ github.ref_name }}'
+          releaseBody: 'See the release notes below.'
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+
+      - name: Build and release (Windows)
+        if: matrix.platform == 'windows-latest'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'MyApp ${{ github.ref_name }}'
+          releaseDraft: true
+          prerelease: false
+
+      - name: Build and release (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'MyApp ${{ github.ref_name }}'
+          releaseDraft: true
+          prerelease: false
+```
+
+## Auto-Updater Plugin
+
+<Steps>
+
+1. **Install the plugin**
+
+   ```toml
+   # Cargo.toml
+   [dependencies]
+   tauri-plugin-updater = "2"
+   ```
+
+   ```bash
+   npm install @tauri-apps/plugin-updater
+   ```
+
+2. **Register in lib.rs**
+
+   ```rust
+   pub fn run() {
+       tauri::Builder::default()
+           .plugin(tauri_plugin_updater::Builder::new().build())
+           .run(tauri::generate_context!())
+           .expect("error while running application");
+   }
+   ```
+
+3. **Configure update endpoint in `tauri.conf.json`**
+
+   ```json
+   {
+     "plugins": {
+       "updater": {
+         "pubkey": "YOUR_PUBLIC_KEY_HERE",
+         "endpoints": [
+           "https://releases.yourapp.com/{{target}}/{{arch}}/{{current_version}}"
+         ],
+         "dialog": true
+       }
+     }
+   }
+   ```
+
+4. **Generate signing key pair**
+
+   ```bash
+   # Generate a new key pair for update signing
+   npm run tauri signer generate -- -w ~/.tauri/myapp.key
+
+   # Output:
+   # Private key written to: ~/.tauri/myapp.key
+   # Public key: dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk...
+   ```
+
+5. **TypeScript — check and install updates**
+
+   ```typescript
+   import { check } from '@tauri-apps/plugin-updater';
+   import { relaunch } from '@tauri-apps/plugin-process';
+
+   export async function checkForUpdates() {
+     const update = await check();
+
+     if (!update) {
+       console.log('App is up to date');
+       return;
+     }
+
+     console.log(`Update available: ${update.version}`);
+     console.log('Release notes:', update.body);
+
+     // Download and install
+     let downloaded = 0;
+     let total = 0;
+
+     await update.downloadAndInstall((event) => {
+       switch (event.event) {
+         case 'Started':
+           total = event.data.contentLength ?? 0;
+           console.log(`Downloading: ${total} bytes`);
+           break;
+         case 'Progress':
+           downloaded += event.data.chunkLength;
+           const percent = total > 0 ? Math.round((downloaded / total) * 100) : 0;
+           console.log(`${percent}%`);
+           break;
+         case 'Finished':
+           console.log('Download complete');
+           break;
+       }
+     });
+
+     // Restart the app to apply the update
+     await relaunch();
+   }
+   ```
+
+</Steps>
+
+## Release Signing for Updates
+
+The updater uses asymmetric cryptography to verify update packages:
+
+```bash
+# Sign a release artifact manually (for testing)
+npm run tauri signer sign -- \
+  -k ~/.tauri/myapp.key \
+  src-tauri/target/release/bundle/dmg/MyApp_1.0.0_aarch64.dmg
+
+# In CI, set the environment variable
+$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content ~/.tauri/myapp.key -Raw
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "your-key-password"
+```
+
+## Update Server Response Format
+
+Your update server endpoint must return JSON in this format:
+
+```json
+{
+  "version": "1.1.0",
+  "notes": "Bug fixes and performance improvements",
+  "pub_date": "2024-01-15T12:00:00Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "base64-encoded-signature",
+      "url": "https://releases.yourapp.com/windows/MyApp_1.1.0_x64-setup.exe"
+    },
+    "darwin-aarch64": {
+      "signature": "base64-encoded-signature",
+      "url": "https://releases.yourapp.com/macos/MyApp_1.1.0_aarch64.dmg"
+    },
+    "darwin-x86_64": {
+      "signature": "base64-encoded-signature",
+      "url": "https://releases.yourapp.com/macos/MyApp_1.1.0_x64.dmg"
+    },
+    "linux-x86_64": {
+      "signature": "base64-encoded-signature",
+      "url": "https://releases.yourapp.com/linux/MyApp_1.1.0_amd64.AppImage"
+    }
+  }
+}
+```
+
+:::tip[GitHub Releases as Update Server]
+Tauri Action automatically generates a `latest.json` update manifest and attaches it to your GitHub Release. Point your `endpoints` to `https://github.com/user/repo/releases/latest/download/latest.json` for a zero-cost update server.
+:::
+
+## Cross-Compilation Limitations
+
+Native cross-compilation for Tauri has limitations due to native WebView dependencies:
+
+| Build Host | Target | Support |
+|------------|--------|---------|
+| macOS | macOS arm64 + x86_64 | ✅ Universal binary |
+| macOS | Windows | ❌ Not supported |
+| Windows | Windows x86_64 + arm64 | ✅ Supported |
+| Linux | Linux x86_64 | ✅ Supported |
+| Linux | Linux arm64 | ✅ With cross-compilation setup |
+
+Use the matrix strategy in GitHub Actions (shown above) to build each platform on its native runner.
+
+## Version Management
+
+```bash
+# Bump version in both package.json and tauri.conf.json
+npm run tauri build -- --version 1.1.0
+
+# Or update manually:
+# 1. package.json → "version": "1.1.0"
+# 2. src-tauri/tauri.conf.json → "version": "1.1.0"
+# 3. src-tauri/Cargo.toml → version = "1.1.0"
+
+# Create and push the release tag
+git tag v1.1.0
+git push --tags
+```

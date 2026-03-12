@@ -1,0 +1,676 @@
+---
+title: Building Blender Add-ons
+description: Create installable Blender add-ons from scratch — bl_info, operators, panels, typed properties, preferences, and a complete random object scatter tool example.
+sidebar:
+  order: 6
+tags: [python, blender, 3d]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+An add-on is a Python module (or package) that Blender can install, enable, and disable from **Edit → Preferences → Add-ons**. Once enabled it integrates seamlessly with Blender's UI: it can add panels to the sidebar, new entries to the Add menu, custom properties to objects, and entirely new operators accessible via F3 search.
+
+---
+
+## Add-on Anatomy
+
+Every add-on must expose three things at module level:
+
+| Element | Required | Purpose |
+|---|---|---|
+| `bl_info` | ✅ | Metadata Blender reads before importing the module |
+| `register()` | ✅ | Called when the add-on is enabled |
+| `unregister()` | ✅ | Called when the add-on is disabled |
+
+```python
+# my_addon/__init__.py  (or my_addon.py for single-file add-ons)
+
+bl_info = {
+    "name":        "My First Add-on",
+    "author":      "Your Name",
+    "version":     (1, 0, 0),
+    "blender":     (4, 0, 0),          # minimum Blender version
+    "location":    "View3D > Sidebar > My Tools",
+    "description": "A minimal Blender add-on template.",
+    "category":    "Object",
+    "doc_url":     "https://example.com/docs",
+    "tracker_url": "https://github.com/example/issues",
+    "support":     "COMMUNITY",        # OFFICIAL | COMMUNITY | TESTING
+}
+
+
+import bpy
+
+
+class OBJECT_OT_hello(bpy.types.Operator):
+    """Print a greeting to the System Console."""
+    bl_idname = "object.hello_world"
+    bl_label  = "Hello World"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        self.report({'INFO'}, "Hello from my add-on!")
+        print("Hello World operator executed.")
+        return {'FINISHED'}
+
+
+classes = [OBJECT_OT_hello]
+
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+
+
+def unregister():
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+
+
+if __name__ == "__main__":
+    register()
+```
+
+> **UI result:** After enabling the add-on, type "Hello World" into the F3 operator search box and press Enter. The System Console prints `Hello World operator executed.` and the Info bar shows `Hello from my add-on!`.
+
+---
+
+## bl_info Fields
+
+```python
+bl_info = {
+    # Human-readable name shown in Preferences
+    "name":        "Scatter Objects",
+
+    # Author string (can list multiple: "Alice, Bob")
+    "author":      "Alice Dev",
+
+    # Tuple (major, minor, patch) — shown in Preferences
+    "version":     (2, 1, 0),
+
+    # Minimum Blender version required (major, minor, patch)
+    "blender":     (4, 0, 0),
+
+    # Where the panel/menu appears — shown in Preferences
+    "location":    "View3D > Sidebar > Scatter Tab",
+
+    # One-line description shown in Preferences
+    "description": "Procedurally scatter objects across a surface.",
+
+    # Category in Add-ons list (Object, Mesh, Rigging, Render …)
+    "category":    "Object",
+}
+```
+
+:::caution[bl_info Must Be a Literal Dict]
+Blender reads `bl_info` using a static parser before importing the module. You cannot use variables, function calls, or computed values in `bl_info`. Every value must be a literal string, number, tuple, or boolean.
+:::
+
+---
+
+## Operator Classes
+
+Operators are the verbs of Blender. A custom operator can be invoked via F3 search, a panel button, a menu entry, or a keyboard shortcut.
+
+### Minimal Operator
+
+```python
+import bpy
+
+class OBJECT_OT_rename_selected(bpy.types.Operator):
+    """Rename all selected objects with a common prefix."""
+    bl_idname  = "object.rename_selected"   # domain.snake_case
+    bl_label   = "Rename Selected"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    # Typed property — appears in the operator's redo panel (F9)
+    prefix: bpy.props.StringProperty(
+        name="Prefix",
+        default="Asset_",
+        description="String prepended to every selected object's name"
+    )
+
+    @classmethod
+    def poll(cls, context):
+        """Return True only when there are selected objects."""
+        return bool(context.selected_objects)
+
+    def execute(self, context):
+        count = 0
+        for obj in context.selected_objects:
+            obj.name = self.prefix + obj.name
+            count += 1
+        self.report({'INFO'}, f"Renamed {count} object(s) with prefix '{self.prefix}'.")
+        return {'FINISHED'}
+```
+
+> **UI result:** Selecting 3 objects, running the operator via F3 → "Rename Selected", and pressing Enter renames them to `Asset_Cube`, `Asset_Sphere`, `Asset_Light`. The prefix can be changed in the F9 redo panel.
+
+### Operator with invoke() — Show a Dialog
+
+```python
+import bpy
+
+class OBJECT_OT_confirm_delete(bpy.types.Operator):
+    """Delete all selected objects after user confirmation."""
+    bl_idname  = "object.confirm_delete"
+    bl_label   = "Confirm Delete"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.selected_objects)
+
+    def invoke(self, context, event):
+        # Show a confirmation dialog instead of executing immediately
+        return context.window_manager.invoke_confirm(self, event)
+
+    def execute(self, context):
+        count = len(context.selected_objects)
+        bpy.ops.object.delete(use_global=False, confirm=False)
+        self.report({'INFO'}, f"Deleted {count} object(s).")
+        return {'FINISHED'}
+```
+
+> **UI result:** Running the operator opens a small popup: *"OK?" [OK] [Cancel]*. Clicking OK deletes the selected objects; Cancel does nothing.
+
+---
+
+## Panel Classes
+
+Panels attach UI widgets to a specific editor and region.
+
+```python
+import bpy
+
+class VIEW3D_PT_scatter_tools(bpy.types.Panel):
+    """Sidebar panel in the 3D Viewport."""
+    bl_label       = "Scatter Tools"
+    bl_idname      = "VIEW3D_PT_scatter_tools"
+    bl_space_type  = 'VIEW_3D'          # which editor
+    bl_region_type = 'UI'               # N-panel (sidebar)
+    bl_category    = "Scatter"          # tab label
+
+    def draw(self, context):
+        layout = self.layout
+        scene  = context.scene
+        props  = scene.scatter_props    # custom property group
+
+        # Section header
+        layout.label(text="Distribution", icon='FORCE_FORCE')
+
+        # Property widgets
+        col = layout.column(align=True)
+        col.prop(props, "count")
+        col.prop(props, "radius")
+        col.prop(props, "seed")
+
+        layout.separator()
+
+        # Boolean toggle
+        layout.prop(props, "use_gravity", toggle=True)
+
+        layout.separator()
+
+        # Operator buttons
+        row = layout.row(align=True)
+        row.operator("object.scatter_run",   text="Scatter",   icon='PARTICLES')
+        row.operator("object.scatter_clear", text="Clear",     icon='TRASH')
+
+        layout.separator()
+
+        # Disabled button when poll fails
+        op_row = layout.row()
+        op_row.enabled = bool(context.active_object)
+        op_row.operator("object.scatter_align_ground", text="Align to Ground")
+```
+
+> **UI result:** A tab labelled "Scatter" appears in the 3D Viewport sidebar (N key). It shows Count, Radius, and Seed sliders, a toggle button, two action buttons, and a contextually disabled alignment button.
+
+### Layout Methods Reference
+
+```python
+# layout.prop — display a property widget
+layout.prop(data, "property_name")
+layout.prop(data, "property_name", text="Custom Label", icon='MESH_CUBE')
+
+# layout.operator — display a button that runs an operator
+layout.operator("object.my_op", text="Run It", icon='PLAY')
+
+# layout.row — horizontal group
+row = layout.row(align=True)
+row.prop(props, "x")
+row.prop(props, "y")
+
+# layout.column — vertical group
+col = layout.column(align=True)
+col.prop(props, "height")
+col.prop(props, "width")
+
+# layout.split — two (or more) columns with a ratio
+split = layout.split(factor=0.4)
+split.label(text="Name:")
+split.prop(obj, "name", text="")
+
+# layout.box — bordered sub-panel
+box = layout.box()
+box.label(text="Advanced")
+box.prop(props, "seed")
+
+# layout.separator — vertical gap
+layout.separator()
+layout.separator(factor=2.0)
+```
+
+---
+
+## Property Types
+
+Properties defined with `bpy.props.*` are typed, serialised, and automatically rendered as UI widgets.
+
+```python
+import bpy
+
+class ScatterProperties(bpy.types.PropertyGroup):
+    """All properties for the Scatter add-on, stored on the Scene."""
+
+    count: bpy.props.IntProperty(
+        name="Count",
+        description="Number of objects to scatter",
+        default=20,
+        min=1,
+        max=10_000,
+    )
+
+    radius: bpy.props.FloatProperty(
+        name="Radius",
+        description="Scatter radius in metres",
+        default=5.0,
+        min=0.1,
+        max=1000.0,
+        unit='LENGTH',
+        step=10,
+        precision=2,
+    )
+
+    seed: bpy.props.IntProperty(
+        name="Random Seed",
+        description="Change to get a different distribution",
+        default=42,
+    )
+
+    use_gravity: bpy.props.BoolProperty(
+        name="Align to Ground",
+        description="Cast each instance down to the ground surface",
+        default=True,
+    )
+
+    scale_min: bpy.props.FloatProperty(name="Min Scale", default=0.8, min=0.01)
+    scale_max: bpy.props.FloatProperty(name="Max Scale", default=1.2, min=0.01)
+
+    axis: bpy.props.EnumProperty(
+        name="Scatter Axis",
+        description="Plane to scatter on",
+        items=[
+            ('XY', "XY Plane", "Scatter on the horizontal plane", 'AXIS_TOP',  0),
+            ('XZ', "XZ Plane", "Scatter on the front plane",      'AXIS_FRONT', 1),
+            ('YZ', "YZ Plane", "Scatter on the side plane",       'AXIS_SIDE',  2),
+        ],
+        default='XY',
+    )
+
+    source_object: bpy.props.StringProperty(
+        name="Source Object",
+        description="Name of the object to duplicate and scatter",
+        default="",
+    )
+```
+
+---
+
+## Add-on Preferences
+
+Add-on preferences let users configure global settings that persist between sessions.
+
+```python
+import bpy
+
+class ScatterAddonPreferences(bpy.types.AddonPreferences):
+    bl_idname = __name__   # must match the add-on's module name
+
+    default_count: bpy.props.IntProperty(
+        name="Default Count",
+        description="Starting count for new scatter operations",
+        default=20,
+        min=1,
+        max=1000,
+    )
+
+    auto_apply_modifiers: bpy.props.BoolProperty(
+        name="Auto-Apply Modifiers",
+        description="Apply all modifiers on scattered instances automatically",
+        default=False,
+    )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "default_count")
+        layout.prop(self, "auto_apply_modifiers")
+
+
+# Access preferences at runtime
+def get_prefs(context) -> ScatterAddonPreferences:
+    return context.preferences.addons[__name__].preferences
+```
+
+> **UI result:** The add-on's entry in **Edit → Preferences → Add-ons** expands to show a "Default Count" number field and an "Auto-Apply Modifiers" checkbox.
+
+---
+
+## Complete Example: Random Object Scatter Add-on
+
+A full, working add-on that duplicates a chosen object and randomly places instances across a circular area.
+
+```python
+# scatter_tool.py — install via Edit > Preferences > Add-ons > Install
+
+bl_info = {
+    "name":        "Scatter Tool",
+    "author":      "Blender Python Docs",
+    "version":     (1, 2, 0),
+    "blender":     (4, 0, 0),
+    "location":    "View3D > Sidebar > Scatter",
+    "description": "Randomly scatter duplicates of an object in a radius.",
+    "category":    "Object",
+}
+
+import bpy
+import random
+import math
+
+
+# ── Property Group ────────────────────────────────────────────────
+
+class SCATTER_PG_settings(bpy.types.PropertyGroup):
+    source_object: bpy.props.StringProperty(
+        name="Source Object",
+        description="Object to duplicate and scatter",
+    )
+    count: bpy.props.IntProperty(
+        name="Count", default=30, min=1, max=5000
+    )
+    radius: bpy.props.FloatProperty(
+        name="Radius", default=5.0, min=0.1, unit='LENGTH'
+    )
+    seed: bpy.props.IntProperty(
+        name="Seed", default=1
+    )
+    scale_min: bpy.props.FloatProperty(
+        name="Min Scale", default=0.8, min=0.01, max=10.0
+    )
+    scale_max: bpy.props.FloatProperty(
+        name="Max Scale", default=1.2, min=0.01, max=10.0
+    )
+    random_rotation: bpy.props.BoolProperty(
+        name="Random Z Rotation", default=True
+    )
+    collection_name: bpy.props.StringProperty(
+        name="Collection", default="Scattered"
+    )
+
+
+# ── Scatter Operator ──────────────────────────────────────────────
+
+class SCATTER_OT_run(bpy.types.Operator):
+    """Scatter duplicates of the source object across a circular area."""
+    bl_idname  = "scatter.run"
+    bl_label   = "Scatter Objects"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.scatter_settings
+        return bool(props.source_object and
+                    bpy.data.objects.get(props.source_object))
+
+    def execute(self, context):
+        props = context.scene.scatter_settings
+        source = bpy.data.objects.get(props.source_object)
+
+        if source is None:
+            self.report({'ERROR'}, f"Object '{props.source_object}' not found.")
+            return {'CANCELLED'}
+
+        # Ensure the output collection exists
+        col_name = props.collection_name or "Scattered"
+        col = bpy.data.collections.get(col_name)
+        if col is None:
+            col = bpy.data.collections.new(col_name)
+            context.scene.collection.children.link(col)
+
+        rng = random.Random(props.seed)
+        placed = 0
+
+        for i in range(props.count):
+            # Random point in a circle (using rejection sampling)
+            while True:
+                rx = rng.uniform(-props.radius, props.radius)
+                ry = rng.uniform(-props.radius, props.radius)
+                if math.sqrt(rx**2 + ry**2) <= props.radius:
+                    break
+
+            # Duplicate the source object (linked = shares mesh data)
+            new_obj = source.copy()
+            new_obj.data = source.data   # share mesh data-block
+
+            # Randomise transform
+            scale = rng.uniform(props.scale_min, props.scale_max)
+            new_obj.location  = (rx, ry, 0.0)
+            new_obj.scale     = (scale, scale, scale)
+            if props.random_rotation:
+                new_obj.rotation_euler.z = rng.uniform(0, 2 * math.pi)
+
+            col.objects.link(new_obj)
+            placed += 1
+
+        self.report(
+            {'INFO'},
+            f"Scattered {placed} instances of '{source.name}' into '{col_name}'."
+        )
+        print(f"[Scatter] {placed} instances placed. Seed={props.seed}")
+        return {'FINISHED'}
+
+
+# ── Clear Operator ────────────────────────────────────────────────
+
+class SCATTER_OT_clear(bpy.types.Operator):
+    """Remove all objects in the Scatter collection."""
+    bl_idname  = "scatter.clear"
+    bl_label   = "Clear Scatter"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        props   = context.scene.scatter_settings
+        col     = bpy.data.collections.get(props.collection_name)
+
+        if col is None:
+            self.report({'WARNING'}, "Scatter collection not found — nothing to clear.")
+            return {'CANCELLED'}
+
+        count = len(col.objects)
+        for obj in list(col.objects):
+            bpy.data.objects.remove(obj, do_unlink=True)
+
+        self.report({'INFO'}, f"Cleared {count} scattered object(s).")
+        print(f"[Scatter] Cleared {count} instances.")
+        return {'FINISHED'}
+
+
+# ── Panel ─────────────────────────────────────────────────────────
+
+class SCATTER_PT_main(bpy.types.Panel):
+    bl_label       = "Scatter Tool"
+    bl_idname      = "SCATTER_PT_main"
+    bl_space_type  = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category    = "Scatter"
+
+    def draw(self, context):
+        layout = self.layout
+        props  = context.scene.scatter_settings
+
+        # Source object picker
+        layout.label(text="Source Object", icon='OBJECT_DATA')
+        row = layout.row(align=True)
+        row.prop_search(props, "source_object", bpy.data, "objects", text="")
+
+        layout.separator()
+
+        # Distribution settings
+        layout.label(text="Distribution", icon='FORCE_FORCE')
+        col = layout.column(align=True)
+        col.prop(props, "count")
+        col.prop(props, "radius")
+        col.prop(props, "seed")
+
+        layout.separator()
+
+        # Scale range
+        layout.label(text="Scale Range", icon='FULLSCREEN_ENTER')
+        row = layout.row(align=True)
+        row.prop(props, "scale_min", text="Min")
+        row.prop(props, "scale_max", text="Max")
+
+        # Options
+        layout.prop(props, "random_rotation")
+        layout.prop(props, "collection_name")
+
+        layout.separator()
+
+        # Action buttons
+        row = layout.row(align=True)
+        row.scale_y = 1.5
+        sub = row.row(align=True)
+        sub.enabled = bool(
+            props.source_object and bpy.data.objects.get(props.source_object)
+        )
+        sub.operator("scatter.run",   text="Scatter", icon='PARTICLES')
+        row.operator("scatter.clear", text="Clear",   icon='TRASH')
+
+
+# ── Registration ──────────────────────────────────────────────────
+
+classes = [
+    SCATTER_PG_settings,
+    SCATTER_OT_run,
+    SCATTER_OT_clear,
+    SCATTER_PT_main,
+]
+
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+
+    # Attach the property group to the Scene type
+    bpy.types.Scene.scatter_settings = bpy.props.PointerProperty(
+        type=SCATTER_PG_settings
+    )
+    print("[Scatter Tool] Registered.")
+
+
+def unregister():
+    del bpy.types.Scene.scatter_settings
+
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+    print("[Scatter Tool] Unregistered.")
+
+
+if __name__ == "__main__":
+    register()
+```
+
+> **Console output (after running Scatter with a Cube source, count=30):**
+> ```
+> [Scatter Tool] Registered.
+> [Scatter] 30 instances placed. Seed=1
+> ```
+>
+> **Viewport result:** 30 cubes of varying scale and Z rotation are distributed randomly within a 5 m radius circle, all grouped in a collection called "Scattered" visible in the Outliner.
+
+---
+
+## Packaging and Installing an Add-on
+
+### Single-File Add-on
+
+Save your script as `scatter_tool.py`. In Blender: **Edit → Preferences → Add-ons → Install** → select the file → enable the checkbox.
+
+### Multi-File Add-on (Package)
+
+```
+scatter_tool/           ← zip this folder
+├── __init__.py         ← bl_info, register(), unregister()
+├── operators.py        ← Operator classes
+├── panels.py           ← Panel classes
+├── properties.py       ← PropertyGroup classes
+└── utils.py            ← Helper functions
+```
+
+In `__init__.py`, import from the submodules:
+
+```python
+from . import operators, panels, properties
+
+def register():
+    properties.register()
+    operators.register()
+    panels.register()
+
+def unregister():
+    panels.unregister()
+    operators.unregister()
+    properties.unregister()
+```
+
+<Steps>
+1. Select the `scatter_tool/` folder and compress it to `scatter_tool.zip`.
+2. Open **Edit → Preferences → Add-ons → Install**.
+3. Navigate to the `.zip` file and click **Install Add-on**.
+4. Enable the add-on by ticking its checkbox.
+5. The "Scatter" tab now appears in the 3D Viewport sidebar (press N to open).
+</Steps>
+
+:::tip[Hot-Reload During Development]
+While iterating on your add-on, install the **Reload Scripts** operator: press F3 and search "Reload Scripts" (or bind it to F8). This re-imports all Python files without restarting Blender, making the edit-test cycle fast.
+:::
+
+---
+
+## Operator Return Values
+
+| Return value | Meaning |
+|---|---|
+| `{'FINISHED'}` | Operator completed successfully; action added to undo history |
+| `{'CANCELLED'}` | Operator was cancelled; no undo entry created |
+| `{'RUNNING_MODAL'}` | Operator is in modal (interactive) mode; still active |
+| `{'PASS_THROUGH'}` | Event passed to the next handler (modal only) |
+
+---
+
+## Naming Conventions
+
+Blender enforces strict naming conventions for class `bl_idname`:
+
+| Class type | `bl_idname` pattern | Example |
+|---|---|---|
+| Operator | `DOMAIN_OT_name` | `object.my_op` |
+| Panel | `CONTEXT_PT_name` | `VIEW3D_PT_my_panel` |
+| Menu | `CONTEXT_MT_name` | `VIEW3D_MT_my_menu` |
+| PropertyGroup | `ADDON_PG_name` | `SCATTER_PG_settings` |
+| AddonPreferences | module name | `scatter_tool` |
+
+:::caution[Class ID Conflicts]
+If your `bl_idname` clashes with a built-in Blender operator, your operator silently replaces it for as long as your add-on is enabled. Always use a unique prefix (your add-on name or initials) to avoid collisions.
+:::

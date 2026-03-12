@@ -1,0 +1,616 @@
+---
+title: Templates in Flask
+description: Master Jinja2 templating, template inheritance, macros, filters, flash messages, static files, and WTForms integration in Flask.
+sidebar:
+  order: 4
+tags: [python, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Flask uses **Jinja2** as its default template engine. Templates separate presentation from business logic, making your code easier to maintain, test, and hand off to designers. Flask automatically looks for templates in a `templates/` folder inside your application package.
+
+## render_template()
+
+Pass a template filename and keyword arguments to render it:
+
+```python
+from flask import Flask, render_template
+
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/users/<int:user_id>')
+def user_profile(user_id: int):
+    user = {'id': user_id, 'name': 'Alice', 'email': 'alice@example.com'}
+    posts = [
+        {'title': 'First Post', 'body': 'Hello world!'},
+        {'title': 'Second Post', 'body': 'Flask is great.'},
+    ]
+    return render_template(
+        'user/profile.html',
+        user=user,
+        posts=posts,
+        page_title=f'Profile — {user["name"]}',
+    )
+```
+
+:::tip[Template Folder Location]
+By default, Flask looks in `<app_root>/templates/`. When using Blueprints, each blueprint can have its own `templates/` folder by passing `template_folder='templates'` to the `Blueprint()` constructor.
+:::
+
+## Jinja2 Syntax Basics
+
+Jinja2 uses three delimiter types:
+
+| Delimiter | Purpose | Example |
+|-----------|---------|---------|
+| `{{ ... }}` | Output a variable or expression | `{{ user.name }}` |
+| `{% ... %}` | Control flow statement | `{% if user %}` |
+| `{# ... #}` | Comment (not rendered) | `{# TODO: add pagination #}` |
+
+### Variables
+
+```jinja
+{# templates/user/profile.html #}
+<h1>{{ user.name }}</h1>
+<p>Email: {{ user.email }}</p>
+<p>Member since: {{ user.created_at }}</p>
+
+{# Access dict keys or object attributes the same way #}
+{{ user['name'] }}  {# dict-style #}
+{{ user.name }}     {# attribute-style (Jinja2 tries both) #}
+
+{# Nested access #}
+{{ user.address.city }}
+{{ posts[0].title }}
+```
+
+### Control Flow
+
+```jinja
+{# Conditional #}
+{% if user.is_admin %}
+  <span class="badge">Admin</span>
+{% elif user.is_moderator %}
+  <span class="badge">Moderator</span>
+{% else %}
+  <span class="badge">Member</span>
+{% endif %}
+
+{# Loop over a list #}
+{% for post in posts %}
+  <article>
+    <h2>{{ post.title }}</h2>
+    <p>{{ post.body }}</p>
+  </article>
+{% else %}
+  {# Rendered when posts is empty #}
+  <p>No posts yet.</p>
+{% endfor %}
+
+{# Loop with index — loop.index (1-based), loop.index0 (0-based) #}
+{% for item in items %}
+  <li class="{% if loop.first %}first{% endif %} {% if loop.last %}last{% endif %}">
+    {{ loop.index }}. {{ item.name }}
+  </li>
+{% endfor %}
+```
+
+### Loop Variables
+
+| Variable | Description |
+|----------|-------------|
+| `loop.index` | Current iteration (1-based) |
+| `loop.index0` | Current iteration (0-based) |
+| `loop.revindex` | Iterations from end (1-based) |
+| `loop.first` | True on first iteration |
+| `loop.last` | True on last iteration |
+| `loop.length` | Total number of items |
+| `loop.depth` | Nesting depth (nested loops) |
+| `loop.changed(val)` | True if value changed since last iteration |
+
+## Template Inheritance
+
+Template inheritance is the most powerful Jinja2 feature — it prevents repetition by letting child templates override blocks in a base template.
+
+```html
+{# templates/base.html #}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}My Flask App{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}" />
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <nav>
+    <a href="{{ url_for('main.index') }}">Home</a>
+    {% if current_user.is_authenticated %}
+      <a href="{{ url_for('auth.logout') }}">Logout ({{ current_user.username }})</a>
+    {% else %}
+      <a href="{{ url_for('auth.login') }}">Login</a>
+    {% endif %}
+  </nav>
+
+  <main id="content">
+    {# Flash messages displayed on every page #}
+    {% with messages = get_flashed_messages(with_categories=True) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="alert alert-{{ category }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer>
+    <p>&copy; 2024 My Flask App</p>
+  </footer>
+
+  {% block scripts %}{% endblock %}
+</body>
+</html>
+```
+
+A child template extends the base and fills in the blocks:
+
+```html
+{# templates/user/profile.html #}
+{% extends "base.html" %}
+
+{% block title %}{{ user.name }} — Profile{% endblock %}
+
+{% block head %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/profile.css') }}" />
+{% endblock %}
+
+{% block content %}
+  <div class="profile-header">
+    <h1>{{ user.name }}</h1>
+    <p class="email">{{ user.email }}</p>
+  </div>
+
+  <section class="posts">
+    <h2>Recent Posts</h2>
+    {% for post in posts %}
+      <article class="post-card">
+        <h3>{{ post.title }}</h3>
+        <p>{{ post.body }}</p>
+      </article>
+    {% else %}
+      <p>No posts yet.</p>
+    {% endfor %}
+  </section>
+{% endblock %}
+
+{% block scripts %}
+  <script src="{{ url_for('static', filename='js/profile.js') }}"></script>
+{% endblock %}
+```
+
+:::tip[super() in Blocks]
+Call `{{ super() }}` inside a block to render the parent block's content before adding your own. This is useful for `{% block head %}` when you want to keep the parent's `<link>` tags and add more.
+:::
+
+## Macros
+
+Macros are reusable template functions. Define them once and call them like functions:
+
+```jinja
+{# templates/macros/forms.html #}
+{% macro render_field(field, label_class='', input_class='') %}
+  <div class="form-group {% if field.errors %}has-error{% endif %}">
+    {{ field.label(class=label_class) }}
+    {{ field(class=input_class, **kwargs) }}
+    {% if field.errors %}
+      {% for error in field.errors %}
+        <span class="help-block text-danger">{{ error }}</span>
+      {% endfor %}
+    {% endif %}
+  </div>
+{% endmacro %}
+
+{% macro render_pagination(pagination, endpoint) %}
+  {% if pagination.pages > 1 %}
+    <nav class="pagination">
+      {% if pagination.has_prev %}
+        <a href="{{ url_for(endpoint, page=pagination.prev_num) }}">&laquo; Prev</a>
+      {% endif %}
+
+      {% for page_num in pagination.iter_pages(left_edge=2, right_edge=2, left_current=3, right_current=3) %}
+        {% if page_num %}
+          <a href="{{ url_for(endpoint, page=page_num) }}"
+             class="{{ 'active' if page_num == pagination.page }}">
+            {{ page_num }}
+          </a>
+        {% else %}
+          <span>&hellip;</span>
+        {% endif %}
+      {% endfor %}
+
+      {% if pagination.has_next %}
+        <a href="{{ url_for(endpoint, page=pagination.next_num) }}">Next &raquo;</a>
+      {% endif %}
+    </nav>
+  {% endif %}
+{% endmacro %}
+```
+
+Import and use macros in another template:
+
+```jinja
+{# templates/main/index.html #}
+{% extends "base.html" %}
+{% from "macros/forms.html" import render_field, render_pagination %}
+
+{% block content %}
+  <form method="POST">
+    {{ form.hidden_tag() }}
+    {{ render_field(form.username, input_class='form-control') }}
+    {{ render_field(form.email, input_class='form-control') }}
+    {{ form.submit(class='btn btn-primary') }}
+  </form>
+
+  {{ render_pagination(pagination, 'main.index') }}
+{% endblock %}
+```
+
+## Filters
+
+Filters transform values using the pipe `|` operator.
+
+### Built-in Filters
+
+```jinja
+{# String filters #}
+{{ 'hello world' | upper }}           {# HELLO WORLD #}
+{{ 'HELLO WORLD' | lower }}           {# hello world #}
+{{ 'hello world' | title }}           {# Hello World #}
+{{ 'hello world' | capitalize }}      {# Hello world #}
+{{ '  hello  ' | trim }}              {# hello #}
+{{ 'hello world' | replace('world', 'flask') }}  {# hello flask #}
+
+{# Truncation #}
+{{ long_text | truncate(50) }}         {# Truncates to 50 chars with '...' #}
+{{ long_text | truncate(50, killwords=False) }}  {# Truncate at word boundary #}
+
+{# Numbers #}
+{{ 3.14159 | round(2) }}              {# 3.14 #}
+{{ 1000000 | int }}                   {# 1000000 #}
+
+{# Lists #}
+{{ [3, 1, 2] | sort }}               {# [1, 2, 3] #}
+{{ [3, 1, 2] | sort(reverse=True) }} {# [3, 2, 1] #}
+{{ ['a', 'b', 'c'] | join(', ') }}   {# a, b, c #}
+{{ items | length }}                  {# count of items #}
+{{ items | first }}                   {# first element #}
+{{ items | last }}                    {# last element #}
+
+{# Formatting #}
+{{ user | tojson }}                   {# Serialize to JSON #}
+{{ timestamp | datetimeformat }}      {# Custom filter (see below) #}
+```
+
+### Custom Filters
+
+Register custom filters in your application factory:
+
+```python
+# app/filters.py
+from datetime import datetime
+import humanize
+
+
+def datetimeformat(value: datetime, fmt: str = '%B %d, %Y') -> str:
+    """Format a datetime object to a human-readable string."""
+    if value is None:
+        return ''
+    return value.strftime(fmt)
+
+
+def humanize_delta(value: datetime) -> str:
+    """Turn a datetime into a relative string like '2 hours ago'."""
+    return humanize.naturaltime(value)
+
+
+def currency(value: float, symbol: str = '$') -> str:
+    """Format a number as currency."""
+    return f'{symbol}{value:,.2f}'
+```
+
+```python
+# app/__init__.py
+from app.filters import datetimeformat, humanize_delta, currency
+
+def create_app(config_name='default'):
+    app = Flask(__name__)
+    # ...
+
+    # Register template filters
+    app.jinja_env.filters['datetimeformat'] = datetimeformat
+    app.jinja_env.filters['humanize_delta'] = humanize_delta
+    app.jinja_env.filters['currency'] = currency
+
+    return app
+```
+
+Usage:
+
+```jinja
+<p>Published: {{ post.created_at | datetimeformat }}</p>
+<p>{{ post.created_at | humanize_delta }}</p>  {# "2 hours ago" #}
+<p>Price: {{ product.price | currency }}</p>   {# "$19.99" #}
+```
+
+## Escaping and the `safe` Filter
+
+Jinja2 **auto-escapes** all variables in `.html` files by default. This prevents XSS attacks:
+
+```jinja
+{# Auto-escaped — safe #}
+{{ user_input }}         {# <script> becomes &lt;script&gt; #}
+
+{# Mark explicitly safe — only use for trusted HTML you generated #}
+{{ article.html_body | safe }}
+
+{# Check if a value has been marked safe #}
+{% if article.html_body is defined %}
+  {{ article.html_body | safe }}
+{% endif %}
+```
+
+:::caution[Never Use `safe` on User Input]
+The `| safe` filter disables escaping. Only apply it to HTML content you generated yourself (e.g., from a trusted Markdown renderer). Never use it on raw user input or database strings you don't control — this introduces XSS vulnerabilities.
+:::
+
+## url_for() in Templates
+
+Always use `url_for()` to generate URLs in templates — never hardcode paths:
+
+```jinja
+{# Link to a view function #}
+<a href="{{ url_for('main.index') }}">Home</a>
+<a href="{{ url_for('user_profile', user_id=user.id) }}">View Profile</a>
+
+{# Static files (CSS, JS, images) #}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}" />
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+<img src="{{ url_for('static', filename='img/logo.png') }}" alt="Logo" />
+
+{# With query parameters #}
+<a href="{{ url_for('main.index', page=2, q='flask') }}">Page 2</a>
+{# → /?page=2&q=flask #}
+
+{# External / absolute URL #}
+<meta property="og:url" content="{{ url_for('main.index', _external=True) }}" />
+```
+
+## Flash Messages
+
+Flash messages are one-time messages stored in the session and displayed on the next request:
+
+```python
+# In a view function
+from flask import flash, redirect, url_for
+
+@app.route('/login', methods=['POST'])
+def login():
+    if authenticated:
+        flash('Welcome back!', 'success')
+        return redirect(url_for('main.dashboard'))
+    else:
+        flash('Invalid credentials. Please try again.', 'danger')
+        return redirect(url_for('auth.login'))
+```
+
+Display in `base.html`:
+
+```html
+{% with messages = get_flashed_messages(with_categories=True) %}
+  {% if messages %}
+    <div class="flash-container">
+      {% for category, message in messages %}
+        <div class="alert alert-{{ category }}" role="alert">
+          {{ message }}
+          <button type="button" class="close" data-dismiss="alert">&times;</button>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+{% endwith %}
+```
+
+Flash categories map to Bootstrap alert classes: `success`, `danger`, `warning`, `info`.
+
+## WTForms Integration
+
+Flask-WTF wraps WTForms with CSRF protection and Flask integration:
+
+```python
+# app/auth/forms.py
+from flask_wtf import FlaskForm
+from wtforms import StringField, PasswordField, BooleanField, SubmitField
+from wtforms.validators import DataRequired, Email, Length, EqualTo, ValidationError
+from app.models.user import User
+
+
+class RegistrationForm(FlaskForm):
+    username = StringField(
+        'Username',
+        validators=[DataRequired(), Length(min=3, max=64)],
+    )
+    email = StringField(
+        'Email',
+        validators=[DataRequired(), Email(), Length(max=120)],
+    )
+    password = PasswordField(
+        'Password',
+        validators=[DataRequired(), Length(min=8)],
+    )
+    password2 = PasswordField(
+        'Confirm Password',
+        validators=[DataRequired(), EqualTo('password', message='Passwords must match.')],
+    )
+    submit = SubmitField('Create Account')
+
+    def validate_username(self, field):
+        """Custom validator — called automatically by WTForms."""
+        if User.query.filter_by(username=field.data).first():
+            raise ValidationError('Username already taken.')
+
+    def validate_email(self, field):
+        if User.query.filter_by(email=field.data.lower()).first():
+            raise ValidationError('Email already registered.')
+```
+
+View using the form:
+
+```python
+# app/auth/routes.py
+from flask import render_template, redirect, url_for, flash
+from app.auth import auth
+from app.auth.forms import RegistrationForm
+from app.extensions import db
+from app.models.user import User
+
+
+@auth.route('/register', methods=['GET', 'POST'])
+def register():
+    form = RegistrationForm()
+    if form.validate_on_submit():
+        user = User(
+            username=form.username.data,
+            email=form.email.data.lower(),
+        )
+        user.set_password(form.password.data)
+        db.session.add(user)
+        db.session.commit()
+        flash('Account created! Please log in.', 'success')
+        return redirect(url_for('auth.login'))
+    return render_template('auth/register.html', form=form)
+```
+
+Form template using macros:
+
+```html
+{# templates/auth/register.html #}
+{% extends "base.html" %}
+{% from "macros/forms.html" import render_field %}
+
+{% block title %}Register{% endblock %}
+
+{% block content %}
+  <div class="auth-card">
+    <h2>Create an Account</h2>
+    <form method="POST" novalidate>
+      {{ form.hidden_tag() }}  {# CSRF token — required! #}
+
+      {{ render_field(form.username, placeholder='Choose a username') }}
+      {{ render_field(form.email, placeholder='your@email.com') }}
+      {{ render_field(form.password, placeholder='At least 8 characters') }}
+      {{ render_field(form.password2, placeholder='Repeat password') }}
+
+      {{ form.submit(class='btn btn-primary btn-block') }}
+    </form>
+    <p>Already have an account? <a href="{{ url_for('auth.login') }}">Log in</a></p>
+  </div>
+{% endblock %}
+```
+
+## Context Processors
+
+Context processors inject variables into **every template** automatically without passing them manually to `render_template()`:
+
+```python
+# app/__init__.py (inside create_app)
+from datetime import datetime
+from app.models.category import Category
+
+@app.context_processor
+def inject_globals():
+    """Make these variables available in every template."""
+    return {
+        'current_year': datetime.utcnow().year,
+        'app_name': app.config.get('APP_NAME', 'My Flask App'),
+        'categories': Category.query.order_by(Category.name).all(),
+    }
+
+@app.context_processor
+def inject_user_helpers():
+    """Inject helper functions into templates."""
+    def format_date(dt, fmt='%b %d, %Y'):
+        return dt.strftime(fmt) if dt else ''
+
+    return {'format_date': format_date}
+```
+
+Now every template can use `{{ current_year }}`, `{{ app_name }}`, `{{ categories }}`, and `{{ format_date(user.created_at) }}` without any changes to view functions.
+
+## Static Files
+
+Flask serves files from the `static/` folder at the `/static/` URL prefix automatically:
+
+```
+app/
+└── static/
+    ├── css/
+    │   ├── main.css
+    │   └── profile.css
+    ├── js/
+    │   ├── app.js
+    │   └── vendor/
+    │       └── htmx.min.js
+    └── img/
+        ├── logo.png
+        └── favicon.ico
+```
+
+Reference them with `url_for('static', filename=...)`:
+
+```html
+<link rel="icon" href="{{ url_for('static', filename='img/favicon.ico') }}" />
+<link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}" />
+<script src="{{ url_for('static', filename='js/vendor/htmx.min.js') }}" defer></script>
+```
+
+:::tip[Cache Busting in Production]
+`url_for('static', filename='css/main.css')` generates `/static/css/main.css`. In production, set up WhiteNoise or your CDN to add `Cache-Control: immutable` headers and use fingerprinted filenames to bust browser caches on updates.
+:::
+
+## Template Includes
+
+Use `{% include %}` to embed one template inside another without inheritance:
+
+```html
+{# templates/base.html #}
+{% include "partials/_navbar.html" %}
+{% include "partials/_flash.html" %}
+
+{% block content %}{% endblock %}
+
+{% include "partials/_footer.html" %}
+```
+
+```html
+{# templates/partials/_navbar.html #}
+<nav class="navbar">
+  <a class="brand" href="{{ url_for('main.index') }}">{{ app_name }}</a>
+  <ul>
+    <li><a href="{{ url_for('main.index') }}">Home</a></li>
+    <li><a href="{{ url_for('main.about') }}">About</a></li>
+    {% if current_user.is_authenticated %}
+      <li><a href="{{ url_for('auth.logout') }}">Logout</a></li>
+    {% else %}
+      <li><a href="{{ url_for('auth.login') }}">Login</a></li>
+    {% endif %}
+  </ul>
+</nav>
+```

@@ -1,0 +1,425 @@
+---
+title: Getting Started with Electron
+description: Bootstrap a production-ready Electron app with Electron Forge, Vite, and TypeScript in minutes.
+sidebar:
+  order: 2
+tags: [javascript, desktop]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+This guide walks you through creating a new Electron application from scratch using **Electron Forge** (the official scaffolding tool) with the **Vite + TypeScript** template — the recommended starting point for modern Electron development.
+
+## Prerequisites
+
+- **Node.js** 18 or later (`node --version`)
+- **npm** 9+ or **yarn** / **pnpm**
+- **Git** (optional but recommended)
+
+## Create a New Project
+
+<Steps>
+
+1. **Scaffold the project**
+
+   ```bash
+   npm create electron-app@latest my-electron-app -- --template=vite-typescript
+   ```
+
+   Electron Forge will create the project, install dependencies, and set up TypeScript, Vite, and all required configuration files.
+
+2. **Enter the project directory**
+
+   ```bash
+   cd my-electron-app
+   ```
+
+3. **Start the development server**
+
+   ```bash
+   npm start
+   ```
+
+   This launches both the Vite dev server for the renderer and the Electron main process. Hot reload is enabled for the renderer; changes to `src/main.ts` or `src/preload.ts` require a manual restart.
+
+</Steps>
+
+:::tip[Available Templates]
+Electron Forge offers several official templates:
+- `vite` — Vite bundler, plain JS
+- `vite-typescript` — Vite bundler, TypeScript (recommended)
+- `webpack` — Webpack bundler, plain JS
+- `webpack-typescript` — Webpack bundler, TypeScript
+:::
+
+## Project Structure
+
+```
+my-electron-app/
+├── src/
+│   ├── main.ts          # Main process entry point
+│   ├── preload.ts       # Preload script (bridge between main and renderer)
+│   └── renderer.ts      # Renderer process entry point
+├── index.html           # HTML shell for the renderer
+├── forge.config.ts      # Electron Forge configuration
+├── package.json
+├── tsconfig.json
+└── vite.*.config.ts     # Vite configs for main, preload, renderer
+```
+
+### `src/main.ts` — Main Process Entry
+
+The main process file is the heart of your application. It creates windows and handles OS-level events:
+
+```typescript
+import { app, BrowserWindow } from 'electron';
+import path from 'node:path';
+
+// Handle creating/removing shortcuts on Windows when installing/uninstalling.
+if (require('electron-squirrel-startup')) {
+  app.quit();
+}
+
+const createWindow = (): void => {
+  const mainWindow = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      sandbox: true,
+      nodeIntegration: false,
+    },
+  });
+
+  // In development, load from Vite dev server
+  if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
+    mainWindow.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
+  } else {
+    mainWindow.loadFile(
+      path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`)
+    );
+  }
+};
+
+app.on('ready', createWindow);
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') {
+    app.quit();
+  }
+});
+
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow();
+  }
+});
+```
+
+### `src/preload.ts` — The Bridge
+
+The preload script runs in an isolated context with access to both Node.js APIs and the DOM. It uses `contextBridge` to safely expose specific functionality to the renderer:
+
+```typescript
+import { contextBridge, ipcRenderer } from 'electron';
+
+contextBridge.exposeInMainWorld('electronAPI', {
+  // Expose only what the renderer needs
+  openFile: () => ipcRenderer.invoke('dialog:openFile'),
+  saveFile: (content: string) => ipcRenderer.invoke('dialog:saveFile', content),
+  onUpdateAvailable: (callback: (version: string) => void) => {
+    ipcRenderer.on('update-available', (_event, version) => callback(version));
+  },
+  removeAllListeners: (channel: string) => {
+    ipcRenderer.removeAllListeners(channel);
+  },
+});
+```
+
+### `src/renderer.ts` — Renderer Entry
+
+The renderer is a standard web application entry point. With Vite, it imports your frontend framework:
+
+```typescript
+// With React
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+import './index.css';
+
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+```
+
+## `package.json` Configuration
+
+The `main` field must point to the compiled main process entry:
+
+```json
+{
+  "name": "my-electron-app",
+  "version": "1.0.0",
+  "description": "My Electron application",
+  "main": ".vite/build/main.js",
+  "scripts": {
+    "start": "electron-forge start",
+    "package": "electron-forge package",
+    "make": "electron-forge make",
+    "publish": "electron-forge publish",
+    "lint": "eslint --ext .ts,.tsx ."
+  }
+}
+```
+
+## `forge.config.ts` Overview
+
+```typescript
+import type { ForgeConfig } from '@electron-forge/shared-types';
+import { MakerSquirrel } from '@electron-forge/maker-squirrel';
+import { MakerZIP } from '@electron-forge/maker-zip';
+import { MakerDeb } from '@electron-forge/maker-deb';
+import { MakerRpm } from '@electron-forge/maker-rpm';
+import { VitePlugin } from '@electron-forge/plugin-vite';
+import { FusesPlugin } from '@electron-forge/plugin-fuses';
+import { FuseV1Options, FuseVersion } from '@electron/fuses';
+
+const config: ForgeConfig = {
+  packagerConfig: {
+    asar: true,
+    icon: './assets/icon',
+  },
+  rebuildConfig: {},
+  makers: [
+    new MakerSquirrel({}),
+    new MakerZIP({}, ['darwin']),
+    new MakerDeb({}),
+    new MakerRpm({}),
+  ],
+  plugins: [
+    new VitePlugin({
+      build: [
+        { entry: 'src/main.ts', config: 'vite.main.config.ts', target: 'main' },
+        { entry: 'src/preload.ts', config: 'vite.preload.config.ts', target: 'preload' },
+      ],
+      renderer: [
+        { name: 'main_window', config: 'vite.renderer.config.ts' },
+      ],
+    }),
+    new FusesPlugin({
+      version: FuseVersion.V1,
+      [FuseV1Options.RunAsNode]: false,
+      [FuseV1Options.EnableCookieEncryption]: true,
+      [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
+      [FuseV1Options.EnableNodeCliInspectArguments]: false,
+      [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]: true,
+      [FuseV1Options.OnlyLoadAppFromAsar]: true,
+    }),
+  ],
+};
+
+export default config;
+```
+
+## BrowserWindow Options
+
+`BrowserWindow` is the main API for creating windows. Key `webPreferences` options affect security:
+
+```typescript
+const win = new BrowserWindow({
+  // Window dimensions
+  width: 1200,
+  height: 800,
+  minWidth: 800,
+  minHeight: 600,
+
+  // Window appearance
+  title: 'My App',
+  icon: path.join(__dirname, 'assets/icon.png'),
+  show: false, // Don't show until ready-to-show
+
+  // macOS-specific
+  titleBarStyle: 'hiddenInset', // or 'hidden', 'customButtonsOnHover'
+  vibrancy: 'under-window',    // macOS frosted glass effect
+
+  // Security-critical webPreferences
+  webPreferences: {
+    preload: path.join(__dirname, 'preload.js'),
+    contextIsolation: true,   // REQUIRED — isolates preload from renderer
+    sandbox: true,            // RECOMMENDED — OS-level sandboxing
+    nodeIntegration: false,   // NEVER set to true
+    webSecurity: true,        // NEVER set to false
+    allowRunningInsecureContent: false,
+  },
+});
+
+// Show window only after content is ready (prevents white flash)
+win.once('ready-to-show', () => {
+  win.show();
+  win.focus();
+});
+```
+
+## Loading Content
+
+<Tabs>
+  <TabItem label="Local File">
+    ```typescript
+    // Load a local HTML file (production)
+    mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
+    ```
+  </TabItem>
+  <TabItem label="Dev Server URL">
+    ```typescript
+    // Load from Vite dev server (development)
+    mainWindow.loadURL('http://localhost:5173');
+
+    // Or use the Forge-injected constant
+    if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
+      mainWindow.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
+    }
+    ```
+  </TabItem>
+  <TabItem label="Remote URL">
+    ```typescript
+    // Load a remote URL (use with caution — security implications)
+    mainWindow.loadURL('https://your-app.example.com');
+
+    // Always set a strict CSP when loading remote content
+    mainWindow.webContents.session.webRequest.onHeadersReceived(
+      (details, callback) => {
+        callback({
+          responseHeaders: {
+            ...details.responseHeaders,
+            'Content-Security-Policy': [
+              "default-src 'self'; script-src 'self'"
+            ],
+          },
+        });
+      }
+    );
+    ```
+  </TabItem>
+</Tabs>
+
+## Opening DevTools
+
+```typescript
+// Open DevTools automatically in development
+if (!app.isPackaged) {
+  mainWindow.webContents.openDevTools({ mode: 'detach' });
+}
+
+// Toggle DevTools with a keyboard shortcut
+import { globalShortcut } from 'electron';
+
+app.on('ready', () => {
+  globalShortcut.register('CommandOrControl+Shift+I', () => {
+    const win = BrowserWindow.getFocusedWindow();
+    win?.webContents.toggleDevTools();
+  });
+});
+```
+
+:::caution[DevTools in Production]
+DevTools should never be accessible in production builds. Use `app.isPackaged` to guard all DevTools calls, and consider using `@electron/fuses` to permanently disable the DevTools fuse in your packaged app.
+:::
+
+## TypeScript Configuration
+
+The Forge Vite TypeScript template sets up separate `tsconfig` files:
+
+```json
+// tsconfig.json (root — references all sub-configs)
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true
+  },
+  "references": [
+    { "path": "./tsconfig.main.json" },
+    { "path": "./tsconfig.preload.json" },
+    { "path": "./tsconfig.renderer.json" }
+  ]
+}
+```
+
+## Adding React to the Renderer
+
+<Steps>
+
+1. **Install React**
+
+   ```bash
+   npm install react react-dom
+   npm install --save-dev @types/react @types/react-dom @vitejs/plugin-react
+   ```
+
+2. **Update `vite.renderer.config.ts`**
+
+   ```typescript
+   import { defineConfig } from 'vite';
+   import react from '@vitejs/plugin-react';
+
+   export default defineConfig({
+     plugins: [react()],
+   });
+   ```
+
+3. **Create your App component**
+
+   ```typescript
+   // src/App.tsx
+   import React, { useState } from 'react';
+
+   export const App: React.FC = () => {
+     const [filePath, setFilePath] = useState<string | null>(null);
+
+     const handleOpenFile = async () => {
+       const path = await window.electronAPI.openFile();
+       setFilePath(path);
+     };
+
+     return (
+       <div className="container">
+         <h1>My Electron App</h1>
+         <button onClick={handleOpenFile}>Open File</button>
+         {filePath && <p>Selected: {filePath}</p>}
+       </div>
+     );
+   };
+   ```
+
+4. **Declare the global `electronAPI` type**
+
+   ```typescript
+   // src/electron.d.ts
+   export interface IElectronAPI {
+     openFile: () => Promise<string | null>;
+     saveFile: (content: string) => Promise<boolean>;
+     onUpdateAvailable: (callback: (version: string) => void) => void;
+     removeAllListeners: (channel: string) => void;
+   }
+
+   declare global {
+     interface Window {
+       electronAPI: IElectronAPI;
+     }
+   }
+   ```
+
+</Steps>
+
+## Next Steps
+
+With your project running, explore the rest of the Electron documentation:
+
+- **[Main Process](/frameworks/electron/main-process)** — App lifecycle, dialogs, notifications
+- **[IPC Communication](/frameworks/electron/ipc)** — Connecting main and renderer
+- **[Packaging](/frameworks/electron/packaging)** — Distribute your app

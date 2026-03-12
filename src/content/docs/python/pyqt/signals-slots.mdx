@@ -1,0 +1,496 @@
+---
+title: Signals & Slots in PyQt6
+description: Deep dive into the Qt signal/slot mechanism — built-in signals, custom pyqtSignal, data passing, lambda connections, disconnecting, thread-safe worker patterns, and QTimer.
+sidebar:
+  order: 5
+tags: [python, desktop]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Signals and slots are the glue that holds a Qt application together. They form a **type-safe, loosely-coupled event system**: a signal is emitted when something happens; any number of slots can be connected to that signal and will be called automatically.
+
+---
+
+## Core Concept
+
+```
+  Emitter                     Receiver
+┌──────────────┐   signal     ┌────────────────────┐
+│ QPushButton  │ ──clicked──► │ def handle_click() │
+└──────────────┘              └────────────────────┘
+```
+
+Key properties:
+- **Many-to-many**: one signal can connect to many slots; one slot can receive from many signals.
+- **Automatic cleanup**: if either object is deleted, Qt removes the connection automatically.
+- **Cross-thread safe**: with `Qt.ConnectionType.QueuedConnection`, signals cross thread boundaries safely.
+- **No direct coupling**: the emitter doesn't know who (if anyone) is listening.
+
+---
+
+## Built-in Widget Signals
+
+Every widget emits signals for its natural interactions.
+
+```python
+from PyQt6.QtWidgets import (
+    QPushButton, QLineEdit, QCheckBox,
+    QComboBox, QSpinBox, QSlider,
+)
+
+# QPushButton
+btn = QPushButton("Click")
+btn.clicked.connect(slot_fn)          # bool (checked state) when checkable
+btn.pressed.connect(slot_fn)
+btn.released.connect(slot_fn)
+btn.toggled.connect(slot_fn)          # bool
+
+# QLineEdit
+edit = QLineEdit()
+edit.textChanged.connect(slot_fn)     # str — every keystroke
+edit.textEdited.connect(slot_fn)      # str — only user edits (not setText)
+edit.returnPressed.connect(slot_fn)   # no args
+edit.editingFinished.connect(slot_fn) # no args
+
+# QCheckBox
+cb = QCheckBox()
+cb.stateChanged.connect(slot_fn)      # int (0=unchecked, 1=partial, 2=checked)
+cb.toggled.connect(slot_fn)           # bool
+
+# QComboBox
+combo = QComboBox()
+combo.currentIndexChanged.connect(slot_fn)   # int
+combo.currentTextChanged.connect(slot_fn)    # str
+combo.activated.connect(slot_fn)             # int (only on user action)
+
+# QSpinBox
+spin = QSpinBox()
+spin.valueChanged.connect(slot_fn)           # int
+
+# QSlider
+slider = QSlider()
+slider.valueChanged.connect(slot_fn)         # int
+slider.sliderMoved.connect(slot_fn)          # int (only user drag)
+slider.sliderPressed.connect(slot_fn)
+slider.sliderReleased.connect(slot_fn)
+```
+
+---
+
+## Connecting Signals to Slots
+
+### Method slot
+
+```python
+class Counter:
+    def __init__(self) -> None:
+        self.count = 0
+
+    def increment(self) -> None:
+        self.count += 1
+        print(f"Count: {self.count}")
+
+counter = Counter()
+btn = QPushButton("Increment")
+btn.clicked.connect(counter.increment)
+```
+
+### Lambda slot (inline logic)
+
+```python
+label = QLabel("0")
+slider = QSlider(Qt.Orientation.Horizontal)
+slider.setRange(0, 100)
+
+# Update label whenever slider moves
+slider.valueChanged.connect(lambda v: label.setText(str(v)))
+```
+
+:::caution[Lambda and loop variables]
+Classic Python closure trap — capture the loop variable by default argument:
+
+```python
+# WRONG — all buttons will call slot with i=4 (last value)
+for i in range(5):
+    btn = QPushButton(str(i))
+    btn.clicked.connect(lambda: print(i))
+
+# CORRECT — bind i at definition time
+for i in range(5):
+    btn = QPushButton(str(i))
+    btn.clicked.connect(lambda checked, n=i: print(n))
+```
+:::
+
+### Connecting to multiple slots
+
+```python
+btn.clicked.connect(slot_a)
+btn.clicked.connect(slot_b)
+btn.clicked.connect(slot_c)
+# All three are called in connection order when btn is clicked
+```
+
+### Chaining signals to other signals
+
+```python
+# When my_signal fires, it re-emits other_signal
+my_signal.connect(other_signal)
+```
+
+---
+
+## Disconnecting
+
+```python
+# Disconnect a specific slot
+btn.clicked.disconnect(my_slot)
+
+# Disconnect all slots from a signal
+btn.clicked.disconnect()
+
+# Disconnect everything connected to an object
+from PyQt6.QtCore import QObject
+QObject.disconnect(btn)
+```
+
+---
+
+## Defining Custom Signals with `pyqtSignal`
+
+Custom signals are **class-level** attributes defined using `pyqtSignal`. They must live on a `QObject` subclass.
+
+```python
+from PyQt6.QtCore import QObject, pyqtSignal
+
+
+class Database(QObject):
+    # No-arg signal
+    connected = pyqtSignal()
+
+    # Signal carrying data
+    record_saved = pyqtSignal(int)         # emits a record id
+    error_occurred = pyqtSignal(str)       # emits an error message
+    data_loaded = pyqtSignal(list)         # emits a list of rows
+    progress_updated = pyqtSignal(int, int)  # current, total
+
+    # Overloaded signal (same name, different signatures)
+    status_changed = pyqtSignal([str], [int])
+
+    def save(self, record_id: int) -> None:
+        # ... do database work ...
+        self.record_saved.emit(record_id)
+
+    def load_all(self) -> None:
+        rows = [{"id": 1}, {"id": 2}]
+        self.data_loaded.emit(rows)
+        self.progress_updated.emit(100, 100)
+
+
+db = Database()
+db.record_saved.connect(lambda rid: print(f"Saved record {rid}"))
+db.error_occurred.connect(lambda msg: print(f"Error: {msg}"))
+db.progress_updated.connect(lambda cur, total: print(f"{cur}/{total}"))
+
+db.save(42)
+```
+
+### Signals with custom objects
+
+```python
+from dataclasses import dataclass
+from PyQt6.QtCore import QObject, pyqtSignal
+
+
+@dataclass
+class UserProfile:
+    name: str
+    email: str
+
+
+class UserService(QObject):
+    profile_loaded = pyqtSignal(object)   # use 'object' for arbitrary Python types
+
+    def fetch(self) -> None:
+        profile = UserProfile(name="Alice", email="alice@example.com")
+        self.profile_loaded.emit(profile)
+
+
+service = UserService()
+service.profile_loaded.connect(lambda p: print(f"Loaded: {p.name}"))
+service.fetch()
+```
+
+---
+
+## QThread — Keeping the UI Responsive
+
+Long-running operations (network calls, file I/O, heavy computation) **must not run on the main GUI thread**. The standard PyQt6 pattern is the **worker object + QThread**.
+
+```python
+import sys
+import time
+from PyQt6.QtCore import QObject, QThread, pyqtSignal
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout,
+    QPushButton, QProgressBar, QLabel,
+)
+
+
+# ── Worker — runs in a background thread ──────────────────────────
+class Worker(QObject):
+    progress = pyqtSignal(int)
+    result   = pyqtSignal(str)
+    finished = pyqtSignal()
+
+    def run(self) -> None:
+        for i in range(1, 101):
+            time.sleep(0.05)           # simulate work
+            self.progress.emit(i)
+        self.result.emit("Processing complete!")
+        self.finished.emit()
+
+
+# ── Main Window ───────────────────────────────────────────────────
+class MainWindow(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("Worker Thread Demo")
+        self.resize(400, 200)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        self.label = QLabel("Press Start to begin")
+        layout.addWidget(self.label)
+
+        self.bar = QProgressBar()
+        layout.addWidget(self.bar)
+
+        self.start_btn = QPushButton("Start")
+        self.start_btn.clicked.connect(self.start_work)
+        layout.addWidget(self.start_btn)
+
+        self.setCentralWidget(container)
+
+    def start_work(self) -> None:
+        self.start_btn.setEnabled(False)
+        self.label.setText("Working…")
+
+        # Create thread and worker
+        self.thread = QThread()
+        self.worker = Worker()
+        self.worker.moveToThread(self.thread)  # <-- key line
+
+        # Wire up signals
+        self.thread.started.connect(self.worker.run)
+        self.worker.progress.connect(self.bar.setValue)
+        self.worker.result.connect(self.label.setText)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.finished.connect(lambda: self.start_btn.setEnabled(True))
+
+        self.thread.start()
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    win = MainWindow()
+    win.show()
+    sys.exit(app.exec())
+```
+
+:::tip[moveToThread is the key]
+The `worker.moveToThread(thread)` call is what makes signal–slot calls from the worker execute in the main thread (queued connection). Never call `self.worker.run()` directly — call it only through the `thread.started` signal.
+:::
+
+:::caution[Don't subclass QThread]
+The official Qt recommendation is **don't subclass QThread** for work objects. Subclassing means the `run()` method executes in the new thread but everything else stays on the main thread — a common source of bugs. Use the **worker object + moveToThread** pattern shown above.
+:::
+
+---
+
+## QThread with Cancellation
+
+```python
+from PyQt6.QtCore import QObject, QThread, pyqtSignal
+import time
+
+
+class CancellableWorker(QObject):
+    progress = pyqtSignal(int)
+    finished = pyqtSignal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        for i in range(1, 101):
+            if self._cancelled:
+                break
+            time.sleep(0.1)
+            self.progress.emit(i)
+        self.finished.emit()
+
+
+# Usage
+worker = CancellableWorker()
+cancel_btn.clicked.connect(worker.cancel)
+```
+
+---
+
+## QTimer — Scheduled and Repeated Actions
+
+```python
+from PyQt6.QtCore import QTimer
+
+# ── Repeating timer ───────────────────────────────────────────────
+timer = QTimer()
+timer.setInterval(1000)          # milliseconds
+timer.timeout.connect(update_clock)
+timer.start()
+
+# Stop / restart
+timer.stop()
+timer.start(500)                 # restart with a new interval
+
+# ── One-shot timer (fire once after a delay) ──────────────────────
+QTimer.singleShot(2000, lambda: print("2 seconds later"))
+
+# ── Zero-interval timer (fires as fast as the event loop allows) ──
+idle_timer = QTimer()
+idle_timer.setInterval(0)
+idle_timer.timeout.connect(process_next_item)
+idle_timer.start()
+
+# ── Countdown example ─────────────────────────────────────────────
+import sys
+from PyQt6.QtWidgets import QApplication, QLabel
+
+app = QApplication(sys.argv)
+label = QLabel("10")
+label.setStyleSheet("font-size: 48px;")
+
+seconds_left = [10]
+
+def tick() -> None:
+    seconds_left[0] -= 1
+    label.setText(str(seconds_left[0]))
+    if seconds_left[0] <= 0:
+        countdown.stop()
+        label.setText("Time's up!")
+
+countdown = QTimer()
+countdown.timeout.connect(tick)
+countdown.start(1000)
+
+label.show()
+sys.exit(app.exec())
+```
+
+---
+
+## Connection Types
+
+PyQt6 supports several connection types to control how slots are invoked:
+
+| Type | Constant | Behaviour |
+|---|---|---|
+| Auto | `Qt.ConnectionType.AutoConnection` | Default. Direct if same thread, queued if different. |
+| Direct | `Qt.ConnectionType.DirectConnection` | Slot called immediately in emitter's thread. |
+| Queued | `Qt.ConnectionType.QueuedConnection` | Slot posted to receiver's thread event queue. |
+| Blocking queued | `Qt.ConnectionType.BlockingQueuedConnection` | Like Queued but emitter waits for slot to finish. |
+| Unique | `Qt.ConnectionType.UniqueConnection` | Prevents duplicate connections. |
+
+```python
+from PyQt6.QtCore import Qt
+
+# Force a queued connection (thread-safe GUI update)
+worker.progress.connect(
+    progress_bar.setValue,
+    Qt.ConnectionType.QueuedConnection,
+)
+```
+
+---
+
+## Practical Signal Patterns
+
+### Debounce (delay until user stops typing)
+
+```python
+class SearchBar(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self._debounce = QTimer()
+        self._debounce.setSingleShot(True)
+        self._debounce.setInterval(300)    # 300 ms quiet period
+        self._debounce.timeout.connect(self._do_search)
+
+        self.input = QLineEdit()
+        self.input.textChanged.connect(self._on_text_changed)
+
+    def _on_text_changed(self, text: str) -> None:
+        self._last_text = text
+        self._debounce.start()   # restart the timer on every keystroke
+
+    def _do_search(self) -> None:
+        print(f"Searching for: {self._last_text}")
+```
+
+### Event bus (application-wide signals)
+
+```python
+from PyQt6.QtCore import QObject, pyqtSignal
+
+
+class EventBus(QObject):
+    """Singleton event bus for app-wide notifications."""
+    theme_changed   = pyqtSignal(str)
+    user_logged_in  = pyqtSignal(object)
+    user_logged_out = pyqtSignal()
+
+    _instance: "EventBus | None" = None
+
+    @classmethod
+    def instance(cls) -> "EventBus":
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+
+# Anywhere in the app:
+EventBus.instance().theme_changed.connect(apply_theme)
+EventBus.instance().theme_changed.emit("dark")
+```
+
+### Slot decorator (optional but clarifying)
+
+```python
+from PyQt6.QtCore import pyqtSlot
+
+
+class MyWidget(QWidget):
+    @pyqtSlot()
+    def on_button_clicked(self) -> None:
+        print("Clicked")
+
+    @pyqtSlot(int)
+    def on_value_changed(self, value: int) -> None:
+        print("Value:", value)
+
+    @pyqtSlot(str, int)
+    def on_data_received(self, name: str, code: int) -> None:
+        print(f"Received {name}: {code}")
+```
+
+:::tip[pyqtSlot is optional]
+The `@pyqtSlot` decorator is not required in PyQt6 — plain Python methods work fine as slots. The decorator adds a small performance benefit and ensures the correct overload is selected for overloaded signals.
+:::

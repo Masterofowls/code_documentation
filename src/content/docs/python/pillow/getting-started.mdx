@@ -1,0 +1,470 @@
+---
+title: Getting Started with Pillow
+description: Install Pillow, open and inspect images, create new images from scratch, work with pixels directly, and understand the relationship between PIL images and NumPy arrays.
+sidebar:
+  order: 2
+tags: [python, imaging]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+This guide walks you through everything you need to start working with images in Python using Pillow — from installation to reading pixel data.
+
+---
+
+## Installation
+
+<Steps>
+
+1. **Install Pillow via pip**
+
+   ```bash
+   pip install Pillow
+   ```
+
+   For projects using a virtual environment (recommended):
+
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate   # macOS/Linux
+   .venv\Scripts\activate      # Windows
+   pip install Pillow
+   ```
+
+2. **Verify the installation**
+
+   ```python
+   from PIL import Image
+   print(Image.__version__)
+   # Output: 10.4.0  (your installed version)
+   ```
+
+3. **Import the modules you need**
+
+   ```python
+   # The core module — used in almost every script
+   from PIL import Image
+
+   # Additional modules as needed
+   from PIL import ImageDraw, ImageFont, ImageFilter, ImageEnhance, ImageOps
+   ```
+
+</Steps>
+
+:::tip[Dependency Notes]
+Pillow compiles optional C extensions for additional format support. Installing system packages before Pillow on Linux (`libjpeg-dev`, `libpng-dev`, `libtiff-dev`, `libwebp-dev`) ensures you get all decoders. On macOS and Windows, the pre-built wheels from PyPI include everything.
+:::
+
+---
+
+## Opening an Image
+
+`Image.open()` is lazy — it reads the header and returns an `Image` object but does **not** load the full pixel data into memory until it is needed. This makes opening large files fast.
+
+```python
+from PIL import Image
+
+# Open from a file path (string or pathlib.Path)
+img = Image.open("photo.jpg")
+
+# Open from a file-like object (e.g., BytesIO from a web request)
+import io, urllib.request
+url = "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png"
+with urllib.request.urlopen(url) as response:
+    data = response.read()
+img_from_bytes = Image.open(io.BytesIO(data))
+
+# Force immediate full load (useful if you want to close the file handle)
+img.load()
+
+print(img.format)   # "JPEG"  — the file format detected from the header
+print(img.size)     # (1920, 1080)  — (width, height) tuple, always in pixels
+print(img.mode)     # "RGB"  — pixel layout, see the modes table in the overview
+print(img.info)     # {"jfif": 257, "jfif_version": (1, 1), ...}  — format metadata
+```
+
+:::caution[Always Use a Context Manager for File I/O]
+Wrap `Image.open()` in a `with` block when reading files to ensure the file handle is released, especially in loops that process many files:
+
+```python
+with Image.open("photo.jpg") as img:
+    img.load()          # force pixel load while file is open
+    size = img.size     # now safe to use after the with block closes
+```
+:::
+
+---
+
+## Displaying Images
+
+```python
+from PIL import Image
+
+img = Image.open("photo.jpg")
+
+# Opens the image in the OS default viewer (Preview, Photos, eog, etc.)
+# This is asynchronous — it does NOT block your script
+img.show()
+
+# In a Jupyter Notebook, simply returning the image object displays it inline
+# img   ← type this in a cell and run it
+
+# In a web application, convert to bytes instead:
+import io
+buf = io.BytesIO()
+img.save(buf, format="JPEG", quality=85)
+buf.seek(0)
+jpeg_bytes = buf.read()   # send these bytes in an HTTP response
+```
+
+---
+
+## Saving an Image
+
+`Image.save()` writes the image to disk. Pillow infers the output format from the file extension unless you specify it explicitly.
+
+```python
+from PIL import Image
+
+img = Image.open("photo.png")
+
+# Infer format from extension — saves as JPEG
+img.save("output.jpg")
+
+# Specify format explicitly (useful when writing to BytesIO)
+img.save("output.jpg", format="JPEG")
+
+# Pass format-specific keyword arguments
+img.save("output.jpg", quality=90, optimize=True, progressive=True)
+img.save("output.png", compress_level=6)
+
+# Save to a file-like object
+import io
+buf = io.BytesIO()
+img.save(buf, format="PNG")
+buf.seek(0)
+```
+
+:::tip[Lossy vs Lossless]
+JPEG is lossy — every save degrades quality slightly. Open the original file, apply all transformations, and save **once** at the end. Never re-open and re-save a JPEG repeatedly. PNG and WebP (lossless mode) do not suffer this degradation.
+:::
+
+---
+
+## Inspecting Image Metadata
+
+```python
+from PIL import Image
+from PIL.ExifTags import TAGS
+
+img = Image.open("photo.jpg")
+
+# Basic attributes
+print(img.format)       # "JPEG"
+print(img.size)         # (4032, 3024) — (width, height)
+print(img.width)        # 4032
+print(img.height)       # 3024
+print(img.mode)         # "RGB"
+print(img.info)         # dict of format-specific metadata
+
+# JPEG-specific EXIF data
+exif_data = img._getexif()          # returns a dict of {tag_id: value} or None
+if exif_data:
+    for tag_id, value in exif_data.items():
+        tag_name = TAGS.get(tag_id, tag_id)
+        print(f"{tag_name:30s}: {value}")
+# Output example:
+# Make                          : Apple
+# Model                         : iPhone 14 Pro
+# DateTime                      : 2024:03:15 10:22:44
+# ExposureTime                  : (1, 500)
+# FNumber                       : (18, 5)
+# ISOSpeedRatings               : 50
+```
+
+---
+
+## Converting Between Modes
+
+Most operations require specific modes. `img.convert()` returns a **new** image in the target mode; the original is not modified.
+
+```python
+from PIL import Image
+
+img = Image.open("photo.jpg")   # RGB
+
+# Convert to grayscale — each pixel becomes a single value 0–255
+gray = img.convert("L")
+
+# Convert to RGBA — adds a fully opaque alpha channel (255)
+rgba = img.convert("RGBA")
+
+# Convert from RGBA to RGB — removes alpha, composites on white by default
+rgb = rgba.convert("RGB")
+
+# Convert to 1-bit black & white — dithered by default
+bw = img.convert("1")
+
+# Convert to palette mode (for GIF export)
+palette = img.convert("P")
+
+# Convert to CMYK (for print workflows) — approximate conversion
+cmyk = img.convert("CMYK")
+
+print(gray.mode)    # L
+print(rgba.mode)    # RGBA
+print(bw.mode)      # 1
+
+# Visual output: gray is a desaturated version of the original;
+# rgba looks identical but has a transparency channel;
+# bw is a high-contrast black and white dithered image
+```
+
+<Tabs>
+  <TabItem label="RGB → Grayscale">
+```python
+from PIL import Image
+
+img = Image.open("color_photo.jpg")
+gray = img.convert("L")
+gray.save("grayscale.jpg")
+# Output: identical composition as input but fully desaturated (no color information)
+```
+  </TabItem>
+  <TabItem label="PNG → JPEG (remove alpha)">
+```python
+from PIL import Image
+
+img = Image.open("logo.png")   # RGBA
+
+# Composite the transparent image onto a white background before JPEG save
+background = Image.new("RGB", img.size, (255, 255, 255))
+background.paste(img, mask=img.split()[3])   # use alpha channel as mask
+background.save("logo.jpg", quality=95)
+# Output: PNG logo on white background saved as JPEG — no black transparent areas
+```
+  </TabItem>
+  <TabItem label="Grayscale → RGB">
+```python
+from PIL import Image
+
+gray = Image.open("scan.jpg").convert("L")
+# Promote to RGB to allow colored drawing on top
+rgb = gray.convert("RGB")
+print(rgb.mode)   # RGB — though the image still looks gray, all 3 channels are equal
+```
+  </TabItem>
+</Tabs>
+
+---
+
+## Creating New Images
+
+Use `Image.new()` when you need a blank canvas:
+
+```python
+from PIL import Image
+
+# Image.new(mode, size, color)
+# color can be: int (for L mode), tuple (for RGB/RGBA), or a color name string
+
+# Solid white 800×600 RGB image
+white = Image.new("RGB", (800, 600), color=(255, 255, 255))
+
+# Solid black 500×500 image (default color is 0 for all modes)
+black = Image.new("RGB", (500, 500))
+
+# Transparent 400×400 RGBA image
+transparent = Image.new("RGBA", (400, 400), color=(0, 0, 0, 0))
+
+# Grayscale 256×256 mid-gray
+midgray = Image.new("L", (256, 256), color=128)
+
+# Named CSS color
+red_canvas = Image.new("RGB", (300, 200), color="red")
+
+white.save("white_canvas.png")
+transparent.save("transparent.png")
+# Output: white_canvas.png is a plain white 800×600 image
+# Output: transparent.png shows a fully transparent checkerboard when viewed
+```
+
+---
+
+## Image.fromarray() — NumPy Integration
+
+Pillow and NumPy work seamlessly together. Convert between them with `Image.fromarray()` and `numpy.array()`:
+
+```python
+import numpy as np
+from PIL import Image
+
+# --- PIL → NumPy ---
+img = Image.open("photo.jpg")
+arr = np.array(img)
+print(arr.shape)    # (1080, 1920, 3)  — note: (height, width, channels)
+print(arr.dtype)    # uint8
+
+# --- NumPy → PIL ---
+# Create a gradient image using NumPy
+gradient = np.zeros((256, 512, 3), dtype=np.uint8)
+gradient[:, :, 0] = np.linspace(0, 255, 512)   # red channel: left→right gradient
+gradient[:, :, 1] = np.linspace(255, 0, 512)   # green channel: inverse gradient
+# blue stays 0
+
+img_from_array = Image.fromarray(gradient, mode="RGB")
+img_from_array.save("gradient.png")
+# Output: a 512×256 image transitioning from green (left) to red (right)
+
+# --- Grayscale NumPy → PIL ---
+noise = np.random.randint(0, 256, (200, 200), dtype=np.uint8)
+noise_img = Image.fromarray(noise, mode="L")
+noise_img.save("noise.png")
+# Output: 200×200 static noise pattern (random gray values)
+```
+
+:::tip[Shape Convention Difference]
+PIL uses **(width, height)** everywhere (`img.size`, `Image.new()`), but NumPy arrays from images have shape **(height, width, channels)**. Keep this mental model consistent to avoid dimension confusion.
+:::
+
+---
+
+## Working with Pixel Data
+
+### Reading Pixels with `getpixel()`
+
+```python
+from PIL import Image
+
+img = Image.open("photo.jpg")
+
+# Get the pixel value at (x=10, y=20)
+pixel = img.getpixel((10, 20))
+print(pixel)   # (214, 189, 165) — (R, G, B) for RGB mode
+
+# For grayscale (L mode)
+gray = img.convert("L")
+print(gray.getpixel((10, 20)))   # 192 — single integer 0–255
+
+# For RGBA mode
+rgba = img.convert("RGBA")
+print(rgba.getpixel((10, 20)))   # (214, 189, 165, 255) — (R, G, B, A)
+```
+
+:::caution[Performance Warning: getpixel in Loops]
+Calling `getpixel()` inside a Python `for` loop over thousands of pixels is extremely slow due to per-call overhead. Use `img.load()` for pixel-level iteration, or convert to a NumPy array with `np.array(img)` for bulk operations — this is orders of magnitude faster.
+:::
+
+### Writing Pixels with `putpixel()`
+
+```python
+from PIL import Image
+
+img = Image.new("RGB", (200, 200), color=(255, 255, 255))
+
+# Set individual pixels — slow, use for small operations only
+img.putpixel((100, 100), (255, 0, 0))     # single red pixel in the center
+img.putpixel((101, 100), (0, 255, 0))     # single green pixel next to it
+img.putpixel((102, 100), (0, 0, 255))     # single blue pixel next to that
+
+img.save("pixels.png")
+# Output: white 200×200 image with three tiny colored pixels in the center
+```
+
+### Fast Pixel Access with `load()`
+
+`img.load()` returns a pixel access object that supports `[]` indexing. It is significantly faster than `getpixel()`/`putpixel()` in loops:
+
+```python
+from PIL import Image
+
+img = Image.new("RGB", (400, 400), color=(0, 0, 0))
+pixels = img.load()   # returns a PixelAccess object
+
+# Draw a diagonal red line manually
+for i in range(400):
+    pixels[i, i] = (255, 0, 0)          # top-left to bottom-right diagonal
+    pixels[i, 399 - i] = (0, 0, 255)    # top-right to bottom-left diagonal
+
+img.save("diagonals.png")
+# Output: black 400×400 image with a red diagonal and a blue diagonal crossing in the center
+
+# Read via pixel access object
+r, g, b = pixels[200, 200]
+print(r, g, b)   # 255 0 255  — where the diagonals intersect (red + blue = magenta)
+```
+
+---
+
+## Copy vs Reference
+
+Pillow images follow Python's reference semantics. Be careful about mutation:
+
+```python
+from PIL import Image, ImageDraw
+
+img = Image.open("photo.jpg")
+
+# WRONG: both 'img' and 'alias' refer to the SAME object
+alias = img
+draw = ImageDraw.Draw(alias)
+draw.rectangle([10, 10, 100, 100], fill="red")
+# img is also modified! They are the same object.
+
+# CORRECT: use .copy() to get an independent copy
+img2 = Image.open("photo.jpg")
+original = img2.copy()    # independent copy — changes to img2 won't affect original
+
+draw2 = ImageDraw.Draw(img2)
+draw2.rectangle([10, 10, 100, 100], fill="blue")
+
+# img2 now has a blue rectangle; original is still untouched
+original.save("original_unchanged.png")
+img2.save("modified_with_rectangle.png")
+```
+
+---
+
+## Complete Quickstart Script
+
+Here is a single, self-contained script that demonstrates everything covered in this guide:
+
+```python
+"""
+Pillow getting started — complete working example.
+Creates a composite demo image showing various basic operations.
+"""
+import io
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
+# 1. Create a canvas
+canvas = Image.new("RGB", (600, 200), color=(240, 240, 240))
+
+# 2. Create a solid color block via NumPy
+color_block = np.zeros((200, 200, 3), dtype=np.uint8)
+color_block[:, :, 0] = 200   # red tint
+color_block[:, :, 1] = 100
+pil_block = Image.fromarray(color_block)
+
+# 3. Paste the color block onto the canvas at position (0, 0)
+canvas.paste(pil_block, (0, 0))
+
+# 4. Create a grayscale gradient block
+gradient_arr = np.tile(np.linspace(0, 255, 200, dtype=np.uint8), (200, 1))
+gradient_img = Image.fromarray(gradient_arr, mode="L").convert("RGB")
+canvas.paste(gradient_img, (200, 0))
+
+# 5. Draw text in the right third
+draw = ImageDraw.Draw(canvas)
+font = ImageFont.load_default(size=18)
+draw.text((420, 80), "Pillow\nDemo", fill=(30, 30, 30), font=font)
+
+# 6. Inspect and save
+print(f"Canvas mode: {canvas.mode}, size: {canvas.size}")
+canvas.save("quickstart_demo.png")
+# Output: 600×200 PNG split into three sections:
+#   Left 200px: reddish-brown solid block
+#   Middle 200px: grayscale gradient from black to white
+#   Right 200px: light gray background with "Pillow\nDemo" label
+```

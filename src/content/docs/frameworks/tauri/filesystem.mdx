@@ -1,0 +1,490 @@
+---
+title: Filesystem
+description: Read and write files safely with Tauri's filesystem plugin, path APIs, scoped permissions, and file watching.
+sidebar:
+  order: 5
+tags: [rust, javascript, desktop]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Tauri's filesystem access is powered by the **`tauri-plugin-fs`** plugin. Unlike Electron, all filesystem operations in Tauri require explicit permissions declared in your capabilities configuration — no file path is accessible unless you grant it.
+
+## Installation
+
+<Steps>
+
+1. **Add Rust dependency**
+
+   ```toml
+   # src-tauri/Cargo.toml
+   [dependencies]
+   tauri-plugin-fs = "2"
+   ```
+
+2. **Install TypeScript package**
+
+   ```bash
+   npm install @tauri-apps/plugin-fs
+   ```
+
+3. **Register the plugin**
+
+   ```rust
+   // src-tauri/src/lib.rs
+   pub fn run() {
+       tauri::Builder::default()
+           .plugin(tauri_plugin_fs::init())
+           .invoke_handler(tauri::generate_handler![/* ... */])
+           .run(tauri::generate_context!())
+           .expect("error while running application");
+   }
+   ```
+
+4. **Grant permissions in capabilities**
+
+   ```json
+   // src-tauri/capabilities/default.json
+   {
+     "$schema": "../gen/schemas/desktop-schema.json",
+     "identifier": "default",
+     "description": "Default capabilities for the main window",
+     "windows": ["main"],
+     "permissions": [
+       "core:default",
+       "fs:allow-read-text-file",
+       "fs:allow-write-text-file",
+       "fs:allow-read-dir",
+       "fs:allow-mkdir",
+       "fs:allow-exists",
+       "fs:allow-remove",
+       "fs:allow-rename",
+       "fs:allow-copy-file"
+     ]
+   }
+   ```
+
+</Steps>
+
+## BaseDirectory — Safe Path Resolution
+
+Always use `BaseDirectory` constants instead of hardcoding absolute paths. They resolve to the correct platform-specific location:
+
+```typescript
+import { BaseDirectory } from '@tauri-apps/plugin-fs';
+```
+
+| Constant | Windows | macOS | Linux |
+|----------|---------|-------|-------|
+| `AppData` | `%APPDATA%\{identifier}` | `~/Library/Application Support/{identifier}` | `~/.config/{identifier}` |
+| `AppConfig` | Same as AppData | Same as AppData | Same as AppData |
+| `AppLocalData` | `%LOCALAPPDATA%\{identifier}` | `~/Library/Application Support/{identifier}` | `~/.local/share/{identifier}` |
+| `AppCache` | `%LOCALAPPDATA%\{identifier}\cache` | `~/Library/Caches/{identifier}` | `~/.cache/{identifier}` |
+| `AppLog` | `%LOCALAPPDATA%\{identifier}\logs` | `~/Library/Logs/{identifier}` | `~/.local/share/{identifier}/logs` |
+| `Document` | `%USERPROFILE%\Documents` | `~/Documents` | `~/Documents` |
+| `Download` | `%USERPROFILE%\Downloads` | `~/Downloads` | `~/Downloads` |
+| `Home` | `%USERPROFILE%` | `~` | `~` |
+| `Temp` | `%TEMP%` | `/var/folders/...` | `/tmp` |
+| `Resource` | App resources dir | App resources dir | App resources dir |
+| `Desktop` | `%USERPROFILE%\Desktop` | `~/Desktop` | `~/Desktop` |
+
+## Reading Files
+
+```typescript
+import { readTextFile, readFile, BaseDirectory } from '@tauri-apps/plugin-fs';
+
+// Read a text file relative to AppData
+const content = await readTextFile('config/settings.json', {
+  baseDir: BaseDirectory.AppData,
+});
+console.log('Settings:', content);
+
+// Read a text file with an absolute path
+const absoluteContent = await readTextFile('/absolute/path/to/file.txt');
+
+// Read binary file (returns Uint8Array)
+const bytes = await readFile('data/image.png', {
+  baseDir: BaseDirectory.AppData,
+});
+console.log(`Read ${bytes.byteLength} bytes`);
+```
+
+## Writing Files
+
+```typescript
+import { writeTextFile, writeFile, mkdir, BaseDirectory } from '@tauri-apps/plugin-fs';
+
+// Write text (creates or overwrites)
+await writeTextFile(
+  'config/settings.json',
+  JSON.stringify({ theme: 'dark', fontSize: 14 }, null, 2),
+  { baseDir: BaseDirectory.AppData }
+);
+
+// Write binary data
+const encoder = new TextEncoder();
+const data = encoder.encode('binary content');
+
+await writeFile('exports/output.bin', data, {
+  baseDir: BaseDirectory.AppData,
+});
+
+// Create directory (recursive)
+await mkdir('config/profiles', {
+  baseDir: BaseDirectory.AppData,
+  recursive: true, // Creates parent dirs if needed
+});
+```
+
+## Listing, Checking, and Managing Files
+
+```typescript
+import {
+  readDir,
+  exists,
+  remove,
+  rename,
+  copyFile,
+  BaseDirectory,
+} from '@tauri-apps/plugin-fs';
+
+// List directory contents
+const entries = await readDir('projects', {
+  baseDir: BaseDirectory.Document,
+});
+
+for (const entry of entries) {
+  console.log(entry.name, entry.isDirectory ? '(dir)' : '(file)');
+}
+
+// Recursive listing
+async function listAllFiles(dir: string, base: BaseDirectory): Promise<string[]> {
+  const entries = await readDir(dir, { baseDir: base });
+  const files: string[] = [];
+
+  for (const entry of entries) {
+    const fullPath = `${dir}/${entry.name}`;
+    if (entry.isDirectory) {
+      const nested = await listAllFiles(fullPath, base);
+      files.push(...nested);
+    } else {
+      files.push(fullPath);
+    }
+  }
+
+  return files;
+}
+
+// Check existence
+const fileExists = await exists('config/settings.json', {
+  baseDir: BaseDirectory.AppData,
+});
+console.log('Settings exist:', fileExists);
+
+// Remove file or directory
+await remove('temp/old-file.txt', {
+  baseDir: BaseDirectory.AppData,
+});
+
+// Remove directory recursively
+await remove('temp/', {
+  baseDir: BaseDirectory.AppData,
+  recursive: true,
+});
+
+// Rename / move
+await rename(
+  'drafts/document.txt',  // from
+  'documents/document.txt', // to
+  { baseDir: BaseDirectory.Document }
+);
+
+// Copy a file
+await copyFile(
+  'templates/default.json',   // source
+  'config/settings.json',     // destination
+  { fromPathBaseDir: BaseDirectory.Resource, toPathBaseDir: BaseDirectory.AppData }
+);
+```
+
+## File Watching
+
+The `watch` function monitors files or directories for changes:
+
+```typescript
+import { watch, watchImmediate, BaseDirectory } from '@tauri-apps/plugin-fs';
+
+// Watch a file for changes
+const unwatch = await watch(
+  'config/settings.json',
+  (event) => {
+    console.log('File changed:', event.type, event.paths);
+
+    if (event.type === 'modify') {
+      // Re-read the file
+      loadSettings();
+    }
+  },
+  {
+    baseDir: BaseDirectory.AppData,
+    recursive: false,
+    delayMs: 500, // Debounce: only trigger after 500ms of no changes
+  }
+);
+
+// Watch an entire directory recursively
+const unwatchDir = await watch(
+  'projects/',
+  (event) => {
+    console.log('Project dir event:', JSON.stringify(event));
+  },
+  {
+    baseDir: BaseDirectory.Document,
+    recursive: true,
+    delayMs: 1000,
+  }
+);
+
+// watchImmediate — fires immediately on creation, unlike watch which requires delayMs
+const unwatchImmediate = await watchImmediate(
+  'inbox/',
+  (event) => {
+    if (event.type === 'create') {
+      console.log('New file arrived:', event.paths);
+    }
+  },
+  { baseDir: BaseDirectory.Document, recursive: false }
+);
+
+// Clean up watchers when done
+unwatch();
+unwatchDir();
+unwatchImmediate();
+```
+
+## Path Plugin
+
+The `@tauri-apps/plugin-path` package provides path utilities:
+
+```bash
+npm install @tauri-apps/plugin-path
+```
+
+```toml
+# Cargo.toml
+[dependencies]
+tauri-plugin-path = "2"
+```
+
+```rust
+// lib.rs
+.plugin(tauri_plugin_path::init())
+```
+
+```typescript
+import {
+  appDataDir,
+  appConfigDir,
+  appCacheDir,
+  appLogDir,
+  documentDir,
+  downloadDir,
+  homeDir,
+  tempDir,
+  join,
+  resolve,
+  normalize,
+  dirname,
+  basename,
+  extname,
+} from '@tauri-apps/plugin-path';
+
+// Get platform-specific directories
+const dataDir = await appDataDir();  // e.g., "C:\Users\User\AppData\Roaming\com.app"
+const configDir = await appConfigDir();
+const cacheDir = await appCacheDir();
+const docsDir = await documentDir();
+
+// Path manipulation
+const fullPath = await join(dataDir, 'config', 'settings.json');
+const resolved = await resolve('..', 'assets', 'image.png');
+const normalized = await normalize('path//to/../file.txt');
+
+// Path components
+const dir = await dirname('/path/to/file.txt');   // '/path/to'
+const base = await basename('/path/to/file.txt'); // 'file.txt'
+const ext = await extname('/path/to/file.txt');   // '.txt'
+```
+
+## Permissions Configuration
+
+Fine-grained scope control restricts file access to specific paths:
+
+```json
+// src-tauri/capabilities/default.json
+{
+  "identifier": "default",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+
+    // Read any file in the app data directory
+    {
+      "identifier": "fs:allow-read-text-file",
+      "allow": [{ "path": "$APPDATA/**" }]
+    },
+
+    // Write only to specific subdirectories
+    {
+      "identifier": "fs:allow-write-text-file",
+      "allow": [
+        { "path": "$APPDATA/config/**" },
+        { "path": "$APPDATA/exports/**" }
+      ]
+    },
+
+    // Allow reading user documents (read-only)
+    {
+      "identifier": "fs:allow-read-text-file",
+      "allow": [{ "path": "$DOCUMENT/**" }],
+      "deny": [{ "path": "$DOCUMENT/.ssh/**" }]
+    },
+
+    // Directory operations
+    {
+      "identifier": "fs:allow-read-dir",
+      "allow": [{ "path": "$APPDATA/**" }, { "path": "$DOCUMENT/**" }]
+    },
+
+    "fs:allow-mkdir",
+    "fs:allow-exists",
+    "fs:allow-remove",
+    "fs:allow-rename",
+    "fs:allow-copy-file",
+    "fs:allow-watch"
+  ]
+}
+```
+
+:::caution[Scope Paths Are Literal]
+The `$APPDATA` and similar variables in scope paths are resolved at runtime. If you use a relative path without a variable prefix, it is treated as relative to the process working directory, not the app data directory. Always use the `$VARIABLE/**` syntax for clarity and safety.
+:::
+
+## Saving User Data Pattern
+
+A common pattern for persisting app settings:
+
+```typescript
+// src/lib/settings.ts
+import { readTextFile, writeTextFile, exists, mkdir, BaseDirectory } from '@tauri-apps/plugin-fs';
+import { join } from '@tauri-apps/plugin-path';
+
+const SETTINGS_FILE = 'settings.json';
+const SETTINGS_DIR = 'config';
+
+export interface AppSettings {
+  theme: 'light' | 'dark' | 'system';
+  fontSize: number;
+  language: string;
+  autoSave: boolean;
+  recentFiles: string[];
+}
+
+const DEFAULT_SETTINGS: AppSettings = {
+  theme: 'system',
+  fontSize: 14,
+  language: 'en',
+  autoSave: true,
+  recentFiles: [],
+};
+
+export async function loadSettings(): Promise<AppSettings> {
+  const settingsPath = `${SETTINGS_DIR}/${SETTINGS_FILE}`;
+
+  const fileExists = await exists(settingsPath, {
+    baseDir: BaseDirectory.AppData,
+  });
+
+  if (!fileExists) {
+    return { ...DEFAULT_SETTINGS };
+  }
+
+  try {
+    const raw = await readTextFile(settingsPath, {
+      baseDir: BaseDirectory.AppData,
+    });
+    const parsed = JSON.parse(raw) as Partial<AppSettings>;
+    return { ...DEFAULT_SETTINGS, ...parsed };
+  } catch {
+    console.warn('Failed to parse settings, using defaults');
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+export async function saveSettings(settings: AppSettings): Promise<void> {
+  // Ensure directory exists
+  await mkdir(SETTINGS_DIR, {
+    baseDir: BaseDirectory.AppData,
+    recursive: true,
+  });
+
+  await writeTextFile(
+    `${SETTINGS_DIR}/${SETTINGS_FILE}`,
+    JSON.stringify(settings, null, 2),
+    { baseDir: BaseDirectory.AppData }
+  );
+}
+```
+
+## Handling Large Files
+
+For large files, avoid loading the entire content into memory. Use Rust-side streaming via a command:
+
+```rust
+// src-tauri/src/commands/file_commands.rs
+use tauri::ipc::Channel;
+use serde::Serialize;
+use tokio::io::AsyncReadExt;
+
+#[derive(Serialize, Clone)]
+pub enum ReadChunkEvent {
+    Chunk { data: Vec<u8>, offset: u64 },
+    Done { total_bytes: u64 },
+    Error { message: String },
+}
+
+#[tauri::command]
+pub async fn read_large_file(
+    path: String,
+    on_chunk: Channel<ReadChunkEvent>,
+) -> Result<(), String> {
+    let mut file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut buffer = vec![0u8; 64 * 1024]; // 64 KB chunks
+    let mut offset = 0u64;
+
+    loop {
+        let bytes_read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if bytes_read == 0 {
+            on_chunk.send(ReadChunkEvent::Done { total_bytes: offset })
+                .map_err(|e| e.to_string())?;
+            break;
+        }
+
+        on_chunk.send(ReadChunkEvent::Chunk {
+            data: buffer[..bytes_read].to_vec(),
+            offset,
+        }).map_err(|e| e.to_string())?;
+
+        offset += bytes_read as u64;
+    }
+
+    Ok(())
+}
+```

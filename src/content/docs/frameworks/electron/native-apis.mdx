@@ -1,0 +1,556 @@
+---
+title: Native APIs
+description: Electron's native OS integration APIs — Menu, Tray, globalShortcut, autoUpdater, clipboard, desktopCapturer, and more.
+sidebar:
+  order: 6
+tags: [javascript, desktop]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Electron exposes a rich set of native OS APIs that let your app integrate deeply with the operating system. These APIs are available exclusively in the main process (or via IPC).
+
+## Menu
+
+The `Menu` module builds native application menus and context menus.
+
+### Application Menu
+
+```typescript
+import { Menu, MenuItem, app, shell, BrowserWindow } from 'electron';
+
+function buildApplicationMenu(): void {
+  const template: Electron.MenuItemConstructorOptions[] = [
+    // macOS: Application menu
+    ...(process.platform === 'darwin'
+      ? [{
+          label: app.getName(),
+          submenu: [
+            { role: 'about' as const },
+            { type: 'separator' as const },
+            { role: 'services' as const },
+            { type: 'separator' as const },
+            { role: 'hide' as const },
+            { role: 'hideOthers' as const },
+            { role: 'unhide' as const },
+            { type: 'separator' as const },
+            { role: 'quit' as const },
+          ],
+        }]
+      : []),
+    {
+      label: 'File',
+      submenu: [
+        {
+          label: 'New',
+          accelerator: 'CmdOrCtrl+N',
+          click: (_menuItem, win) => {
+            win?.webContents.send('file:new');
+          },
+        },
+        {
+          label: 'Open…',
+          accelerator: 'CmdOrCtrl+O',
+          click: async (_menuItem, win) => {
+            if (!win) return;
+            const { dialog } = await import('electron');
+            const result = await dialog.showOpenDialog(win, {
+              properties: ['openFile'],
+            });
+            if (!result.canceled) {
+              win.webContents.send('file:opened', result.filePaths[0]);
+            }
+          },
+        },
+        { type: 'separator' },
+        {
+          label: 'Save',
+          accelerator: 'CmdOrCtrl+S',
+          click: (_menuItem, win) => {
+            win?.webContents.send('file:save');
+          },
+        },
+        { type: 'separator' },
+        process.platform === 'darwin'
+          ? { role: 'close' }
+          : { role: 'quit' },
+      ],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload' },
+        { role: 'forceReload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
+    {
+      label: 'Help',
+      role: 'help',
+      submenu: [
+        {
+          label: 'Documentation',
+          click: () => shell.openExternal('https://your-docs-site.com'),
+        },
+        {
+          label: 'Report Issue',
+          click: () => shell.openExternal('https://github.com/your/repo/issues'),
+        },
+      ],
+    },
+  ];
+
+  const menu = Menu.buildFromTemplate(template);
+  Menu.setApplicationMenu(menu);
+}
+
+app.whenReady().then(buildApplicationMenu);
+```
+
+### Context Menu
+
+```typescript
+import { Menu, ipcMain, BrowserWindow } from 'electron';
+
+ipcMain.on('show-context-menu', (event, params: { x: number; y: number }) => {
+  const win = BrowserWindow.fromWebContents(event.sender)!;
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: 'Cut',
+      role: 'cut',
+    },
+    {
+      label: 'Copy',
+      role: 'copy',
+    },
+    {
+      label: 'Paste',
+      role: 'paste',
+    },
+    { type: 'separator' },
+    {
+      label: 'Inspect Element',
+      click: () => {
+        win.webContents.inspectElement(params.x, params.y);
+      },
+      visible: !app.isPackaged,
+    },
+  ]);
+
+  contextMenu.popup({ window: win, x: params.x, y: params.y });
+});
+```
+
+```typescript
+// Renderer — trigger context menu on right-click
+window.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  window.electronAPI.send('show-context-menu', { x: e.x, y: e.y });
+});
+```
+
+## Tray
+
+The `Tray` module creates a system tray icon (Windows taskbar, macOS menu bar, Linux status area).
+
+```typescript
+import { Tray, Menu, nativeImage, BrowserWindow, app } from 'electron';
+import path from 'node:path';
+
+let tray: Tray | null = null;
+
+function createTray(mainWindow: BrowserWindow): void {
+  const icon = nativeImage.createFromPath(
+    path.join(__dirname, 'assets/tray-icon.png')
+  ).resize({ width: 16, height: 16 });
+
+  tray = new Tray(icon);
+  tray.setToolTip(app.getName());
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: 'Show App',
+      click: () => {
+        mainWindow.show();
+        mainWindow.focus();
+      },
+    },
+    {
+      label: 'Check for Updates',
+      click: () => {
+        mainWindow.webContents.send('check-updates');
+      },
+    },
+    { type: 'separator' },
+    {
+      label: 'Quit',
+      click: () => {
+        app.quit();
+      },
+    },
+  ]);
+
+  tray.setContextMenu(contextMenu);
+
+  // Single click to show/hide (Windows/Linux)
+  tray.on('click', () => {
+    mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
+  });
+
+  // Double click to always show (Windows)
+  tray.on('double-click', () => {
+    mainWindow.show();
+    mainWindow.focus();
+  });
+}
+
+// Minimize to tray instead of closing
+function setupMinimizeToTray(mainWindow: BrowserWindow): void {
+  mainWindow.on('close', (event) => {
+    if (!app.isQuitting) {
+      event.preventDefault();
+      mainWindow.hide();
+    }
+  });
+
+  // Set a flag on actual quit
+  app.on('before-quit', () => {
+    (app as typeof app & { isQuitting: boolean }).isQuitting = true;
+  });
+}
+```
+
+:::tip[Tray Icon Sizes]
+Provide tray icons at the correct sizes for each platform:
+- **Windows**: 16×16, 32×32 (ICO format or PNG)
+- **macOS**: 16×16, 32×32 (Template images: black/transparent PNG)
+- **Linux**: 22×22, 24×24 (PNG)
+
+For macOS, suffix `Template` in the filename (e.g., `trayIconTemplate.png`) and Electron will automatically handle dark/light mode switching.
+:::
+
+## globalShortcut
+
+Register system-wide keyboard shortcuts that work even when your app is not focused:
+
+```typescript
+import { globalShortcut, app, BrowserWindow } from 'electron';
+
+app.whenReady().then(() => {
+  // Register a global shortcut
+  const registered = globalShortcut.register('CommandOrControl+Shift+Space', () => {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (win) {
+      win.isVisible() ? win.hide() : win.show();
+    }
+  });
+
+  if (!registered) {
+    console.error('Failed to register global shortcut — already in use');
+  }
+
+  // Check if a shortcut is registered
+  console.log(
+    'Shortcut registered:',
+    globalShortcut.isRegistered('CommandOrControl+Shift+Space')
+  );
+});
+
+// Always unregister shortcuts when the app quits
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll();
+});
+```
+
+:::caution[globalShortcut Conflicts]
+Global shortcuts conflict with other applications. If `register()` returns `false`, the shortcut is already taken by another app. Provide a way for users to customize their shortcuts and always call `unregisterAll()` on quit.
+:::
+
+## protocol — Custom URL Schemes
+
+Register custom URL schemes to serve local assets securely:
+
+```typescript
+import { protocol, net, app } from 'electron';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+// Register the custom scheme BEFORE app.ready
+app.on('ready', () => {
+  // Register a custom 'app://' scheme
+  protocol.handle('app', (request) => {
+    const url = request.url.slice('app://'.length);
+    const filePath = path.join(__dirname, '../renderer', url);
+    return net.fetch(pathToFileURL(filePath).toString());
+  });
+});
+
+// In BrowserWindow, load via custom scheme
+mainWindow.loadURL('app://index.html');
+```
+
+For file protocols that serve static files:
+
+```typescript
+protocol.registerFileProtocol('local', (request, callback) => {
+  const filePath = decodeURIComponent(
+    request.url.replace('local://', '')
+  );
+  callback({ path: path.normalize(filePath) });
+});
+```
+
+## autoUpdater (Electron Built-in)
+
+The built-in `autoUpdater` module uses Squirrel for Windows and macOS update delivery. For a simpler setup, most apps use `electron-updater` from `electron-builder`.
+
+### Using electron-updater (Recommended)
+
+```bash
+npm install electron-updater
+```
+
+```typescript
+// src/main.ts
+import { autoUpdater } from 'electron-updater';
+import { ipcMain, BrowserWindow } from 'electron';
+import log from 'electron-log';
+
+function setupAutoUpdater(mainWindow: BrowserWindow): void {
+  autoUpdater.logger = log;
+  autoUpdater.autoDownload = false; // Ask user before downloading
+
+  autoUpdater.on('checking-for-update', () => {
+    mainWindow.webContents.send('update-status', 'checking');
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    mainWindow.webContents.send('update-available', {
+      version: info.version,
+      releaseNotes: info.releaseNotes,
+    });
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    mainWindow.webContents.send('update-status', 'up-to-date');
+  });
+
+  autoUpdater.on('download-progress', (progressObj) => {
+    mainWindow.webContents.send('download-progress', progressObj.percent);
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    mainWindow.webContents.send('update-downloaded', { version: info.version });
+  });
+
+  autoUpdater.on('error', (err) => {
+    mainWindow.webContents.send('update-error', err.message);
+    log.error('Auto-updater error:', err);
+  });
+
+  // Listen for renderer requests
+  ipcMain.on('update:check', () => autoUpdater.checkForUpdates());
+  ipcMain.on('update:download', () => autoUpdater.downloadUpdate());
+  ipcMain.on('update:install', () => autoUpdater.quitAndInstall());
+}
+
+// Check for updates 30 seconds after launch (don't block startup)
+app.whenReady().then(() => {
+  const win = createWindow();
+  setTimeout(() => setupAutoUpdater(win), 30_000);
+});
+```
+
+Configure the update feed in `package.json`:
+
+```json
+{
+  "build": {
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "your-username",
+        "repo": "your-repo"
+      }
+    ]
+  }
+}
+```
+
+## Clipboard
+
+```typescript
+import { clipboard, nativeImage } from 'electron';
+
+// Text operations
+const text = clipboard.readText();
+clipboard.writeText('Hello from Electron!');
+
+// Read/write rich text (HTML)
+const html = clipboard.readHTML();
+clipboard.writeHTML('<b>Bold text</b>');
+
+// Read/write RTF
+const rtf = clipboard.readRTF();
+clipboard.writeRTF('{\\rtf1\\ansi Hello}');
+
+// Image operations
+const image = clipboard.readImage();
+if (!image.isEmpty()) {
+  const dataURL = image.toDataURL();
+  // Send to renderer...
+}
+
+const img = nativeImage.createFromPath('/path/to/image.png');
+clipboard.writeImage(img);
+
+// Write multiple formats at once
+clipboard.write({
+  text: 'Plain text fallback',
+  html: '<p>Formatted <b>text</b></p>',
+  bookmark: { url: 'https://example.com', title: 'Example' },
+});
+
+// Clear the clipboard
+clipboard.clear();
+```
+
+## nativeImage
+
+`nativeImage` handles images for tray icons, dock icons, notifications, and the clipboard:
+
+```typescript
+import { nativeImage } from 'electron';
+import path from 'node:path';
+
+// Create from file
+const icon = nativeImage.createFromPath(
+  path.join(__dirname, 'assets/icon.png')
+);
+
+// Create from data URL
+const dataURLImage = nativeImage.createFromDataURL(
+  'data:image/png;base64,...'
+);
+
+// Create from Buffer
+const buffer = await fs.readFile('/path/to/image.png');
+const bufferImage = nativeImage.createFromBuffer(buffer);
+
+// Resize
+const smallIcon = icon.resize({ width: 16, height: 16, quality: 'best' });
+
+// Get metadata
+console.log('Size:', icon.getSize());        // { width: 512, height: 512 }
+console.log('Scale factor:', icon.getScaleFactor());
+console.log('Empty:', icon.isEmpty());
+
+// Export
+const pngBuffer = icon.toPNG();
+const jpegBuffer = icon.toJPEG(90);
+const dataURL = icon.toDataURL();
+
+// Crop
+const cropped = icon.crop({ x: 0, y: 0, width: 256, height: 256 });
+```
+
+## powerSaveBlocker
+
+Prevent the system from sleeping during long operations:
+
+```typescript
+import { powerSaveBlocker } from 'electron';
+
+// Start blocking sleep (returns an ID)
+const blockerId = powerSaveBlocker.start('prevent-app-suspension');
+// Or use 'prevent-display-sleep' for video playback
+
+console.log('Blocking active:', powerSaveBlocker.isStarted(blockerId));
+
+// Stop blocking when done
+powerSaveBlocker.stop(blockerId);
+```
+
+## desktopCapturer — Screen Recording
+
+```typescript
+import { desktopCapturer, ipcMain } from 'electron';
+
+ipcMain.handle('capture:getSources', async (_event, types: string[]) => {
+  const sources = await desktopCapturer.getSources({
+    types: types as Array<'screen' | 'window'>,
+    thumbnailSize: { width: 150, height: 150 },
+    fetchWindowIcons: true,
+  });
+
+  return sources.map((source) => ({
+    id: source.id,
+    name: source.name,
+    thumbnail: source.thumbnail.toDataURL(),
+    appIconDataURL: source.appIcon?.toDataURL() ?? null,
+  }));
+});
+```
+
+```typescript
+// Renderer — request screen capture permission and start recording
+const startScreenCapture = async (sourceId: string): Promise<void> => {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: {
+      // @ts-expect-error — Electron-specific constraint
+      mandatory: {
+        chromeMediaSource: 'desktop',
+        chromeMediaSourceId: sourceId,
+      },
+    },
+  });
+
+  const videoElement = document.querySelector<HTMLVideoElement>('#preview')!;
+  videoElement.srcObject = stream;
+  videoElement.play();
+};
+```
+
+:::caution[desktopCapturer Privacy]
+On macOS 10.15+, screen recording requires user permission via `systemPreferences.askForMediaAccess`. On Windows, no permission prompt is shown — be transparent with users when recording is active. Always show a visible recording indicator.
+:::
+
+## crashReporter
+
+```typescript
+import { crashReporter } from 'electron';
+
+crashReporter.start({
+  productName: 'My App',
+  companyName: 'My Company',
+  submitURL: 'https://your-crash-server.com/submit',
+  uploadToServer: true,
+  ignoreSystemCrashHandler: false,
+  rateLimit: true,
+  compress: true,
+  extra: {
+    version: app.getVersion(),
+    environment: app.isPackaged ? 'production' : 'development',
+  },
+});
+```

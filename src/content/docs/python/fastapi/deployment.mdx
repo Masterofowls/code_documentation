@@ -1,0 +1,598 @@
+---
+title: Deployment
+description: Production deployment for FastAPI — Gunicorn with Uvicorn workers, multi-stage Docker, docker-compose, CORS, rate limiting, HTTPS with nginx, health checks, and performance tuning.
+sidebar:
+  order: 8
+tags: [python, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+FastAPI is production-ready out of the box, but deploying it correctly requires understanding the ASGI server stack, container configuration, reverse proxy setup, and performance tuning. This guide covers every step from a working local app to a hardened production deployment.
+
+## ASGI Server Stack
+
+FastAPI runs on ASGI. The production stack has two layers:
+
+```
+Internet → Nginx (reverse proxy, TLS termination, static files)
+              ↓
+         Gunicorn (process manager — monitors worker health, respawns crashes)
+              ↓
+         Uvicorn Workers (ASGI server — handles HTTP/WebSocket)
+              ↓
+         FastAPI application
+```
+
+:::tip[Why Both Gunicorn and Uvicorn?]
+Uvicorn alone is a single-process ASGI server. Gunicorn adds process management: multiple worker processes, automatic restart on crash, graceful rolling restarts on deploy, and signal handling. Use `uvicorn.workers.UvicornWorker` as the Gunicorn worker class to get the best of both.
+:::
+
+## Running in Production
+
+```bash
+# Install the production server stack
+pip install "uvicorn[standard]" gunicorn
+
+# Start with multiple workers
+# Workers formula: (2 × CPU cores) + 1
+gunicorn main:app \
+  --worker-class uvicorn.workers.UvicornWorker \
+  --workers 9 \
+  --bind 0.0.0.0:8000 \
+  --timeout 120 \
+  --keepalive 5 \
+  --access-logfile - \
+  --error-logfile - \
+  --log-level info
+```
+
+Explanation of key flags:
+
+| Flag | Value | Purpose |
+|------|-------|---------|
+| `--worker-class` | `uvicorn.workers.UvicornWorker` | Use async ASGI workers |
+| `--workers` | `(2 × CPU) + 1` | Parallel processes |
+| `--bind` | `0.0.0.0:8000` | Listen on all interfaces |
+| `--timeout` | `120` | Kill worker if silent for 120s |
+| `--keepalive` | `5` | Keep HTTP connections alive 5s |
+| `--max-requests` | `1000` | Restart workers after N requests (prevents memory leaks) |
+| `--max-requests-jitter` | `100` | Add randomness to avoid thundering herd |
+
+## Multi-Stage Dockerfile
+
+```dockerfile
+# ── Stage 1: Build dependencies ──────────────────────────────────────────────
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+# Install build tools needed for some packages (asyncpg, etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy and install dependencies into an isolated prefix
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+
+# ── Stage 2: Production runtime ───────────────────────────────────────────────
+FROM python:3.12-slim AS runtime
+
+# Security: run as non-root
+RUN groupadd --gid 1001 app && \
+    useradd --uid 1001 --gid app --shell /bin/bash --create-home app
+
+WORKDIR /app
+
+# Copy compiled packages from the builder stage
+COPY --from=builder /install /usr/local
+
+# Copy application source
+COPY --chown=app:app . .
+
+USER app
+
+EXPOSE 8000
+
+# Healthcheck — Docker marks the container unhealthy if this fails
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD python -c "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"
+
+CMD ["gunicorn", "main:app", \
+     "--worker-class", "uvicorn.workers.UvicornWorker", \
+     "--workers", "4", \
+     "--bind", "0.0.0.0:8000", \
+     "--timeout", "120", \
+     "--keepalive", "5", \
+     "--max-requests", "1000", \
+     "--max-requests-jitter", "100", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-"]
+```
+
+Build and run:
+
+```bash
+docker build -t my-api:latest .
+docker run -p 8000:8000 --env-file .env my-api:latest
+```
+
+## Docker Compose with PostgreSQL and Redis
+
+```yaml
+# docker-compose.yml
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1G
+
+  db:
+    image: postgres:16-alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "--pass", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+```
+
+```bash
+# Start everything
+docker compose up -d
+
+# View logs
+docker compose logs -f api
+
+# Run migrations before starting (in CI/CD pipeline)
+docker compose run --rm api alembic upgrade head
+
+# Scale API workers
+docker compose up -d --scale api=3
+```
+
+## CORS Middleware
+
+Configure Cross-Origin Resource Sharing carefully:
+
+```python
+# main.py
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from app.core.config import settings
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.ALLOWED_ORIGINS,     # ["https://app.example.com"]
+    allow_credentials=True,                     # Allow cookies / Authorization header
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+    expose_headers=["X-Request-ID", "X-Total-Count"],
+    max_age=86400,                              # Cache preflight for 24 hours
+)
+```
+
+:::caution[Never Use allow_origins=["*"] with Credentials]
+Setting `allow_origins=["*"]` combined with `allow_credentials=True` is a security vulnerability — it allows any origin to make credentialed requests. Always specify the exact list of trusted origins. Use environment variables so they differ between development and production.
+:::
+
+## Trusted Host Middleware
+
+Block requests with unexpected `Host` headers (prevents host header injection):
+
+```python
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=["api.example.com", "www.api.example.com"],
+)
+```
+
+## Rate Limiting with SlowAPI
+
+```bash
+pip install slowapi
+```
+
+```python
+# main.py
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from fastapi import FastAPI, Request
+
+limiter = Limiter(key_func=get_remote_address)
+
+app = FastAPI()
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+```
+
+Apply limits per-endpoint:
+
+```python
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
+limiter = Limiter(key_func=get_remote_address)
+
+
+@app.post("/auth/token")
+@limiter.limit("5/minute")
+async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
+    """Login endpoint — max 5 attempts per minute per IP."""
+    ...
+
+
+@app.get("/items")
+@limiter.limit("200/minute")
+async def list_items(request: Request):
+    """Public listing — 200 requests per minute per IP."""
+    ...
+```
+
+When rate limited:
+
+```json
+{"error": "Rate limit exceeded: 5 per 1 minute"}
+```
+
+## Security Headers Middleware
+
+Add security headers to every response:
+
+```python
+from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi import FastAPI, Request
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "geolocation=(), microphone=()"
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=63072000; includeSubDomains; preload"
+        )
+        return response
+
+
+app.add_middleware(SecurityHeadersMiddleware)
+```
+
+## Nginx Configuration (HTTPS + Reverse Proxy)
+
+```nginx
+# nginx/nginx.conf
+upstream fastapi {
+    server api:8000;
+    keepalive 32;
+}
+
+server {
+    listen 80;
+    server_name api.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name api.example.com;
+
+    ssl_certificate     /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256;
+    ssl_prefer_server_ciphers off;
+
+    # Security headers
+    add_header Strict-Transport-Security "max-age=63072000" always;
+    add_header X-Frame-Options DENY;
+    add_header X-Content-Type-Options nosniff;
+
+    # Rate limiting at nginx level
+    limit_req_zone $binary_remote_addr zone=api:10m rate=100r/m;
+    limit_req zone=api burst=20 nodelay;
+
+    client_max_body_size 50M;
+    proxy_read_timeout 120s;
+
+    location / {
+        proxy_pass         http://fastapi;
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Real-IP $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_set_header   Connection "";
+    }
+
+    # Do not proxy health checks — answer from nginx
+    location /health {
+        proxy_pass http://fastapi;
+        access_log off;
+    }
+}
+```
+
+## Health Check Endpoint
+
+```python
+# app/routers/system.py
+from fastapi import APIRouter, Depends
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.dependencies.db import get_db
+from app.core.config import settings
+import time
+
+router = APIRouter(tags=["system"])
+
+START_TIME = time.time()
+
+
+@router.get("/health")
+async def health_check(db: AsyncSession = Depends(get_db)):
+    """
+    Lightweight health check endpoint.
+    Returns 200 when healthy, 503 when the database is unreachable.
+    Used by Docker HEALTHCHECK, load balancer probes, and uptime monitors.
+    """
+    try:
+        await db.execute(text("SELECT 1"))
+        db_status = "ok"
+    except Exception as e:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "database": str(e)},
+        )
+
+    uptime = int(time.time() - START_TIME)
+    return {
+        "status": "healthy",
+        "version": settings.APP_VERSION,
+        "environment": settings.ENVIRONMENT,
+        "uptime_seconds": uptime,
+        "database": db_status,
+    }
+```
+
+```bash
+curl http://localhost:8000/health
+```
+
+```json
+{
+  "status": "healthy",
+  "version": "1.0.0",
+  "environment": "production",
+  "uptime_seconds": 3600,
+  "database": "ok"
+}
+```
+
+## Graceful Shutdown
+
+Handle `SIGTERM` gracefully so in-flight requests complete before the process exits:
+
+```python
+# main.py
+import signal
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+
+logger = logging.getLogger(__name__)
+
+shutdown_event = asyncio.Event()
+
+
+def handle_sigterm(*_):
+    logger.info("SIGTERM received — initiating graceful shutdown")
+    shutdown_event.set()
+
+
+signal.signal(signal.SIGTERM, handle_sigterm)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    logger.info("Application starting")
+    yield
+    logger.info("Application shutting down — draining connections")
+    await asyncio.wait_for(shutdown_event.wait(), timeout=30)
+    await engine.dispose()
+    logger.info("Shutdown complete")
+```
+
+## Environment Variables Reference
+
+```bash
+# .env — production values
+APP_NAME=My Production API
+APP_VERSION=1.0.0
+ENVIRONMENT=production
+DEBUG=false
+
+# Server
+HOST=0.0.0.0
+PORT=8000
+WORKERS=9
+
+# Database
+DATABASE_URL=postgresql+asyncpg://user:password@db:5432/mydb
+DATABASE_POOL_SIZE=10
+DATABASE_MAX_OVERFLOW=20
+
+# Security
+SECRET_KEY=your-256-bit-secret-generated-with-openssl-rand-hex-32
+ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=30
+REFRESH_TOKEN_EXPIRE_DAYS=7
+
+# CORS
+ALLOWED_ORIGINS=https://app.example.com,https://www.app.example.com
+
+# Redis (optional)
+REDIS_URL=redis://:password@redis:6379/0
+
+# External services
+SMTP_HOST=smtp.sendgrid.net
+SMTP_PORT=587
+SMTP_PASSWORD=SG.xxxxx
+```
+
+## Cloud Deployment (Render / Railway)
+
+<Tabs>
+  <TabItem label="Render">
+
+Create a `render.yaml` in the project root:
+
+```yaml
+# render.yaml
+services:
+  - type: web
+    name: my-fastapi-app
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn main:app -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:$PORT
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: my-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+
+databases:
+  - name: my-db
+    plan: starter
+```
+
+  </TabItem>
+  <TabItem label="Railway">
+
+```bash
+# Install Railway CLI
+npm install -g @railway/cli
+
+# Login and deploy
+railway login
+railway init
+railway up
+
+# Set environment variables
+railway variables set SECRET_KEY=$(openssl rand -hex 32)
+railway variables set ENVIRONMENT=production
+```
+
+Add a `Procfile`:
+
+```
+web: gunicorn main:app -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:$PORT
+```
+
+  </TabItem>
+</Tabs>
+
+## Performance Tuning Summary
+
+| Knob | Value | Notes |
+|------|-------|-------|
+| Gunicorn workers | `(2 × CPU) + 1` | e.g., 4-core machine → 9 workers |
+| `pool_size` | `CPU count × 2` | DB connections per worker |
+| `max_overflow` | `pool_size × 2` | Burst capacity |
+| `pool_pre_ping` | `True` | Prevent stale connection errors |
+| `pool_recycle` | `1800` | Recycle connections every 30 min |
+| `--max-requests` | `1000` | Restart workers to prevent memory leaks |
+| `--timeout` | `120` | Kill hung workers |
+| `keepalive` | `5` | Reuse TCP connections |
+
+:::caution[Disable Interactive Docs in Production]
+Never serve `/docs` or `/redoc` in production — they expose your entire API schema and accept test requests. Set `docs_url=None` and `redoc_url=None` when `ENVIRONMENT == "production"`, or protect them behind authentication.
+
+```python
+app = FastAPI(
+    docs_url="/docs" if settings.DEBUG else None,
+    redoc_url="/redoc" if settings.DEBUG else None,
+)
+```
+:::
+
+<CardGrid>
+  <Card title="Monitor Your App" icon="setting">
+    Add Sentry for error tracking: `pip install sentry-sdk[fastapi]`. Add Prometheus metrics with `prometheus-fastapi-instrumentator` for Grafana dashboards.
+  </Card>
+  <Card title="Database Migrations" icon="document">
+    Always run `alembic upgrade head` as a separate pre-deploy step — never during application startup. See the [Database guide](/python/fastapi/database) for the full Alembic setup.
+  </Card>
+  <Card title="Load Testing" icon="rocket">
+    Benchmark your API with `k6` or `locust` before going live. Target p95 latency under 200ms at 2× expected peak load.
+  </Card>
+  <Card title="Secrets Management" icon="approve-check-circle">
+    Never commit secrets. Use your platform's secrets manager (Railway Variables, Render Secrets, AWS Secrets Manager, HashiCorp Vault) and rotate keys quarterly.
+  </Card>
+</CardGrid>

@@ -1,0 +1,486 @@
+---
+title: bpy Basics — Context, Data, Ops, and Objects
+description: Master bpy.context, bpy.data, and bpy.ops — learn to access, select, iterate, parent, and manage objects and collections through Python.
+sidebar:
+  order: 3
+tags: [python, blender, 3d]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+This page covers the three pillars of everyday `bpy` scripting: reading the current Blender state through `bpy.context`, accessing and manipulating data directly through `bpy.data`, and triggering operations through `bpy.ops`. Together these form the foundation for virtually every script you will write.
+
+---
+
+## bpy.context — Reading the Current State
+
+`bpy.context` is a read-mostly interface that describes what Blender is currently doing. Its attributes change as the user switches workspaces, modes, or selections.
+
+### Core Context Attributes
+
+```python
+import bpy
+
+ctx = bpy.context
+
+# The single active (highlighted) object
+active = ctx.active_object
+print(f"Active object  : {active.name if active else 'None'}")
+
+# All currently selected objects (list)
+selected = ctx.selected_objects
+print(f"Selected count : {len(selected)}")
+print(f"Selected names : {[o.name for o in selected]}")
+
+# The current edit mode ('OBJECT', 'EDIT', 'SCULPT', 'POSE' …)
+print(f"Mode           : {ctx.mode}")
+
+# The active scene and view layer
+print(f"Scene          : {ctx.scene.name}")
+print(f"View layer     : {ctx.view_layer.name}")
+
+# The current frame
+print(f"Frame          : {ctx.scene.frame_current}")
+```
+
+> **Console output (two objects selected, Cube active, Object Mode):**
+> ```
+> Active object  : Cube
+> Selected count : 2
+> Selected names : ['Cube', 'Sphere']
+> Mode           : OBJECT
+> Scene          : Scene
+> View layer     : ViewLayer
+> Frame          : 1
+> ```
+
+### Context Override
+
+Some operators require a specific context (e.g., an active window, a region type). Use a context override to call them safely from any script:
+
+```python
+import bpy
+
+# Blender 3.2+ context override using 'with' syntax
+with bpy.context.temp_override(selected_objects=bpy.data.objects):
+    bpy.ops.object.select_all(action='SELECT')
+```
+
+:::tip[Prefer bpy.data for Direct Changes]
+Whenever you can achieve a result by setting a property directly on a data-block (`obj.location = (1, 0, 0)`), prefer that over calling an operator (`bpy.ops.transform.translate(...)`). Direct property access is faster, more predictable, and does not depend on context.
+:::
+
+---
+
+## bpy.data — Direct Data Access
+
+`bpy.data` exposes every data-block in the open blend file as a keyed collection. Unlike `bpy.context`, it works regardless of what is selected or which mode Blender is in.
+
+### Key bpy.data Collections
+
+| Collection | Contains |
+|---|---|
+| `bpy.data.objects` | All scene objects (mesh, light, camera, empty …) |
+| `bpy.data.meshes` | All mesh data-blocks |
+| `bpy.data.materials` | All material data-blocks |
+| `bpy.data.lights` | All light data-blocks |
+| `bpy.data.cameras` | All camera data-blocks |
+| `bpy.data.collections` | All collections (groups of objects) |
+| `bpy.data.images` | All loaded images / textures |
+| `bpy.data.texts` | All text data-blocks (scripts stored in the blend) |
+| `bpy.data.node_groups` | All node groups (shader, geometry, compositor) |
+| `bpy.data.actions` | All animation actions |
+| `bpy.data.armatures` | All armature (skeleton) data |
+
+### Iterating All Objects
+
+```python
+import bpy
+
+print(f"{'Name':<24} {'Type':<12} {'Verts':>6}  Visibility")
+print("-" * 60)
+
+for obj in bpy.data.objects:
+    vert_count = len(obj.data.vertices) if obj.type == 'MESH' else '-'
+    visibility = "visible" if not obj.hide_viewport else "hidden"
+    print(f"{obj.name:<24} {obj.type:<12} {str(vert_count):>6}  {visibility}")
+```
+
+> **Console output:**
+> ```
+> Name                     Type         Verts  Visibility
+> ------------------------------------------------------------
+> Camera                   CAMERA           -  visible
+> Cube                     MESH             8  visible
+> Light                    LIGHT            -  visible
+> Sphere                   MESH           482  visible
+> ```
+
+### Accessing by Name vs. .get()
+
+```python
+import bpy
+
+# Dictionary-style — raises KeyError if not found
+try:
+    obj = bpy.data.objects["Cube"]
+    print(f"Found: {obj.name}")
+except KeyError:
+    print("Cube not found.")
+
+# .get() — returns None if not found (safer)
+mat = bpy.data.materials.get("Material")
+if mat:
+    print(f"Material: {mat.name}, use_nodes={mat.use_nodes}")
+else:
+    print("Material not found.")
+```
+
+### Creating and Removing Data-Blocks
+
+```python
+import bpy
+
+# Create a new, empty mesh data-block (not yet linked to an object)
+new_mesh = bpy.data.meshes.new("ProceduralMesh")
+print(f"New mesh: {new_mesh.name}")
+
+# Create a new material
+new_mat = bpy.data.materials.new("MyMaterial")
+new_mat.use_nodes = True
+print(f"New material: {new_mat.name}, nodes={new_mat.use_nodes}")
+
+# Remove data-blocks (do_unlink=True removes all references first)
+bpy.data.meshes.remove(new_mesh, do_unlink=True)
+print("Mesh removed.")
+```
+
+> **Console output:**
+> ```
+> New mesh: ProceduralMesh
+> New material: MyMaterial, nodes=True
+> Mesh removed.
+> ```
+
+---
+
+## Object Properties
+
+Every object in `bpy.data.objects` exposes a rich set of properties.
+
+### Transform Properties
+
+```python
+import bpy
+import math
+
+obj = bpy.data.objects["Cube"]
+
+# Location (Vector)
+obj.location = (1.0, 2.0, 0.5)
+print(f"Location : {obj.location.x:.2f}, {obj.location.y:.2f}, {obj.location.z:.2f}")
+
+# Rotation — Euler angles in radians
+obj.rotation_euler = (
+    math.radians(30),   # X tilt
+    0.0,                # Y
+    math.radians(45)    # Z spin
+)
+print(f"Rotation (deg): {math.degrees(obj.rotation_euler.x):.0f}°, "
+      f"{math.degrees(obj.rotation_euler.y):.0f}°, "
+      f"{math.degrees(obj.rotation_euler.z):.0f}°")
+
+# Non-uniform scale
+obj.scale = (1.0, 1.0, 2.5)
+print(f"Scale    : {obj.scale.x:.2f}, {obj.scale.y:.2f}, {obj.scale.z:.2f}")
+
+# Visibility
+obj.hide_viewport = False
+obj.hide_render   = False
+```
+
+> **Console output:**
+> ```
+> Location : 1.00, 2.00, 0.50
+> Rotation (deg): 30°, 0°, 45°
+> Scale    : 1.00, 1.00, 2.50
+> ```
+>
+> **Viewport result:** The cube moves to (1, 2, 0.5), rotates 30° on X and 45° on Z, and stretches 2.5× on Z.
+
+### Metadata Properties
+
+```python
+import bpy
+
+obj = bpy.context.active_object
+
+print(f"Name          : {obj.name}")
+print(f"Type          : {obj.type}")         # MESH, LIGHT, CAMERA, ARMATURE …
+print(f"Data name     : {obj.data.name}")    # the underlying data-block
+print(f"Parent        : {obj.parent.name if obj.parent else 'None'}")
+print(f"Pass index    : {obj.pass_index}")   # compositor render pass ID
+print(f"Custom props  : {list(obj.keys())}")
+```
+
+---
+
+## bpy.ops — Operators
+
+Operators mirror every UI action. They return a set indicating success or cancellation.
+
+### Object Operators
+
+```python
+import bpy
+
+# Select all / none
+bpy.ops.object.select_all(action='SELECT')    # select everything
+bpy.ops.object.select_all(action='DESELECT')  # deselect everything
+bpy.ops.object.select_all(action='INVERT')    # toggle selection
+
+# Duplicate active object (duplicate stays selected)
+bpy.ops.object.duplicate_move(
+    TRANSFORM_OT_translate={"value": (3, 0, 0)}
+)
+
+# Delete selected objects
+bpy.ops.object.delete(use_global=False, confirm=False)
+
+# Apply all transforms (freeze transform to identity)
+bpy.ops.object.transform_apply(
+    location=True, rotation=True, scale=True
+)
+```
+
+### Selecting Objects via Python (Without Operators)
+
+Directly setting the `select_set` flag is more reliable than using operators when no UI context is available:
+
+```python
+import bpy
+
+# Deselect all objects directly (no operator needed)
+for obj in bpy.data.objects:
+    obj.select_set(False)
+
+# Select only mesh objects
+mesh_objects = [o for o in bpy.data.objects if o.type == 'MESH']
+for obj in mesh_objects:
+    obj.select_set(True)
+
+# Set the active object explicitly
+if mesh_objects:
+    bpy.context.view_layer.objects.active = mesh_objects[0]
+    print(f"Active: {bpy.context.active_object.name}")
+
+print(f"Selected: {[o.name for o in bpy.context.selected_objects]}")
+```
+
+> **Console output:**
+> ```
+> Active: Cube
+> Selected: ['Cube', 'Sphere']
+> ```
+
+### Mesh Operators
+
+```python
+import bpy
+
+# Enter edit mode on the active object
+bpy.ops.object.mode_set(mode='EDIT')
+
+# Select all geometry
+bpy.ops.mesh.select_all(action='SELECT')
+
+# Subdivide the mesh
+bpy.ops.mesh.subdivide(number_cuts=2, smoothness=0.0)
+
+# Return to object mode
+bpy.ops.object.mode_set(mode='OBJECT')
+
+active = bpy.context.active_object
+print(f"Vertex count after subdivide: {len(active.data.vertices)}")
+```
+
+> **Console output (started with a cube, 8 verts):**
+> ```
+> Vertex count after subdivide: 98
+> ```
+
+---
+
+## Parenting Objects
+
+```python
+import bpy
+
+# Create parent (empty) and child (sphere)
+bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0, 0, 0))
+parent = bpy.context.active_object
+parent.name = "Root"
+
+bpy.ops.mesh.primitive_uv_sphere_add(radius=0.5, location=(2, 0, 0))
+child = bpy.context.active_object
+child.name = "Orbiter"
+
+# Parent child to parent WITHOUT moving the child
+child.parent = parent
+child.matrix_parent_inverse = parent.matrix_world.inverted()
+
+print(f"Parent : {child.parent.name}")
+print(f"Child location (local) : {child.location}")
+```
+
+> **Console output:**
+> ```
+> Parent : Root
+> Child location (local) : <Vector (2.0, 0.0, 0.0)>
+> ```
+>
+> **Viewport result:** The sphere orbits around the empty axis object. Moving or rotating the empty also moves the sphere.
+
+---
+
+## Collection Management
+
+Collections are Blender's equivalent of folders/layers. Every object belongs to at least one collection.
+
+```python
+import bpy
+
+# Create a new collection and link it to the scene
+col = bpy.data.collections.new("ScriptedObjects")
+bpy.context.scene.collection.children.link(col)
+
+# Create objects and add them to the new collection
+for i in range(4):
+    bpy.ops.mesh.primitive_cube_add(location=(i * 2.5, 0, 0))
+    obj = bpy.context.active_object
+    obj.name = f"Cube_{i:02d}"
+
+    # Link to our collection, unlink from the scene root collection
+    col.objects.link(obj)
+    bpy.context.scene.collection.objects.unlink(obj)
+
+print(f"Collection '{col.name}' has {len(col.objects)} objects:")
+for obj in col.objects:
+    print(f"  {obj.name}")
+```
+
+> **Console output:**
+> ```
+> Collection 'ScriptedObjects' has 4 objects:
+>   Cube_00
+>   Cube_01
+>   Cube_02
+>   Cube_03
+> ```
+>
+> **Viewport result:** Four cubes appear in a row. In the Outliner, they appear nested under a new `ScriptedObjects` collection.
+
+### Hiding and Excluding Collections
+
+```python
+import bpy
+
+# Get a reference to the layer_collection (view-layer wrapper)
+def get_layer_collection(name: str, layer_col=None):
+    if layer_col is None:
+        layer_col = bpy.context.view_layer.layer_collection
+    for child in layer_col.children:
+        if child.name == name:
+            return child
+        found = get_layer_collection(name, child)
+        if found:
+            return found
+    return None
+
+lc = get_layer_collection("ScriptedObjects")
+if lc:
+    lc.hide_viewport = True      # hide in viewport
+    lc.exclude      = False      # keep included in view layer
+    print(f"Collection hidden: {lc.hide_viewport}")
+```
+
+> **Console output:**
+> ```
+> Collection hidden: True
+> ```
+
+---
+
+## Scene Units
+
+```python
+import bpy
+
+scene = bpy.context.scene
+units = scene.unit_settings
+
+# Print current unit system
+print(f"Unit system   : {units.system}")        # NONE, METRIC, IMPERIAL
+print(f"Length unit   : {units.length_unit}")   # METERS, CENTIMETERS …
+print(f"Scale length  : {units.scale_length}")  # multiplier
+
+# Switch to metric, millimetres (e.g., for mechanical modelling)
+units.system = 'METRIC'
+units.length_unit = 'MILLIMETERS'
+units.scale_length = 0.001
+
+print(f"Updated: {units.system} / {units.length_unit}")
+```
+
+> **Console output:**
+> ```
+> Unit system   : METRIC
+> Length unit   : METERS
+> Scale length  : 1.0
+> Updated: METRIC / MILLIMETERS
+> ```
+
+---
+
+## Batch Rename Objects
+
+```python
+import bpy
+import re
+
+def batch_rename(
+    pattern: str,
+    replacement: str,
+    obj_type: str = 'MESH'
+) -> int:
+    """Rename all objects of `obj_type` using regex find/replace."""
+    bpy.ops.ed.undo_push(message="Batch Rename")
+    renamed = 0
+    for obj in bpy.data.objects:
+        if obj.type != obj_type:
+            continue
+        new_name = re.sub(pattern, replacement, obj.name)
+        if new_name != obj.name:
+            print(f"  {obj.name!r:30} → {new_name!r}")
+            obj.name = new_name
+            renamed += 1
+    return renamed
+
+
+# Example: strip Blender's default ".001", ".002" suffixes
+count = batch_rename(r'\.\d{3}$', '')
+print(f"\nRenamed {count} object(s).")
+```
+
+> **Console output (scene with "Cube.001", "Cube.002"):**
+> ```
+>   'Cube.001'                      → 'Cube'
+>   'Cube.002'                      → 'Cube'
+> (Blender auto-disambiguates duplicate names to 'Cube' and 'Cube.001')
+>
+> Renamed 2 object(s).
+> ```
+
+:::tip[Duplicate Name Resolution]
+Blender automatically appends `.001`, `.002` … to duplicate names. You cannot assign two objects the same name; the second assignment is silently suffixed. Use `bpy.data.objects.get()` to find by exact name or iterate and filter.
+:::

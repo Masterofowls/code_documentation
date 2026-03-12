@@ -1,0 +1,712 @@
+---
+title: React Hooks
+description: Complete reference for all React 18 built-in hooks with working examples, common pitfalls, and a collection of essential custom hooks.
+sidebar:
+  order: 4
+tags: [react, javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+React Hooks let you use state and other React features inside function components. Introduced in React 16.8, hooks completely replace class components for most use cases. React 18 added several new hooks for concurrent features.
+
+:::tip[Rules of Hooks]
+1. Only call hooks **at the top level** — never inside conditions, loops, or nested functions
+2. Only call hooks from **React function components** or **custom hooks**
+3. Custom hook names must start with `use`
+:::
+
+## useState
+
+Manages local component state with an optional functional update form:
+
+```tsx
+import { useState } from 'react';
+
+// Basic usage
+function Counter() {
+  const [count, setCount] = useState(0);
+
+  return (
+    <div>
+      <p>Count: {count}</p>
+      {/* Functional update — always based on latest state */}
+      <button onClick={() => setCount(c => c + 1)}>+</button>
+      <button onClick={() => setCount(c => c - 1)}>-</button>
+    </div>
+  );
+}
+```
+
+### Lazy Initialisation
+
+Pass a function to `useState` to avoid re-running expensive initialisation on every render:
+
+```tsx
+function ExpensiveInit() {
+  // ❌ computeInitialValue() runs on every render
+  const [state, setState] = useState(computeInitialValue());
+
+  // ✅ computeInitialValue() runs only once
+  const [state, setState] = useState(() => computeInitialValue());
+
+  // ✅ Reading from localStorage (avoid on every render)
+  const [theme, setTheme] = useState<'light' | 'dark'>(
+    () => (localStorage.getItem('theme') as 'light' | 'dark') ?? 'light'
+  );
+}
+```
+
+### Object State
+
+React does not shallow-merge objects in `useState` (unlike `this.setState`). Spread manually:
+
+```tsx
+interface FormState {
+  name: string;
+  email: string;
+  age: number;
+}
+
+function ProfileForm() {
+  const [form, setForm] = useState<FormState>({ name: '', email: '', age: 0 });
+
+  const updateField = <K extends keyof FormState>(
+    field: K,
+    value: FormState[K]
+  ) => {
+    setForm(prev => ({ ...prev, [field]: value }));
+  };
+
+  return (
+    <form>
+      <input value={form.name}  onChange={e => updateField('name', e.target.value)} />
+      <input value={form.email} onChange={e => updateField('email', e.target.value)} />
+    </form>
+  );
+}
+```
+
+## useEffect
+
+Synchronises a component with an external system (fetch, subscriptions, DOM manipulation):
+
+```tsx
+import { useState, useEffect } from 'react';
+
+function UserProfile({ userId }: { userId: string }) {
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+
+  useEffect(() => {
+    // ✅ Cancellation prevents state update on unmounted component
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+
+    fetch(`/api/users/${userId}`)
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json() as Promise<User>;
+      })
+      .then(data => { if (!cancelled) { setUser(data); setLoading(false); } })
+      .catch(err => { if (!cancelled) { setError(err); setLoading(false); } });
+
+    return () => { cancelled = true; }; // cleanup
+  }, [userId]); // re-run when userId changes
+
+  if (loading) return <Spinner />;
+  if (error)   return <ErrorMessage error={error} />;
+  return <div>{user?.name}</div>;
+}
+```
+
+### Dependency Array Variants
+
+```tsx
+// 1. No dependency array — runs after every render (rarely correct)
+useEffect(() => { document.title = `Count: ${count}`; });
+
+// 2. Empty array — runs once after mount (equivalent to componentDidMount)
+useEffect(() => {
+  const id = setInterval(() => tick(), 1000);
+  return () => clearInterval(id);
+}, []);
+
+// 3. Specific dependencies — runs when those values change
+useEffect(() => {
+  fetchData(userId, filter);
+}, [userId, filter]);
+```
+
+:::caution[Common useEffect Mistakes]
+**Stale closure**: Reading state inside `useEffect` without listing it as a dependency gives you stale values. Use the ESLint plugin `eslint-plugin-react-hooks` with `exhaustive-deps` rule enabled — it catches missing dependencies automatically.
+
+**Infinite loops**: Setting state inside `useEffect` without a dependency array causes an infinite render loop. Always provide a dependency array.
+:::
+
+## useContext + createContext
+
+Shares data across the component tree without prop drilling:
+
+```tsx
+import { createContext, useContext, useState } from 'react';
+
+// 1. Define the context shape
+interface ThemeContextValue {
+  theme: 'light' | 'dark';
+  toggle: () => void;
+}
+
+// 2. Create context with a default value
+const ThemeContext = createContext<ThemeContextValue | null>(null);
+
+// 3. Custom hook with null-guard
+function useTheme(): ThemeContextValue {
+  const ctx = useContext(ThemeContext);
+  if (!ctx) throw new Error('useTheme must be used within ThemeProvider');
+  return ctx;
+}
+
+// 4. Provider component
+function ThemeProvider({ children }: { children: React.ReactNode }) {
+  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const toggle = () => setTheme(t => (t === 'light' ? 'dark' : 'light'));
+
+  return (
+    <ThemeContext.Provider value={{ theme, toggle }}>
+      {children}
+    </ThemeContext.Provider>
+  );
+}
+
+// 5. Consumer component
+function ThemeToggle() {
+  const { theme, toggle } = useTheme();
+  return (
+    <button onClick={toggle}>
+      Current theme: {theme} — switch to {theme === 'light' ? 'dark' : 'light'}
+    </button>
+  );
+}
+
+// 6. App setup
+function App() {
+  return (
+    <ThemeProvider>
+      <ThemeToggle />
+    </ThemeProvider>
+  );
+}
+```
+
+## useReducer
+
+A better choice than `useState` for complex state with multiple sub-values and interdependent transitions:
+
+```tsx
+import { useReducer } from 'react';
+
+// 1. State shape
+interface CartState {
+  items: CartItem[];
+  total: number;
+  isOpen: boolean;
+}
+
+// 2. Action types (discriminated union)
+type CartAction =
+  | { type: 'ADD_ITEM';    payload: CartItem }
+  | { type: 'REMOVE_ITEM'; payload: string }
+  | { type: 'UPDATE_QTY';  payload: { id: string; qty: number } }
+  | { type: 'TOGGLE_CART' }
+  | { type: 'CLEAR' };
+
+// 3. Pure reducer function
+function cartReducer(state: CartState, action: CartAction): CartState {
+  switch (action.type) {
+    case 'ADD_ITEM': {
+      const exists = state.items.find(i => i.id === action.payload.id);
+      const items = exists
+        ? state.items.map(i => i.id === action.payload.id
+            ? { ...i, qty: i.qty + 1 } : i)
+        : [...state.items, { ...action.payload, qty: 1 }];
+      return { ...state, items, total: calcTotal(items) };
+    }
+    case 'REMOVE_ITEM': {
+      const items = state.items.filter(i => i.id !== action.payload);
+      return { ...state, items, total: calcTotal(items) };
+    }
+    case 'TOGGLE_CART':
+      return { ...state, isOpen: !state.isOpen };
+    case 'CLEAR':
+      return { ...initialState };
+    default:
+      return state;
+  }
+}
+
+const initialState: CartState = { items: [], total: 0, isOpen: false };
+
+function Cart() {
+  const [state, dispatch] = useReducer(cartReducer, initialState);
+
+  return (
+    <div>
+      <button onClick={() => dispatch({ type: 'TOGGLE_CART' })}>
+        Cart ({state.items.length})
+      </button>
+      {state.isOpen && (
+        <ul>
+          {state.items.map(item => (
+            <li key={item.id}>
+              {item.name} × {item.qty}
+              <button onClick={() => dispatch({ type: 'REMOVE_ITEM', payload: item.id })}>
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+```
+
+## useCallback and useMemo
+
+Memoisation hooks that prevent unnecessary recalculation or function recreation:
+
+```tsx
+import { useState, useCallback, useMemo } from 'react';
+
+function ProductList({ products }: { products: Product[] }) {
+  const [search, setSearch]   = useState('');
+  const [sortBy, setSortBy]   = useState<'name' | 'price'>('name');
+
+  // useMemo — memoises computed value (re-runs only when deps change)
+  const filteredProducts = useMemo(() => {
+    const lower = search.toLowerCase();
+    return products
+      .filter(p => p.name.toLowerCase().includes(lower))
+      .sort((a, b) => a[sortBy] > b[sortBy] ? 1 : -1);
+  }, [products, search, sortBy]);
+
+  // useCallback — memoises callback reference (stable reference for child props)
+  const handleAddToCart = useCallback((productId: string) => {
+    addToCart(productId);
+  }, []); // no deps — function never changes
+
+  return (
+    <>
+      <input value={search} onChange={e => setSearch(e.target.value)} />
+      {filteredProducts.map(p => (
+        <ProductCard
+          key={p.id}
+          product={p}
+          onAddToCart={handleAddToCart} // stable reference prevents re-renders
+        />
+      ))}
+    </>
+  );
+}
+
+// Only re-renders when product or onAddToCart changes
+const ProductCard = React.memo(({ product, onAddToCart }: ProductCardProps) => {
+  return (
+    <div>
+      <h3>{product.name}</h3>
+      <button onClick={() => onAddToCart(product.id)}>Add to cart</button>
+    </div>
+  );
+});
+```
+
+:::caution[Profile Before Memoising]
+`useMemo` and `useCallback` have their own overhead. Use the React DevTools Profiler to identify actual performance problems before adding memoisation. Premature memoisation makes code harder to read with no benefit.
+:::
+
+## useRef
+
+Holds a mutable value that persists across renders without triggering re-renders:
+
+```tsx
+import { useRef, useEffect, useState } from 'react';
+
+function VideoPlayer({ src }: { src: string }) {
+  // DOM ref
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  // Mutable value — doesn't cause re-render when changed
+  const playCountRef = useRef(0);
+
+  const handlePlay = () => {
+    playCountRef.current += 1;
+    console.log(`Played ${playCountRef.current} times`);
+    videoRef.current?.play();
+  };
+
+  return (
+    <div>
+      <video ref={videoRef} src={src} />
+      <button onClick={handlePlay}>Play</button>
+    </div>
+  );
+}
+
+// Previous value pattern
+function usePrevious<T>(value: T): T | undefined {
+  const ref = useRef<T>();
+  useEffect(() => { ref.current = value; });
+  return ref.current;
+}
+
+function Component({ count }: { count: number }) {
+  const prevCount = usePrevious(count);
+  return <p>Now: {count}, Before: {prevCount}</p>;
+}
+```
+
+## useLayoutEffect vs useEffect
+
+```tsx
+import { useEffect, useLayoutEffect, useRef } from 'react';
+
+function Tooltip({ children, text }: TooltipProps) {
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  const targetRef  = useRef<HTMLSpanElement>(null);
+
+  // useLayoutEffect — runs synchronously BEFORE browser paint
+  // Use for: reading/writing DOM dimensions, avoiding layout flicker
+  useLayoutEffect(() => {
+    const tooltip = tooltipRef.current;
+    const target  = targetRef.current;
+    if (!tooltip || !target) return;
+
+    const rect = target.getBoundingClientRect();
+    tooltip.style.left = `${rect.left}px`;
+    tooltip.style.top  = `${rect.bottom + 4}px`;
+  });
+
+  // useEffect — runs asynchronously AFTER browser paint
+  // Use for: most side effects (fetch, subscriptions, logging)
+  useEffect(() => {
+    console.log('Tooltip rendered');
+  });
+
+  return (
+    <span ref={targetRef}>
+      {children}
+      <div ref={tooltipRef} className="tooltip">{text}</div>
+    </span>
+  );
+}
+```
+
+| | `useEffect` | `useLayoutEffect` |
+|---|---|---|
+| Timing | After paint | Before paint |
+| Use for | Data fetching, subscriptions | DOM measurement, tooltip/popover positioning |
+| Blocks paint? | No | Yes |
+| SSR safe? | Yes | Warns in SSR |
+
+## useId
+
+Generates stable, unique IDs for accessibility attributes:
+
+```tsx
+import { useId } from 'react';
+
+function FormField({ label, type = 'text' }: { label: string; type?: string }) {
+  const id = useId(); // e.g. ":r3:"
+
+  return (
+    <div>
+      <label htmlFor={id}>{label}</label>
+      <input id={id} type={type} aria-describedby={`${id}-hint`} />
+      <span id={`${id}-hint`}>Enter your {label.toLowerCase()}</span>
+    </div>
+  );
+}
+```
+
+:::tip[useId vs crypto.randomUUID]
+`useId` produces the same ID on both the server and client, making it safe for SSR hydration. `Math.random()` or `crypto.randomUUID()` in render would cause hydration mismatches.
+:::
+
+## useTransition
+
+Marks state updates as non-urgent so React can keep the UI responsive:
+
+```tsx
+import { useState, useTransition } from 'react';
+
+function FilterableList({ items }: { items: string[] }) {
+  const [query, setQuery]   = useState('');
+  const [filtered, setFiltered] = useState(items);
+  const [isPending, startTransition] = useTransition();
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    setQuery(value);                        // urgent — input updates immediately
+    startTransition(() => {
+      setFiltered(items.filter(i =>
+        i.toLowerCase().includes(value.toLowerCase())
+      ));                                   // non-urgent — deferred
+    });
+  };
+
+  return (
+    <div>
+      <input value={query} onChange={handleChange} placeholder="Filter…" />
+      {isPending && <p style={{ opacity: 0.5 }}>Updating list…</p>}
+      <ul>
+        {filtered.map(item => <li key={item}>{item}</li>)}
+      </ul>
+    </div>
+  );
+}
+```
+
+## useDeferredValue
+
+Keeps a stale copy of a value while a newer update is being processed:
+
+```tsx
+import { useState, useDeferredValue } from 'react';
+
+function Search({ data }: { data: string[] }) {
+  const [query, setQuery] = useState('');
+  const deferredQuery = useDeferredValue(query);
+
+  // Results use the deferred query — may be stale during fast typing
+  const results = data.filter(d =>
+    d.toLowerCase().includes(deferredQuery.toLowerCase())
+  );
+
+  const isStale = query !== deferredQuery;
+
+  return (
+    <div>
+      <input value={query} onChange={e => setQuery(e.target.value)} />
+      <div style={{ opacity: isStale ? 0.7 : 1 }}>
+        {results.map(r => <p key={r}>{r}</p>)}
+      </div>
+    </div>
+  );
+}
+```
+
+## useSyncExternalStore
+
+Subscribes to external stores safely in concurrent mode:
+
+```tsx
+import { useSyncExternalStore } from 'react';
+
+// External store (e.g., Redux, Zustand under the hood, browser API)
+function useWindowWidth(): number {
+  return useSyncExternalStore(
+    // subscribe: called when React wants to subscribe
+    (callback) => {
+      window.addEventListener('resize', callback);
+      return () => window.removeEventListener('resize', callback);
+    },
+    // getSnapshot: returns current value
+    () => window.innerWidth,
+    // getServerSnapshot: returns value for SSR
+    () => 1024
+  );
+}
+
+function ResponsiveComponent() {
+  const width = useWindowWidth();
+  return <p>Window width: {width}px</p>;
+}
+```
+
+## useInsertionEffect
+
+For CSS-in-JS libraries to inject styles before any DOM mutations. Application code should not use this hook directly.
+
+```tsx
+import { useInsertionEffect } from 'react';
+
+// Used internally by CSS-in-JS libraries like styled-components, emotion
+function useStyleInjection(css: string, id: string) {
+  useInsertionEffect(() => {
+    if (document.getElementById(id)) return;
+    const style = document.createElement('style');
+    style.id = id;
+    style.textContent = css;
+    document.head.appendChild(style);
+    return () => { document.getElementById(id)?.remove(); };
+  }, [css, id]);
+}
+```
+
+## Custom Hooks
+
+Custom hooks extract and reuse stateful logic between components.
+
+### useFetch
+
+```tsx
+import { useState, useEffect } from 'react';
+
+interface FetchState<T> {
+  data: T | null;
+  loading: boolean;
+  error: Error | null;
+  refetch: () => void;
+}
+
+function useFetch<T>(url: string): FetchState<T> {
+  const [data, setData]       = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]     = useState<Error | null>(null);
+  const [tick, setTick]       = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+
+    fetch(url)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() as Promise<T>; })
+      .then(d  => { if (!cancelled) { setData(d); setLoading(false); } })
+      .catch(e => { if (!cancelled) { setError(e); setLoading(false); } });
+
+    return () => { cancelled = true; };
+  }, [url, tick]);
+
+  return { data, loading, error, refetch: () => setTick(t => t + 1) };
+}
+
+// Usage
+function UserList() {
+  const { data: users, loading, error, refetch } = useFetch<User[]>('/api/users');
+  if (loading) return <Spinner />;
+  if (error)   return <p>Error: {error.message} <button onClick={refetch}>Retry</button></p>;
+  return <ul>{users?.map(u => <li key={u.id}>{u.name}</li>)}</ul>;
+}
+```
+
+### useLocalStorage
+
+```tsx
+import { useState, useCallback } from 'react';
+
+function useLocalStorage<T>(key: string, initialValue: T) {
+  const [stored, setStored] = useState<T>(() => {
+    try {
+      const item = window.localStorage.getItem(key);
+      return item ? (JSON.parse(item) as T) : initialValue;
+    } catch {
+      return initialValue;
+    }
+  });
+
+  const setValue = useCallback((value: T | ((prev: T) => T)) => {
+    setStored(prev => {
+      const next = typeof value === 'function' ? (value as (p: T) => T)(prev) : value;
+      try { window.localStorage.setItem(key, JSON.stringify(next)); } catch { /* ignore */ }
+      return next;
+    });
+  }, [key]);
+
+  const removeValue = useCallback(() => {
+    window.localStorage.removeItem(key);
+    setStored(initialValue);
+  }, [key, initialValue]);
+
+  return [stored, setValue, removeValue] as const;
+}
+
+// Usage
+function Settings() {
+  const [theme, setTheme] = useLocalStorage<'light' | 'dark'>('theme', 'light');
+  return (
+    <button onClick={() => setTheme(t => t === 'light' ? 'dark' : 'light')}>
+      Theme: {theme}
+    </button>
+  );
+}
+```
+
+### useDebounce
+
+```tsx
+import { useState, useEffect } from 'react';
+
+function useDebounce<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+
+  return debounced;
+}
+
+// Usage — only fires search after 300ms of inactivity
+function SearchBox() {
+  const [query, setQuery] = useState('');
+  const debouncedQuery    = useDebounce(query, 300);
+
+  useEffect(() => {
+    if (debouncedQuery) searchAPI(debouncedQuery);
+  }, [debouncedQuery]);
+
+  return <input value={query} onChange={e => setQuery(e.target.value)} />;
+}
+```
+
+### useMediaQuery
+
+```tsx
+import { useState, useEffect } from 'react';
+
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(
+    () => window.matchMedia(query).matches
+  );
+
+  useEffect(() => {
+    const mql = window.matchMedia(query);
+    const handler = (e: MediaQueryListEvent) => setMatches(e.matches);
+    mql.addEventListener('change', handler);
+    return () => mql.removeEventListener('change', handler);
+  }, [query]);
+
+  return matches;
+}
+
+// Usage
+function ResponsiveNav() {
+  const isMobile = useMediaQuery('(max-width: 768px)');
+  return isMobile ? <MobileNav /> : <DesktopNav />;
+}
+```
+
+## Hook Reference Card
+
+| Hook | Purpose | React Version |
+|---|---|---|
+| `useState` | Local component state | 16.8 |
+| `useEffect` | Side effects after render | 16.8 |
+| `useContext` | Consume context | 16.8 |
+| `useReducer` | Complex state with actions | 16.8 |
+| `useCallback` | Memoise callback reference | 16.8 |
+| `useMemo` | Memoise computed value | 16.8 |
+| `useRef` | Mutable ref / DOM access | 16.8 |
+| `useLayoutEffect` | DOM mutation before paint | 16.8 |
+| `useDebugValue` | Label custom hooks in DevTools | 16.8 |
+| `useImperativeHandle` | Customise forwarded ref | 16.8 |
+| `useId` | Stable unique ID for a11y | 18 |
+| `useTransition` | Defer non-urgent updates | 18 |
+| `useDeferredValue` | Stale value during transition | 18 |
+| `useSyncExternalStore` | Subscribe to external stores | 18 |
+| `useInsertionEffect` | CSS-in-JS style injection | 18 |

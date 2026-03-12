@@ -1,0 +1,664 @@
+---
+title: Request & Response
+description: Pydantic request body validation, Field() constraints, nested models, file uploads, HTTPException, custom error handlers, and response formatting in FastAPI.
+sidebar:
+  order: 4
+tags: [python, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+FastAPI uses Pydantic v2 for all request and response data handling. This guide covers declaring request bodies, applying validation constraints, handling errors, uploading files, and controlling response formatting.
+
+## Request Bodies with Pydantic
+
+Declare a request body by accepting a Pydantic `BaseModel` as a parameter:
+
+```python
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+app = FastAPI()
+
+
+class ItemCreate(BaseModel):
+    name: str
+    description: str | None = None
+    price: float
+    tax: float | None = None
+
+
+@app.post("/items/", status_code=201)
+async def create_item(item: ItemCreate):
+    result = item.model_dump()
+    if item.tax:
+        result["price_with_tax"] = item.price + item.tax
+    return result
+```
+
+```bash
+curl -X POST http://localhost:8000/items/ \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Widget", "price": 9.99, "tax": 0.89}'
+```
+
+```json
+{"name": "Widget", "description": null, "price": 9.99, "tax": 0.89, "price_with_tax": 10.88}
+```
+
+```bash
+# Missing required field
+curl -X POST http://localhost:8000/items/ \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Widget"}'
+```
+
+```json
+{
+  "detail": [
+    {
+      "type": "missing",
+      "loc": ["body", "price"],
+      "msg": "Field required",
+      "input": {"name": "Widget"},
+      "url": "https://errors.pydantic.dev/2.6/v/missing"
+    }
+  ]
+}
+```
+
+## Field Validation with `Field()`
+
+Add constraints, descriptions, and examples to individual fields:
+
+```python
+from pydantic import BaseModel, Field, EmailStr
+import re
+
+
+class UserCreate(BaseModel):
+    username: str = Field(
+        min_length=3,
+        max_length=32,
+        pattern=r"^[a-zA-Z0-9_]+$",
+        description="3–32 characters, letters, digits, and underscores only",
+        examples=["alice_99"],
+    )
+    email: EmailStr = Field(description="Valid email address")
+    age: int = Field(ge=13, le=120, description="Must be between 13 and 120")
+    bio: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Optional user biography",
+    )
+    score: float = Field(
+        default=0.0,
+        gt=0.0,      # strictly greater than 0
+        lt=100.0,    # strictly less than 100
+        description="Score between 0 (exclusive) and 100 (exclusive)",
+    )
+```
+
+Field constraint summary:
+
+| Constraint | Applies To | Meaning |
+|-----------|-----------|---------|
+| `min_length` | `str` | Minimum string length |
+| `max_length` | `str` | Maximum string length |
+| `pattern` | `str` | Regex the value must match |
+| `ge` | `int`, `float` | Greater than or equal to |
+| `gt` | `int`, `float` | Strictly greater than |
+| `le` | `int`, `float` | Less than or equal to |
+| `lt` | `int`, `float` | Strictly less than |
+| `multiple_of` | `int`, `float` | Must be a multiple of this value |
+| `min_items` | `list` | Minimum list length |
+| `max_items` | `list` | Maximum list length |
+
+## Nested Models
+
+Build complex schemas by composing Pydantic models:
+
+```python
+from pydantic import BaseModel, Field
+from datetime import datetime
+from uuid import UUID, uuid4
+
+
+class Address(BaseModel):
+    street: str
+    city: str
+    state: str = Field(min_length=2, max_length=2, description="2-letter state code")
+    zip_code: str = Field(pattern=r"^\d{5}(-\d{4})?$")
+    country: str = "US"
+
+
+class ContactInfo(BaseModel):
+    email: EmailStr
+    phone: str | None = Field(default=None, pattern=r"^\+?[\d\s\-()]{7,20}$")
+
+
+class OrderItem(BaseModel):
+    product_id: UUID
+    quantity: int = Field(ge=1, le=999)
+    unit_price: float = Field(gt=0)
+
+    @property
+    def subtotal(self) -> float:
+        return self.quantity * self.unit_price
+
+
+class OrderCreate(BaseModel):
+    customer_id: UUID
+    items: list[OrderItem] = Field(min_length=1, description="At least one item required")
+    shipping_address: Address
+    contact: ContactInfo
+    notes: str | None = Field(default=None, max_length=1000)
+    discount_percent: float = Field(default=0.0, ge=0.0, le=50.0)
+
+
+@app.post("/orders/", status_code=201)
+async def create_order(order: OrderCreate):
+    subtotal = sum(item.subtotal for item in order.items)
+    discount = subtotal * (order.discount_percent / 100)
+    total = subtotal - discount
+    return {
+        "order_id": str(uuid4()),
+        "subtotal": round(subtotal, 2),
+        "discount": round(discount, 2),
+        "total": round(total, 2),
+        "items_count": len(order.items),
+    }
+```
+
+```bash
+curl -X POST http://localhost:8000/orders/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "customer_id": "550e8400-e29b-41d4-a716-446655440000",
+    "items": [{"product_id": "660e8400-e29b-41d4-a716-446655440000", "quantity": 2, "unit_price": 24.99}],
+    "shipping_address": {"street": "123 Main St", "city": "Austin", "state": "TX", "zip_code": "78701"},
+    "contact": {"email": "customer@example.com"},
+    "discount_percent": 10.0
+  }'
+```
+
+```json
+{
+  "order_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "subtotal": 49.98,
+  "discount": 5.00,
+  "total": 44.98,
+  "items_count": 1
+}
+```
+
+## Response Models
+
+Separate read and write schemas to control what is returned in responses:
+
+```python
+from pydantic import BaseModel
+from datetime import datetime
+
+
+class UserCreate(BaseModel):
+    username: str
+    email: EmailStr
+    password: str          # Write-only — never returned
+
+
+class UserRead(BaseModel):
+    id: int
+    username: str
+    email: EmailStr
+    is_active: bool
+    created_at: datetime   # Managed by the server
+
+
+class UserUpdate(BaseModel):
+    username: str | None = None
+    email: EmailStr | None = None
+
+
+@app.post("/users/", response_model=UserRead, status_code=201)
+async def create_user(user: UserCreate):
+    # Hash password, save to DB...
+    return {
+        "id": 1,
+        "username": user.username,
+        "email": user.email,
+        "is_active": True,
+        "created_at": datetime.utcnow(),
+        "password": user.password,  # This field is excluded by response_model
+    }
+```
+
+## HTTPException and Error Handling
+
+### Raising HTTPException
+
+```python
+from fastapi import FastAPI, HTTPException, status
+
+app = FastAPI()
+
+
+@app.get("/items/{item_id}")
+async def get_item(item_id: int):
+    if item_id not in ITEMS_DB:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Item with id={item_id} was not found.",
+            headers={"X-Error": "Resource not found"},  # Optional extra headers
+        )
+    return ITEMS_DB[item_id]
+```
+
+```bash
+curl http://localhost:8000/items/9999
+```
+
+```json
+{"detail": "Item with id=9999 was not found."}
+```
+
+### Custom Exception Classes
+
+Define domain-specific exceptions with structured error payloads:
+
+```python
+from fastapi import FastAPI, Request, status
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+
+class AppError(Exception):
+    """Base application error."""
+    def __init__(self, code: str, message: str, status_code: int = 400):
+        self.code = code
+        self.message = message
+        self.status_code = status_code
+        super().__init__(message)
+
+
+class ResourceNotFoundError(AppError):
+    def __init__(self, resource: str, id: int | str):
+        super().__init__(
+            code="RESOURCE_NOT_FOUND",
+            message=f"{resource} with id={id} does not exist.",
+            status_code=404,
+        )
+
+
+class InsufficientStockError(AppError):
+    def __init__(self, item_id: int, requested: int, available: int):
+        super().__init__(
+            code="INSUFFICIENT_STOCK",
+            message=f"Requested {requested} units of item {item_id}, only {available} available.",
+            status_code=409,
+        )
+
+
+# Register exception handlers
+@app.exception_handler(AppError)
+async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": {"code": exc.code, "message": exc.message}},
+    )
+
+
+@app.get("/products/{product_id}")
+async def get_product(product_id: int):
+    if product_id not in PRODUCTS_DB:
+        raise ResourceNotFoundError("Product", product_id)
+    return PRODUCTS_DB[product_id]
+```
+
+```bash
+curl http://localhost:8000/products/404
+```
+
+```json
+{
+  "error": {
+    "code": "RESOURCE_NOT_FOUND",
+    "message": "Product with id=404 does not exist."
+  }
+}
+```
+
+### Override Default Validation Error Handler
+
+Customize the 422 response format:
+
+```python
+from fastapi import FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    errors = [
+        {
+            "field": ".".join(str(loc) for loc in err["loc"][1:]),
+            "message": err["msg"],
+            "type": err["type"],
+        }
+        for err in exc.errors()
+    ]
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"errors": errors, "body": exc.body},
+    )
+```
+
+```json
+{
+  "errors": [
+    {"field": "price", "message": "Field required", "type": "missing"},
+    {"field": "email", "message": "value is not a valid email address", "type": "value_error"}
+  ],
+  "body": {"name": "Widget"}
+}
+```
+
+## Accessing the Raw Request Object
+
+Inject the `Request` object to access headers, cookies, and metadata:
+
+```python
+from fastapi import FastAPI, Request
+
+app = FastAPI()
+
+
+@app.get("/inspect")
+async def inspect_request(request: Request):
+    return {
+        "method": request.method,
+        "url": str(request.url),
+        "path": request.url.path,
+        "query_params": dict(request.query_params),
+        "headers": dict(request.headers),
+        "client_ip": request.client.host if request.client else None,
+        "cookies": request.cookies,
+        "user_agent": request.headers.get("user-agent"),
+    }
+```
+
+## Form Data and File Uploads
+
+<Tabs>
+  <TabItem label="Form Fields">
+
+```python
+from fastapi import FastAPI, Form
+
+app = FastAPI()
+
+# pip install python-multipart
+
+
+@app.post("/login")
+async def login(
+    username: str = Form(...),
+    password: str = Form(...),
+    remember_me: bool = Form(default=False),
+):
+    """Handles application/x-www-form-urlencoded submissions."""
+    # Verify credentials
+    return {"username": username, "authenticated": True}
+```
+
+```bash
+curl -X POST http://localhost:8000/login \
+  -d "username=alice&password=secret123"
+```
+
+```json
+{"username": "alice", "authenticated": true}
+```
+
+  </TabItem>
+  <TabItem label="Single File Upload">
+
+```python
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from pathlib import Path
+import uuid
+
+app = FastAPI()
+
+ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp"}
+MAX_SIZE = 5 * 1024 * 1024  # 5 MB
+
+
+@app.post("/upload/image")
+async def upload_image(file: UploadFile = File(...)):
+    # Validate content type
+    if file.content_type not in ALLOWED_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported media type: {file.content_type}. Allowed: {ALLOWED_TYPES}",
+        )
+
+    # Read and validate size
+    contents = await file.read()
+    if len(contents) > MAX_SIZE:
+        raise HTTPException(status_code=413, detail="File exceeds 5 MB limit")
+
+    # Save with a UUID filename
+    ext = Path(file.filename or "upload").suffix
+    save_name = f"{uuid.uuid4()}{ext}"
+    save_path = Path("./uploads") / save_name
+    save_path.parent.mkdir(exist_ok=True)
+    save_path.write_bytes(contents)
+
+    return {
+        "filename": save_name,
+        "original_name": file.filename,
+        "size_bytes": len(contents),
+        "content_type": file.content_type,
+    }
+```
+
+```bash
+curl -X POST http://localhost:8000/upload/image \
+  -F "file=@photo.jpg;type=image/jpeg"
+```
+
+```json
+{
+  "filename": "a1b2c3d4-e5f6-7890-abcd-ef1234567890.jpg",
+  "original_name": "photo.jpg",
+  "size_bytes": 204800,
+  "content_type": "image/jpeg"
+}
+```
+
+  </TabItem>
+  <TabItem label="Multiple Files">
+
+```python
+from fastapi import FastAPI, UploadFile
+
+app = FastAPI()
+
+
+@app.post("/upload/multiple")
+async def upload_multiple(files: list[UploadFile]):
+    results = []
+    for file in files:
+        contents = await file.read()
+        results.append({
+            "filename": file.filename,
+            "size_bytes": len(contents),
+            "content_type": file.content_type,
+        })
+    return {"uploaded": len(results), "files": results}
+```
+
+```bash
+curl -X POST http://localhost:8000/upload/multiple \
+  -F "files=@file1.pdf" \
+  -F "files=@file2.pdf"
+```
+
+```json
+{
+  "uploaded": 2,
+  "files": [
+    {"filename": "file1.pdf", "size_bytes": 51200, "content_type": "application/pdf"},
+    {"filename": "file2.pdf", "size_bytes": 73728, "content_type": "application/pdf"}
+  ]
+}
+```
+
+  </TabItem>
+  <TabItem label="Mixed: Form + File">
+
+```python
+from fastapi import FastAPI, Form, UploadFile, File
+
+app = FastAPI()
+
+
+@app.post("/upload/with-metadata")
+async def upload_with_metadata(
+    title: str = Form(...),
+    description: str = Form(default=""),
+    tags: str = Form(default=""),
+    file: UploadFile = File(...),
+):
+    contents = await file.read()
+    return {
+        "title": title,
+        "description": description,
+        "tags": [t.strip() for t in tags.split(",") if t.strip()],
+        "file": {"name": file.filename, "size": len(contents)},
+    }
+```
+
+  </TabItem>
+</Tabs>
+
+:::caution[Memory Usage with Large Files]
+`await file.read()` loads the **entire file into memory**. For files larger than ~50 MB, stream the file in chunks instead:
+
+```python
+async def save_stream(file: UploadFile, destination: Path) -> int:
+    total = 0
+    with destination.open("wb") as f:
+        while chunk := await file.read(1024 * 64):  # 64 KB chunks
+            f.write(chunk)
+            total += len(chunk)
+    return total
+```
+:::
+
+## Custom Response Headers
+
+```python
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+
+app = FastAPI()
+
+
+@app.post("/items/", status_code=201)
+async def create_item(item: ItemCreate):
+    saved = save_to_db(item)
+    return JSONResponse(
+        status_code=201,
+        content=saved.model_dump(),
+        headers={
+            "Location": f"/items/{saved.id}",
+            "X-Request-ID": str(uuid.uuid4()),
+            "Cache-Control": "no-store",
+        },
+    )
+```
+
+## HTTP Status Code Enum
+
+Use the `status` module for readable constants:
+
+```python
+from fastapi import status
+
+# 2xx Success
+status.HTTP_200_OK                    # 200
+status.HTTP_201_CREATED               # 201
+status.HTTP_202_ACCEPTED              # 202
+status.HTTP_204_NO_CONTENT            # 204
+
+# 4xx Client Errors
+status.HTTP_400_BAD_REQUEST           # 400
+status.HTTP_401_UNAUTHORIZED          # 401
+status.HTTP_403_FORBIDDEN             # 403
+status.HTTP_404_NOT_FOUND             # 404
+status.HTTP_409_CONFLICT              # 409
+status.HTTP_413_REQUEST_ENTITY_TOO_LARGE  # 413
+status.HTTP_415_UNSUPPORTED_MEDIA_TYPE    # 415
+status.HTTP_422_UNPROCESSABLE_ENTITY  # 422
+status.HTTP_429_TOO_MANY_REQUESTS     # 429
+
+# 5xx Server Errors
+status.HTTP_500_INTERNAL_SERVER_ERROR # 500
+status.HTTP_502_BAD_GATEWAY           # 502
+status.HTTP_503_SERVICE_UNAVAILABLE   # 503
+```
+
+## Pydantic Model Validators
+
+Add cross-field validation with `@model_validator` and field-level transforms with `@field_validator`:
+
+```python
+from pydantic import BaseModel, field_validator, model_validator
+from datetime import date
+
+
+class DateRange(BaseModel):
+    start_date: date
+    end_date: date
+    max_nights: int = 30
+
+    @field_validator("start_date", mode="before")
+    @classmethod
+    def start_not_in_past(cls, v: date) -> date:
+        if v < date.today():
+            raise ValueError("start_date cannot be in the past")
+        return v
+
+    @model_validator(mode="after")
+    def end_after_start(self) -> "DateRange":
+        delta = (self.end_date - self.start_date).days
+        if delta <= 0:
+            raise ValueError("end_date must be after start_date")
+        if delta > self.max_nights:
+            raise ValueError(f"Stay cannot exceed {self.max_nights} nights (got {delta})")
+        return self
+```
+
+```bash
+curl -X POST http://localhost:8000/bookings/ \
+  -H "Content-Type: application/json" \
+  -d '{"start_date": "2024-01-01", "end_date": "2023-12-31"}'
+```
+
+```json
+{
+  "detail": [
+    {
+      "type": "value_error",
+      "loc": ["body"],
+      "msg": "Value error, end_date must be after start_date",
+      "input": {"start_date": "2024-01-01", "end_date": "2023-12-31"}
+    }
+  ]
+}
+```

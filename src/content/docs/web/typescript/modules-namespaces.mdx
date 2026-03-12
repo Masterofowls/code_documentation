@@ -1,0 +1,543 @@
+---
+title: Modules & Namespaces
+description: ES modules in TypeScript, type-only imports, module resolution strategies, path aliases, writing .d.ts files, and module augmentation.
+sidebar:
+  order: 7
+tags: [typescript, javascript]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+## ES Module Imports and Exports
+
+TypeScript fully supports ES module syntax. The compiled output honours the `module` setting in `tsconfig.json`.
+
+### Named Exports
+
+```ts
+// src/math.ts
+export const PI = 3.14159265358979;
+
+export function add(a: number, b: number): number {
+  return a + b;
+}
+
+export function multiply(a: number, b: number): number {
+  return a * b;
+}
+
+// Export an interface
+export interface Vector2D {
+  x: number;
+  y: number;
+}
+
+// Export a class
+export class Matrix {
+  constructor(private data: number[][]) {}
+
+  multiply(other: Matrix): Matrix {
+    // implementation
+    return new Matrix([]);
+  }
+}
+```
+
+```ts
+// src/index.ts
+import { PI, add, multiply, Vector2D, Matrix } from './math.js';
+// Note: .js extension required for NodeNext/ESM resolution
+
+console.log(PI);        // 3.14159...
+console.log(add(2, 3)); // 5
+
+// Rename on import
+import { add as sum, multiply as product } from './math.js';
+
+// Import everything as a namespace
+import * as MathUtils from './math.js';
+console.log(MathUtils.PI);
+console.log(MathUtils.add(1, 2));
+```
+
+### Default Exports
+
+```ts
+// src/config.ts
+interface AppConfig {
+  apiUrl: string;
+  timeout: number;
+  debug: boolean;
+}
+
+const config: AppConfig = {
+  apiUrl: process.env['API_URL'] ?? 'http://localhost:3000',
+  timeout: 5000,
+  debug: process.env['NODE_ENV'] === 'development',
+};
+
+export default config;
+
+// Import:
+import config from './config.js';
+console.log(config.apiUrl);
+```
+
+:::tip[Default Exports in Libraries]
+Prefer **named exports** for libraries and shared modules. Default exports are harder to tree-shake, can't be renamed consistently (each consumer chooses their own name), and don't work well with re-exporting patterns. Use default exports for React components and route modules where convention demands it.
+:::
+
+---
+
+## Type-Only Imports (`import type`)
+
+TypeScript 3.8 added `import type` — a compile-time-only import that is completely erased from the output:
+
+```ts
+// Regular import — may emit an import statement in JS output
+import { User } from './user.js';
+
+// Type-only import — always erased, zero runtime cost
+import type { User } from './user.js';
+import type { ApiResponse, PaginatedResult } from './api-types.js';
+
+// Mixed import — type modifier per specifier (TS 4.5+)
+import { createUser, type User, type Role } from './user.js';
+
+// Why use import type?
+// 1. Prevents "import used only as type" runtime errors
+// 2. Required for isolatedModules / transpile-only tools (esbuild, swc)
+// 3. Documents intent: "this is only used for type-checking"
+
+function getUser(id: number): Promise<User> {
+  // User is only used as a type — import type is correct here
+  return fetch(`/api/users/${id}`).then(r => r.json() as Promise<User>);
+}
+```
+
+### `export type`
+
+```ts
+// types.ts
+export type { User, Role, Permission }; // export type only
+export type UserId = string;           // type alias exported as type
+
+// Re-export with type modifier
+export type { ApiResponse } from './api.js';
+```
+
+---
+
+## Module Resolution Strategies
+
+The `moduleResolution` compiler option controls how TypeScript resolves import paths.
+
+| Strategy | Node.js compatible | Description |
+|---|---|---|
+| `Classic` | ❌ | Legacy TS resolution — avoid |
+| `Node` | Partially | CJS-style resolution — no `.js` extensions needed |
+| `Node16` / `NodeNext` | ✅ | Full ESM/CJS support; `.js` extensions required |
+| `Bundler` | ✅ (with bundler) | For Vite, esbuild, webpack — no extension needed |
+
+<Tabs>
+  <TabItem label="NodeNext (Node.js ESM)">
+```ts
+// tsconfig.json
+{
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext"
+  }
+}
+
+// Imports MUST include the .js extension (even for .ts files)
+import { helper } from './utils.js';     // resolves to utils.ts
+import { config } from '../config.js';   // resolves to config.ts
+import type { User } from './types.js';  // resolves to types.ts
+```
+  </TabItem>
+  <TabItem label="Bundler (Vite/esbuild)">
+```ts
+// tsconfig.json
+{
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler"
+  }
+}
+
+// No extension needed — bundler handles resolution
+import { helper } from './utils';
+import { config } from '../config';
+import type { User } from './types';
+```
+  </TabItem>
+  <TabItem label="Node (CommonJS legacy)">
+```ts
+// tsconfig.json
+{
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node"
+  }
+}
+
+// No extension needed — CJS resolution
+const { helper } = require('./utils');
+import { config } from '../config';
+```
+  </TabItem>
+</Tabs>
+
+---
+
+## Path Aliases
+
+Path aliases let you use short, clean import paths instead of long relative `../../..` chains.
+
+### Configuring Aliases in `tsconfig.json`
+
+```ts
+// tsconfig.json
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@components/*": ["src/components/*"],
+      "@utils/*": ["src/utils/*"],
+      "@types/*": ["src/types/*"],
+      "@hooks/*": ["src/hooks/*"],
+      "@config": ["src/config/index.ts"]
+    }
+  }
+}
+```
+
+```ts
+// Before (relative paths)
+import { Button } from '../../../components/ui/Button';
+import { formatDate } from '../../utils/date';
+import type { User } from '../../../types/user';
+
+// After (aliases)
+import { Button } from '@components/ui/Button';
+import { formatDate } from '@utils/date';
+import type { User } from '@types/user';
+import config from '@config';
+```
+
+:::caution[Path Aliases Require Bundler Config]
+`tsconfig.json` path aliases only affect the TypeScript compiler. Your runtime (Node.js, Jest, Vite, webpack) also needs to know about them:
+
+```ts
+// vite.config.ts
+import { defineConfig } from 'vite';
+import path from 'path';
+
+export default defineConfig({
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+      '@components': path.resolve(__dirname, './src/components'),
+    },
+  },
+});
+```
+:::
+
+---
+
+## Declaration Files (`.d.ts`)
+
+Declaration files describe the types of an existing JavaScript module. They are **type-only** — no runtime code.
+
+### Anatomy of a `.d.ts` File
+
+```ts
+// types/database.d.ts
+// Describes a hypothetical `database` npm package
+
+export interface ConnectionOptions {
+  host: string;
+  port: number;
+  database: string;
+  user: string;
+  password: string;
+  ssl?: boolean;
+  poolSize?: number;
+}
+
+export interface QueryResult<T> {
+  rows: T[];
+  rowCount: number;
+  duration: number;
+}
+
+export interface Connection {
+  query<T = Record<string, unknown>>(
+    sql: string,
+    params?: unknown[]
+  ): Promise<QueryResult<T>>;
+  transaction<T>(callback: (conn: Connection) => Promise<T>): Promise<T>;
+  close(): Promise<void>;
+}
+
+export function connect(options: ConnectionOptions): Promise<Connection>;
+export function createPool(options: ConnectionOptions): Connection;
+
+export const version: string;
+```
+
+### Generating Declaration Files Automatically
+
+```bash
+# Enable declaration emission in tsconfig.json
+# "declaration": true
+# "declarationMap": true
+
+npx tsc --declaration --declarationMap
+# Creates dist/index.d.ts and dist/index.d.ts.map
+```
+
+### Writing `.d.ts` for JavaScript Libraries
+
+```ts
+// types/legacy-lib.d.ts
+// Describes a legacy library with no existing types
+
+declare module 'legacy-analytics' {
+  export interface TrackEvent {
+    category: string;
+    action: string;
+    label?: string;
+    value?: number;
+  }
+
+  export interface Analytics {
+    track(event: TrackEvent): void;
+    pageView(url: string, title?: string): void;
+    identify(userId: string, traits?: Record<string, string>): void;
+    reset(): void;
+  }
+
+  const analytics: Analytics;
+  export default analytics;
+}
+```
+
+```ts
+// tsconfig.json — register custom type roots
+{
+  "compilerOptions": {
+    "typeRoots": ["./types", "./node_modules/@types"],
+    // OR for specific declarations:
+    "types": ["node", "jest"]
+  }
+}
+```
+
+---
+
+## DefinitelyTyped and `@types`
+
+[DefinitelyTyped](https://definitelytyped.org/) is a community repository of type declarations for thousands of JavaScript libraries. Packages are published under the `@types` scope:
+
+```bash
+# Check if a library already includes its own types:
+# Look for "types" or "typings" in the package's package.json
+
+# Install community-maintained types
+npm install --save-dev @types/node          # Node.js built-ins
+npm install --save-dev @types/react         # React
+npm install --save-dev @types/express       # Express
+npm install --save-dev @types/lodash        # Lodash
+npm install --save-dev @types/jest          # Jest
+npm install --save-dev @types/uuid          # UUID library
+
+# Verify types are resolved:
+npx tsc --traceResolution 2>&1 | grep "Found .d.ts"
+```
+
+---
+
+## Namespaces (Legacy)
+
+Namespaces were TypeScript's pre-ES-module solution for organising code. They compile to self-executing JavaScript objects.
+
+```ts
+// Namespaces compile to IIFE-based object structures
+namespace Validation {
+  export interface StringValidator {
+    isAcceptable(s: string): boolean;
+  }
+
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const zipRegex = /^\d{5}(-\d{4})?$/;
+
+  export class EmailValidator implements StringValidator {
+    isAcceptable(s: string): boolean {
+      return emailRegex.test(s);
+    }
+  }
+
+  export class ZipCodeValidator implements StringValidator {
+    isAcceptable(s: string): boolean {
+      return zipRegex.test(s);
+    }
+  }
+}
+
+// Usage
+const validators: Validation.StringValidator[] = [
+  new Validation.EmailValidator(),
+  new Validation.ZipCodeValidator(),
+];
+```
+
+```ts
+// Compiled JavaScript output (CommonJS):
+var Validation;
+(function (Validation) {
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const zipRegex = /^\d{5}(-\d{4})?$/;
+  class EmailValidator {
+    isAcceptable(s) { return emailRegex.test(s); }
+  }
+  Validation.EmailValidator = EmailValidator;
+})(Validation || (Validation = {}));
+```
+
+:::caution[Namespaces vs Modules]
+In modern TypeScript, **prefer ES modules over namespaces**. Namespaces were designed for the pre-`import`/`export` era. They are still useful for:
+- Augmenting global browser APIs in `.d.ts` files
+- Merging with classes or enums (as shown in the Classes page)
+- Legacy codebases with triple-slash reference directives
+:::
+
+---
+
+## Module Augmentation
+
+Module augmentation lets you extend an existing module's types from outside the module:
+
+```ts
+// Augmenting an npm package's types
+import 'express';
+
+declare module 'express' {
+  interface Request {
+    user?: { id: string; role: string };
+    requestId: string;
+    startTime: number;
+  }
+}
+
+// Now in your Express handlers:
+import express from 'express';
+const app = express();
+
+app.use((req, res, next) => {
+  req.requestId = crypto.randomUUID(); // OK — we added this
+  req.startTime = Date.now();          // OK — we added this
+  next();
+});
+
+app.get('/profile', (req, res) => {
+  if (!req.user) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+  res.json({ user: req.user, requestId: req.requestId }); // fully typed
+});
+```
+
+### Augmenting Your Own Modules
+
+```ts
+// src/types/events.ts — base event types
+export interface AppEvents {
+  'user:login': { userId: string; timestamp: number };
+  'user:logout': { userId: string };
+}
+
+// src/modules/payment/events.ts — augment from another module
+import type {} from '../../types/events.js';
+
+declare module '../../types/events.js' {
+  interface AppEvents {
+    'payment:success': { orderId: string; amount: number };
+    'payment:failed': { orderId: string; error: string };
+  }
+}
+
+// src/eventBus.ts — uses fully augmented AppEvents
+import type { AppEvents } from './types/events.js';
+
+class EventBus {
+  on<K extends keyof AppEvents>(
+    event: K,
+    handler: (data: AppEvents[K]) => void
+  ): void {
+    // implementation
+  }
+  emit<K extends keyof AppEvents>(event: K, data: AppEvents[K]): void {
+    // implementation
+  }
+}
+
+const bus = new EventBus();
+bus.on('user:login', ({ userId }) => console.log(`Login: ${userId}`));
+bus.on('payment:success', ({ orderId, amount }) =>
+  console.log(`Paid ${amount} for ${orderId}`)
+);
+```
+
+---
+
+## Global Augmentation
+
+Extend global types (the `window` object, built-in prototypes, etc.):
+
+```ts
+// src/types/globals.d.ts
+
+// Augment the global Window interface
+declare global {
+  interface Window {
+    analytics: {
+      track(event: string, properties?: Record<string, unknown>): void;
+    };
+    __APP_CONFIG__: {
+      apiUrl: string;
+      featureFlags: Record<string, boolean>;
+    };
+  }
+
+  // Add a global function
+  function globalDebugLog(message: string): void;
+
+  // Augment Array prototype (rare — be careful)
+  interface Array<T> {
+    last(): T | undefined;
+    sum(): T extends number ? number : never;
+  }
+}
+
+// Required for this file to be a module (even if empty)
+export {};
+```
+
+```ts
+// Implementation (must be done separately from the declaration)
+// src/polyfills.ts
+Array.prototype.last = function() {
+  return this[this.length - 1];
+};
+
+window.globalDebugLog = (message: string) => {
+  if (process.env['NODE_ENV'] === 'development') {
+    console.debug(`[DEBUG] ${message}`);
+  }
+};
+```

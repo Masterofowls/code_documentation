@@ -1,0 +1,312 @@
+---
+title: Lights & Shadows
+description: Configure all six Three.js light types, enable and tune PCF shadow maps, set up image-based lighting with HDR environments, and use light probes.
+sidebar:
+  order: 5
+tags: [javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Lighting is what transforms flat-shaded geometry into convincing 3D imagery. Three.js provides six light types — from the global, directionless `AmbientLight` to the complex shadow-casting `SpotLight` — as well as image-based lighting (IBL) via environment maps.
+
+:::caution[Lights Only Affect PBR Materials]
+`MeshBasicMaterial` ignores all lights. Lighting only affects `MeshLambertMaterial`, `MeshPhongMaterial`, `MeshStandardMaterial`, `MeshPhysicalMaterial`, `MeshToonMaterial`, and `MeshNormalMaterial`.
+:::
+
+---
+
+## AmbientLight
+
+Illuminates all objects equally from all directions. No shadows. Simulates scattered environmental light.
+
+```js
+import * as THREE from 'three';
+
+// AmbientLight(color, intensity)
+const ambientLight = new THREE.AmbientLight('#ffffff', 0.5);
+scene.add(ambientLight);
+
+// Typical intensity ranges:
+// 0.1 – 0.3  →  subtle fill, dominant directional light
+// 0.5 – 0.8  →  soft daylight fill
+// 1.0+       →  fully flat appearance if no other lights
+```
+
+---
+
+## DirectionalLight
+
+Parallel rays from infinite distance — simulates the sun. Excellent shadow caster.
+
+```js
+const dirLight = new THREE.DirectionalLight('#ffffff', 2.0);
+dirLight.position.set(5, 10, 7);
+
+// The light shines FROM position TOWARD target.position
+dirLight.target.position.set(0, 0, 0);
+
+// Add both light AND target to scene so target's world position is known
+scene.add(dirLight);
+scene.add(dirLight.target);
+
+// Debug helper — shows the light direction as a line
+import { DirectionalLightHelper } from 'three';
+const helper = new DirectionalLightHelper(dirLight, 2);
+scene.add(helper);
+```
+
+### Shadow Setup for DirectionalLight
+
+```js
+dirLight.castShadow = true;
+dirLight.shadow.mapSize.width  = 2048; // texture resolution
+dirLight.shadow.mapSize.height = 2048;
+
+// Orthographic shadow camera frustum
+// Tune these to tightly contain your scene for best shadow quality
+const sc = dirLight.shadow.camera;
+sc.near   = 0.5;
+sc.far    = 50;
+sc.left   = -15;
+sc.right  =  15;
+sc.top    =  15;
+sc.bottom = -15;
+
+// Shadow bias — prevents self-shadowing artefacts (acne)
+dirLight.shadow.bias         = -0.0001;
+dirLight.shadow.normalBias   = 0.02;
+
+// Optional: visualise the shadow camera frustum
+import { CameraHelper } from 'three';
+const shadowCamHelper = new CameraHelper(dirLight.shadow.camera);
+scene.add(shadowCamHelper);
+```
+
+---
+
+## PointLight
+
+Emits light equally in all directions from a single point (like a light bulb).
+
+```js
+// PointLight(color, intensity, distance, decay)
+const pointLight = new THREE.PointLight('#ff6b35', 3.0, 20, 2);
+pointLight.position.set(2, 3, 0);
+pointLight.castShadow = true;
+pointLight.shadow.mapSize.set(512, 512);
+scene.add(pointLight);
+
+// distance: beyond this radius the light has zero effect (0 = infinite)
+// decay:    physically correct = 2 (inverse square law)
+
+// Debug helper
+import { PointLightHelper } from 'three';
+const plHelper = new PointLightHelper(pointLight, 0.3);
+scene.add(plHelper);
+
+// Animate — flickering candle effect
+function animate() {
+  requestAnimationFrame(animate);
+  const t = clock.getElapsedTime();
+  pointLight.intensity = 2.5 + Math.sin(t * 12) * 0.3 + Math.random() * 0.2;
+  renderer.render(scene, camera);
+}
+```
+
+---
+
+## SpotLight
+
+Emits a cone of light with a sharp or soft edge — like a stage spotlight or torch.
+
+```js
+// SpotLight(color, intensity, distance, angle, penumbra, decay)
+const spotLight = new THREE.SpotLight(
+  '#ffffff',       // color
+  5.0,             // intensity
+  30,              // distance
+  Math.PI / 6,     // angle (half-angle of cone in radians, max Math.PI/2)
+  0.3,             // penumbra (0 = hard edge, 1 = full soft edge)
+  2                // decay
+);
+spotLight.position.set(0, 8, 0);
+spotLight.target.position.set(0, 0, 0);
+spotLight.castShadow = true;
+spotLight.shadow.mapSize.set(1024, 1024);
+spotLight.shadow.camera.near = 0.5;
+spotLight.shadow.camera.far  = 50;
+spotLight.shadow.focus = 1;   // sharpen shadow edges
+
+scene.add(spotLight);
+scene.add(spotLight.target);
+
+// Debug helper
+import { SpotLightHelper } from 'three';
+const spotHelper = new SpotLightHelper(spotLight);
+scene.add(spotHelper);
+
+// Update helper after changing properties at runtime:
+spotLight.angle = Math.PI / 8;
+spotHelper.update();
+```
+
+---
+
+## RectAreaLight
+
+An illuminated rectangular panel — like a softbox, window, or TV screen. Produces very realistic soft lighting but **does not cast shadows**.
+
+```js
+import { RectAreaLight } from 'three';
+import { RectAreaLightHelper } from 'three/addons/helpers/RectAreaLightHelper.js';
+import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
+
+// Must initialise the uniforms library once
+RectAreaLightUniformsLib.init();
+
+// RectAreaLight(color, intensity, width, height)
+const rectLight = new RectAreaLight('#ff4444', 5, 4, 2);
+rectLight.position.set(0, 3, -3);
+rectLight.lookAt(0, 0, 0);
+scene.add(rectLight);
+
+const rectHelper = new RectAreaLightHelper(rectLight);
+scene.add(rectHelper);
+```
+
+---
+
+## HemisphereLight
+
+Sky / ground two-tone ambient light — great for outdoor scenes.
+
+```js
+// HemisphereLight(skyColor, groundColor, intensity)
+const hemiLight = new THREE.HemisphereLight(
+  '#87ceeb',  // sky colour — light from above
+  '#8b5e3c',  // ground colour — light from below
+  0.6
+);
+scene.add(hemiLight);
+
+// Typical outdoor setup:
+scene.add(new THREE.HemisphereLight('#b9d5ff', '#444422', 0.6));
+scene.add(new THREE.DirectionalLight('#ffffff', 1.2)).position.set(5, 10, 5);
+```
+
+---
+
+## Light Summary Table
+
+| Light | Shadows | Position | Area | Best For |
+|---|---|---|---|---|
+| `AmbientLight` | ❌ | ❌ | Infinite | Fill light, prevent total darkness |
+| `DirectionalLight` | ✅ | Virtual (infinite) | Infinite | Sun, moon |
+| `PointLight` | ✅ | Point | Sphere | Bulbs, lamps, explosions |
+| `SpotLight` | ✅ | Point + cone | Cone | Stage lights, torches |
+| `RectAreaLight` | ❌ | Rectangular | Rectangle | Softboxes, TVs, windows |
+| `HemisphereLight` | ❌ | ❌ | Hemisphere | Sky/ground outdoor fill |
+
+---
+
+## Renderer Shadow Configuration
+
+```js
+// Enable on renderer first
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+// Each mesh must opt in individually
+// Cast shadow: does this object project a shadow on others?
+cube.castShadow = true;
+// Receive shadow: does this object show shadows from others?
+floor.receiveShadow = true;
+dirLight.castShadow = true;
+```
+
+### Shadow Bias Tuning
+
+Shadow bias corrects **shadow acne** (dark banding caused by self-shadowing):
+
+```js
+dirLight.shadow.bias       = -0.0001;  // negative values prevent acne
+dirLight.shadow.normalBias = 0.02;     // offsets along normal (reduces peter-panning)
+```
+
+- **Too positive bias** → "Peter-panning" (shadow detaches from object)
+- **Too negative bias** → Self-shadowing acne on the object surface
+
+---
+
+## Image-Based Lighting (IBL)
+
+IBL uses an HDR environment map to light your scene. This produces accurate reflections and diffuse lighting that matches the background image.
+
+```js
+import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+import { PMREMGenerator } from 'three';
+
+const pmremGenerator = new PMREMGenerator(renderer);
+pmremGenerator.compileEquirectangularShader();
+
+new RGBELoader()
+  .load('/textures/env/venice_sunset_1k.hdr', hdrTexture => {
+    const envMap = pmremGenerator.fromEquirectangular(hdrTexture).texture;
+
+    // Use as scene background AND lighting
+    scene.background   = envMap;
+    scene.environment  = envMap;   // this lights all PBR materials
+
+    hdrTexture.dispose();
+    pmremGenerator.dispose();
+  });
+
+// You can separate background from environment:
+scene.background  = new THREE.Color('#111827');  // solid dark background
+scene.environment = envMap;                       // IBL lighting only
+```
+
+:::tip[Where to Find HDR Environment Maps]
+[Poly Haven](https://polyhaven.com/hdris) offers hundreds of free high-quality `.hdr` / `.exr` environment maps. Use the 1K version for development and 4K for production.
+:::
+
+---
+
+## LightProbe
+
+`LightProbe` stores pre-baked spherical harmonic lighting coefficients for very cheap ambient lighting that matches a captured environment:
+
+```js
+import { LightProbeGenerator } from 'three/addons/lights/LightProbeGenerator.js';
+
+const cubeRenderTarget = new THREE.WebGLCubeRenderTarget(256);
+const cubeCamera = new THREE.CubeCamera(0.1, 100, cubeRenderTarget);
+scene.add(cubeCamera);
+
+// Capture the scene into the cube camera
+cubeCamera.update(renderer, scene);
+
+// Generate a LightProbe from the capture
+const lightProbe = LightProbeGenerator.fromCubeRenderTarget(
+  renderer,
+  cubeRenderTarget
+);
+lightProbe.intensity = 1.0;
+scene.add(lightProbe);
+```
+
+---
+
+## Performance Tips for Lighting
+
+| Tip | Impact |
+|---|---|
+| Keep `DirectionalLight` count to 1–2 | Shadow maps are expensive |
+| Use `AmbientLight` + 1 `DirectionalLight` as base | Best quality/cost ratio |
+| Disable shadows on `PointLight` if not needed | 6× cube shadow map cost |
+| Set tight shadow camera frustum | Higher texel density = sharper shadows |
+| Use `PCFShadowMap` instead of `PCFSoftShadowMap` on mobile | ~30% shadow cost reduction |
+| Use IBL (`scene.environment`) instead of many lights | More realistic, cheaper |
+| Bake static lighting into lightmaps | Zero runtime cost |
+| Reduce `mapSize` to 512 for unimportant shadow casters | 4× memory savings |

@@ -1,0 +1,835 @@
+---
+title: Pytest Plugins & Configuration
+description: Extend pytest with coverage, parallel tests, async support, benchmarks, and a full configuration reference.
+sidebar:
+  order: 7
+tags:
+  - python
+  - testing
+---
+
+import { Aside, Card, CardGrid } from '@astrojs/starlight/components';
+
+pytest's plugin ecosystem is one of its greatest strengths. There are over 1,000 plugins on PyPI, and a handful of them are genuinely essential for production test suites.
+
+## Essential Plugins
+
+<CardGrid>
+  <Card title="pytest-cov" icon="document">
+    Coverage reporting integrated directly into pytest runs. Measures line, branch, and path coverage.
+  </Card>
+  <Card title="pytest-xdist" icon="rocket">
+    Distribute tests across multiple CPU cores or remote hosts for dramatically faster test runs.
+  </Card>
+  <Card title="pytest-asyncio" icon="seti:python">
+    First-class support for testing `async`/`await` code with async fixtures and async test functions.
+  </Card>
+  <Card title="pytest-mock" icon="puzzle">
+    `MagicMock` integration via the `mocker` fixture — see the [Mocking guide](/python/pytest/mocking).
+  </Card>
+  <Card title="pytest-benchmark" icon="bars">
+    Benchmark critical code paths and track performance regressions over time.
+  </Card>
+  <Card title="pytest-snapshot" icon="document">
+    Snapshot testing for complex outputs — HTML, JSON, CLI output, rendered templates.
+  </Card>
+</CardGrid>
+
+## pytest-cov — Coverage Reports
+
+pytest-cov integrates [coverage.py](https://coverage.readthedocs.io) directly into pytest, measuring which lines and branches of your code are executed during tests.
+
+```bash
+pip install pytest-cov
+```
+
+### Basic Usage
+
+```bash
+# Measure coverage for the myapp package
+pytest --cov=myapp
+
+# Show lines not covered in the terminal
+pytest --cov=myapp --cov-report=term-missing
+
+# Generate an HTML report (open htmlcov/index.html)
+pytest --cov=myapp --cov-report=html
+
+# Generate multiple formats at once
+pytest --cov=myapp --cov-report=term-missing --cov-report=html --cov-report=xml
+
+# Fail the test run if coverage drops below 80%
+pytest --cov=myapp --cov-fail-under=80
+```
+
+### Coverage Configuration in `pyproject.toml`
+
+```toml
+[tool.coverage.run]
+source = ["src/myapp"]
+branch = true                        # measure branch coverage, not just line coverage
+omit = [
+    "*/tests/*",
+    "*/migrations/*",
+    "src/myapp/__main__.py",
+    "src/myapp/debug_tools.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+fail_under = 80
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@abstractmethod",
+    "if __name__ == .__main__.:",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+```
+
+:::tip[Enable branch coverage]
+Set `branch = true` in `[tool.coverage.run]`. Without it, a line like `if condition: do_a()` counts as covered even if `condition` was never `False`. Branch coverage catches these gaps.
+:::
+
+### Skipping Specific Lines
+
+```python
+def debug_only():  # pragma: no cover
+    import pdb; pdb.set_trace()
+
+
+def platform_function():
+    if sys.platform == "win32":      # pragma: no cover
+        return win32_implementation()
+    return posix_implementation()
+
+
+class AbstractBase:
+    def must_implement(self):
+        raise NotImplementedError    # excluded via exclude_lines config
+```
+
+## pytest-xdist — Parallel Test Execution
+
+Run tests concurrently across multiple CPU cores to speed up large test suites.
+
+```bash
+pip install pytest-xdist
+```
+
+```bash
+# Run tests across 4 worker processes
+pytest -n 4
+
+# Auto-detect CPU count
+pytest -n auto
+
+# Keep tests from the same file on the same worker (reduces fixture re-creation)
+pytest -n auto --dist=loadfile
+
+# Keep tests from the same class on the same worker
+pytest -n auto --dist=loadscope
+
+# Distribute tests one-at-a-time to idle workers (good for heterogeneous test times)
+pytest -n auto --dist=load
+```
+
+### Test Isolation Requirements
+
+Tests must be fully independent to run safely in parallel. Common issues:
+
+```python
+# ❌ Shared global state — breaks parallel execution
+_db_counter = 0
+
+def test_create_record():
+    global _db_counter
+    _db_counter += 1
+    assert _db_counter == 1   # races with other tests
+
+
+# ✅ Isolated state per test via fixtures
+@pytest.fixture
+def fresh_db():
+    db = InMemoryDatabase()
+    yield db
+    db.clear()
+
+
+def test_create_record(fresh_db):
+    fresh_db.insert({"id": 1})
+    assert fresh_db.count() == 1
+```
+
+### Per-Worker Database Isolation
+
+When tests write to a database, give each worker its own database using the `worker_id` fixture:
+
+```python
+# tests/conftest.py
+import pytest
+
+
+@pytest.fixture(scope="session")
+def worker_db_url(worker_id, tmp_path_factory):
+    """Create a per-worker SQLite database to avoid parallel test conflicts."""
+    if worker_id == "master":
+        # Running without -n flag — single process
+        return "sqlite:///test_master.db"
+
+    # Running with pytest-xdist: worker_id is "gw0", "gw1", etc.
+    root = tmp_path_factory.getbasetemp().parent
+    db_path = root / f"test_{worker_id}.db"
+    return f"sqlite:///{db_path}"
+
+
+@pytest.fixture(scope="session")
+def db_engine(worker_db_url):
+    engine = create_engine(worker_db_url)
+    Base.metadata.create_all(engine)
+    yield engine
+    Base.metadata.drop_all(engine)
+```
+
+:::caution[xdist and fixtures]
+Session-scoped fixtures are created **once per worker process**, not once for the entire run. If your session fixture does expensive work (e.g., populating a database), it runs once per worker. Design with this in mind.
+:::
+
+## pytest-asyncio — Async Test Support
+
+Test `async`/`await` code natively without event loop boilerplate.
+
+```bash
+pip install pytest-asyncio
+```
+
+```toml
+# pyproject.toml — recommended: enable auto mode globally
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+```
+
+### Writing Async Tests
+
+```python
+# tests/test_async_service.py
+import pytest
+from myapp.client import AsyncApiClient
+
+
+# With asyncio_mode = "auto", plain async defs are collected as tests
+async def test_fetch_user():
+    client = AsyncApiClient(base_url="https://api.test.example.com")
+    user = await client.get_user(user_id=1)
+    assert user["name"] == "Alice"
+    assert user["email"] == "alice@example.com"
+
+
+async def test_create_resource():
+    client = AsyncApiClient(base_url="https://api.test.example.com")
+    created = await client.post("/resources", json={"name": "test-resource"})
+    assert created["id"] is not None
+    assert created["name"] == "test-resource"
+
+
+# Without auto mode, decorate explicitly
+@pytest.mark.asyncio
+async def test_explicit_mark():
+    result = await some_async_function()
+    assert result == "expected"
+```
+
+### Async Fixtures
+
+```python
+import pytest_asyncio
+
+
+@pytest_asyncio.fixture
+async def async_client():
+    """Async fixture: creates and tears down an authenticated client."""
+    client = AsyncApiClient(base_url="https://api.test.example.com")
+    await client.authenticate(token="test-bearer-token")
+    yield client
+    await client.close()
+
+
+@pytest_asyncio.fixture(scope="session")
+async def shared_connection():
+    """Session-scoped async fixture for expensive connections."""
+    conn = await AsyncDatabasePool.create(dsn="postgres://localhost/testdb")
+    yield conn
+    await conn.close()
+
+
+async def test_authenticated_request(async_client):
+    response = await async_client.get("/me")
+    assert response.status == 200
+    assert response.data["authenticated"] is True
+```
+
+### Mocking Async Functions
+
+```python
+from unittest.mock import AsyncMock
+
+
+async def test_mock_async_dependency(mocker):
+    mock_fetch = mocker.patch(
+        "myapp.service.fetch_from_external_api",
+        new_callable=AsyncMock,
+    )
+    mock_fetch.return_value = {"id": 99, "payload": "mocked data"}
+
+    result = await process_with_external_data(resource_id=99)
+
+    assert result["payload"] == "mocked data"
+    mock_fetch.assert_awaited_once_with(resource_id=99)
+
+
+async def test_async_side_effect(mocker):
+    mock_send = mocker.AsyncMock()
+    mock_send.side_effect = [
+        ConnectionError("service unavailable"),
+        {"sent": True, "message_id": "msg_42"},
+    ]
+    mocker.patch("myapp.notifier.send_async", mock_send)
+
+    result = await notify_with_retry(user_id=1)
+
+    assert result["sent"] is True
+    assert mock_send.await_count == 2
+```
+
+## pytest-benchmark — Performance Testing
+
+Benchmark critical code paths and detect performance regressions between runs.
+
+```bash
+pip install pytest-benchmark
+```
+
+```python
+# tests/test_performance.py
+import pytest
+from myapp.algorithms import sort_large_dataset, binary_search, parse_config
+
+
+def test_sort_performance(benchmark):
+    data = list(range(10_000, 0, -1))   # worst-case reversed list
+    result = benchmark(sort_large_dataset, data)
+    # Assertions still run after benchmarking
+    assert result[0] == 1
+    assert result[-1] == 10_000
+
+
+def test_search_performance(benchmark):
+    sorted_data = list(range(0, 100_000))
+    result = benchmark(binary_search, sorted_data, target=73_412)
+    assert result == 73_412
+
+
+@pytest.mark.benchmark(group="parsing", min_rounds=50, warmup=True)
+def test_config_parse_performance(benchmark, tmp_path):
+    config_file = tmp_path / "config.json"
+    config_file.write_text('{"key": "value", "nested": {"a": 1, "b": 2}}')
+
+    result = benchmark(parse_config, str(config_file))
+    assert result["key"] == "value"
+
+
+@pytest.mark.benchmark(group="parsing", min_rounds=50, warmup=True)
+def test_config_parse_cached(benchmark, tmp_path):
+    """Compare cached vs uncached parse performance."""
+    config_file = tmp_path / "config.json"
+    config_file.write_text('{"key": "value"}')
+
+    result = benchmark.pedantic(
+        parse_config_cached,
+        args=(str(config_file),),
+        iterations=10,
+        rounds=50,
+    )
+    assert result["key"] == "value"
+```
+
+```bash
+# Run only benchmark tests
+pytest tests/test_performance.py --benchmark-only
+
+# Compare against a saved baseline
+pytest --benchmark-compare=baseline
+
+# Save current results as a new baseline
+pytest --benchmark-save=baseline
+
+# Show histogram of timings
+pytest --benchmark-histogram
+
+# Disable benchmarking (just run the test logic)
+pytest --benchmark-disable
+```
+
+## pytest-snapshot — Snapshot Testing
+
+Capture complex outputs as approved snapshots and detect regressions automatically.
+
+```bash
+pip install pytest-snapshot
+```
+
+```python
+# tests/test_reports.py
+from myapp.reports import generate_html_report, generate_json_summary
+
+
+def test_html_report_output(snapshot):
+    """Assert the HTML report matches the approved snapshot."""
+    report = generate_html_report(data=sample_data, title="Monthly Summary")
+    snapshot.assert_match(report, "monthly_report.html")
+
+
+def test_json_summary_shape(snapshot):
+    """Assert the JSON API response structure matches the snapshot."""
+    response = client.get("/api/v1/summary?month=2024-01")
+    snapshot.assert_match(response.json(), "summary_response.json")
+
+
+def test_cli_output(snapshot, capsys):
+    """Assert the CLI command output matches the snapshot."""
+    run_cli_command(["report", "--format", "text"])
+    captured = capsys.readouterr()
+    snapshot.assert_match(captured.out, "cli_report.txt")
+```
+
+```bash
+# First run: create snapshot files
+pytest --snapshot-update
+
+# Normal runs: compare against saved snapshots
+pytest
+
+# Update only specific snapshots
+pytest tests/test_reports.py::test_html_report_output --snapshot-update
+```
+
+Snapshots are stored in a `__snapshots__/` directory and should be committed to version control. Review snapshot diffs in pull requests the same way you review code diffs.
+
+## pytest-httpx — Mock HTTP Requests
+
+Mock HTTP calls made with the `httpx` library without touching the network.
+
+```bash
+pip install pytest-httpx
+```
+
+```python
+# tests/test_api_client.py
+import httpx
+import pytest
+from myapp.client import UserApiClient
+
+
+def test_fetch_user_success(httpx_mock):
+    httpx_mock.add_response(
+        method="GET",
+        url="https://api.example.com/users/1",
+        json={"id": 1, "name": "Alice", "email": "alice@example.com"},
+        status_code=200,
+    )
+
+    client = UserApiClient(base_url="https://api.example.com")
+    user = client.get_user(user_id=1)
+
+    assert user["name"] == "Alice"
+    assert user["email"] == "alice@example.com"
+
+
+def test_fetch_user_not_found(httpx_mock):
+    httpx_mock.add_response(
+        method="GET",
+        url="https://api.example.com/users/999",
+        json={"error": "User not found", "code": "USER_NOT_FOUND"},
+        status_code=404,
+    )
+
+    client = UserApiClient(base_url="https://api.example.com")
+    with pytest.raises(UserNotFoundError, match="User not found"):
+        client.get_user(user_id=999)
+
+
+def test_handles_connection_error(httpx_mock):
+    httpx_mock.add_exception(
+        httpx.ConnectError("Connection refused"),
+        url="https://api.example.com/users/1",
+    )
+
+    client = UserApiClient(base_url="https://api.example.com")
+    result = client.get_user_or_none(user_id=1)
+    assert result is None
+
+
+def test_create_user(httpx_mock):
+    httpx_mock.add_response(
+        method="POST",
+        url="https://api.example.com/users",
+        json={"id": 42, "name": "Bob", "created": True},
+        status_code=201,
+    )
+
+    client = UserApiClient(base_url="https://api.example.com")
+    result = client.create_user(name="Bob", email="bob@example.com")
+
+    assert result["id"] == 42
+    assert result["created"] is True
+```
+
+## Markers — Categorizing Tests
+
+### Defining Custom Markers
+
+Always register markers in `pyproject.toml` to avoid `PytestUnknownMarkWarning` and to enable `--strict-markers`:
+
+```toml
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow-running (deselect with '-m \"not slow\"')",
+    "integration: marks tests requiring external services (DB, APIs, etc.)",
+    "unit: marks fast, isolated unit tests",
+    "smoke: marks smoke tests for post-deployment verification",
+    "e2e: marks end-to-end tests that run the full stack",
+    "flaky: marks tests known to occasionally fail non-deterministically",
+]
+```
+
+### Using Markers in Tests
+
+```python
+import pytest
+import sys
+
+
+@pytest.mark.slow
+def test_process_million_records():
+    result = process_large_dataset(num_records=1_000_000)
+    assert result.processed_count == 1_000_000
+
+
+@pytest.mark.integration
+def test_database_connection():
+    conn = connect_to_database(url=os.environ["DATABASE_URL"])
+    assert conn.ping() is True
+
+
+@pytest.mark.unit
+def test_format_currency():
+    assert format_currency(9.99, currency="USD") == "$9.99"
+    assert format_currency(1234.5, currency="EUR") == "€1,234.50"
+
+
+@pytest.mark.smoke
+def test_app_health_endpoint(client):
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["status"] == "healthy"
+```
+
+### Conditional Markers
+
+```python
+import sys
+import pytest
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file permissions only")
+def test_file_permissions():
+    path = create_restricted_file()
+    assert not can_read_as_other_user(path)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("RUN_INTEGRATION"),
+    reason="Set RUN_INTEGRATION=1 to run integration tests",
+)
+def test_live_payment_gateway():
+    result = charge_real_card(amount=1, currency="usd", token="tok_visa")
+    assert result["status"] == "succeeded"
+
+
+@pytest.mark.xfail(
+    condition=sys.version_info < (3, 11),
+    reason="Exception groups require Python 3.11+",
+    strict=True,
+)
+def test_exception_groups():
+    with pytest.raises(ExceptionGroup):
+        raise_multiple_errors()
+```
+
+### Selecting by Marker
+
+```bash
+# Run only unit tests during development
+pytest -m unit
+
+# Skip slow tests for a quick feedback cycle
+pytest -m "not slow"
+
+# Run integration tests in CI
+pytest -m integration
+
+# Run smoke tests after deployment
+pytest -m smoke --tb=short -q
+
+# Combine conditions
+pytest -m "integration and not flaky"
+pytest -m "unit or smoke"
+```
+
+## `filterwarnings` Configuration
+
+Control how pytest handles Python warnings during test runs:
+
+```toml
+[tool.pytest.ini_options]
+filterwarnings = [
+    # Turn all warnings into errors — fails the test on any warning
+    "error",
+
+    # Known-acceptable third-party warnings
+    "ignore::DeprecationWarning:pkg_resources",
+    "ignore::DeprecationWarning:google.rpc",
+    "ignore::PendingDeprecationWarning",
+    "ignore:.*unclosed.*:ResourceWarning",
+
+    # Downgrade a specific warning back from error to just a warning
+    "default::UserWarning:myapp.legacy",
+]
+```
+
+Apply per-test or per-module:
+
+```python
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_legacy_api_compatibility():
+    result = old_api.do_something()
+    assert result is not None
+
+
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+def test_must_not_emit_runtime_warnings():
+    result = compute_safely(data)
+    assert result is not None
+```
+
+## Full `pyproject.toml` Configuration Reference
+
+A complete, production-ready pytest configuration:
+
+```toml
+[tool.pytest.ini_options]
+# Test discovery
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+# Minimum pytest version
+minversion = "8.0"
+
+# Default flags added to every pytest invocation
+addopts = [
+    "--strict-markers",           # Error on any unregistered marker
+    "--strict-config",            # Error on unrecognized config options
+    "-ra",                        # Show summary for all non-passing tests
+    "--tb=short",                 # Concise tracebacks
+]
+
+# Custom markers
+markers = [
+    "slow: marks tests as slow-running",
+    "integration: marks tests requiring external services",
+    "unit: marks fast isolated unit tests",
+    "smoke: marks smoke tests for post-deployment verification",
+    "e2e: marks end-to-end tests",
+    "flaky: marks non-deterministically failing tests",
+]
+
+# Warning filters
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:pkg_resources",
+    "ignore::PendingDeprecationWarning",
+]
+
+# pytest-asyncio
+asyncio_mode = "auto"
+
+# Logging
+log_cli = true
+log_cli_level = "WARNING"
+log_cli_format = "%(asctime)s [%(levelname)8s] %(name)s: %(message)s"
+log_date_format = "%Y-%m-%d %H:%M:%S"
+
+# Per-test timeout in seconds (requires pytest-timeout)
+# timeout = 30
+
+[tool.coverage.run]
+source = ["src/myapp"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/migrations/*",
+    "src/myapp/__main__.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 80
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@abstractmethod",
+]
+```
+
+## CLI Flags Quick Reference
+
+### Collection and Selection
+
+```bash
+# List collected tests without running them
+pytest --collect-only
+pytest --co                          # short form
+
+# Re-run only the tests that failed last time
+pytest --lf
+pytest --last-failed                 # long form
+
+# Run last-failed first, then the rest of the suite
+pytest --ff
+pytest --failed-first                # long form
+
+# Select tests by keyword expression
+pytest -k "user and not admin"
+pytest -k "not slow and not integration"
+
+# Select by marker
+pytest -m "unit"
+pytest -m "not slow"
+```
+
+### Output Control
+
+```bash
+# Verbose: show each test name
+pytest -v
+
+# Extra verbose: show more detail on failures
+pytest -vv
+
+# Quiet: minimal output
+pytest -q
+
+# No output capture — print() shows in real time
+pytest -s
+
+# Show N slowest tests
+pytest --durations=10
+pytest --durations=0                 # all tests
+
+# Summary options (-r flag)
+pytest -rN                           # no summary
+pytest -ra                           # all non-passing
+pytest -rf                           # only failures
+pytest -rp                           # only passing
+```
+
+### Debugging
+
+```bash
+# Drop into pdb on the first failure
+pytest --pdb
+
+# Show local variables in tracebacks
+pytest -l
+
+# Full tracebacks (not truncated)
+pytest --tb=long
+
+# Short tracebacks (great for CI)
+pytest --tb=short
+
+# No tracebacks
+pytest --tb=no
+```
+
+:::tip[CI-optimized command]
+Use this in CI for compact, machine-readable output:
+
+```bash
+pytest --tb=short -q --no-header -rN --co -q 2>/dev/null | tail -1
+# or for actual runs:
+pytest --tb=short -q --no-header
+```
+:::
+
+## Writing a Local Plugin in conftest.py
+
+For team-wide customizations, you can add hooks to `conftest.py` without publishing a package:
+
+```python
+# tests/conftest.py
+import pytest
+
+
+def pytest_configure(config):
+    """Register custom markers programmatically."""
+    config.addinivalue_line(
+        "markers", "database: marks tests that interact with a real database"
+    )
+
+
+def pytest_collection_modifyitems(items, config):
+    """Auto-tag tests in the integration/ directory with the 'integration' marker."""
+    for item in items:
+        if "integration" in str(item.fspath):
+            item.add_marker(pytest.mark.integration)
+        if "e2e" in str(item.fspath):
+            item.add_marker(pytest.mark.e2e)
+
+
+def pytest_addoption(parser):
+    """Add a --run-slow flag to opt into running slow tests."""
+    parser.addoption(
+        "--run-slow",
+        action="store_true",
+        default=False,
+        help="Include slow-marked tests in the run.",
+    )
+
+
+def pytest_runtest_setup(item):
+    """Skip slow tests unless --run-slow is passed."""
+    if item.get_closest_marker("slow"):
+        if not item.config.getoption("--run-slow"):
+            pytest.skip("Use --run-slow to run slow tests")
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """Print a custom summary line at the end of the test run."""
+    passed = len(terminalreporter.stats.get("passed", []))
+    failed = len(terminalreporter.stats.get("failed", []))
+    skipped = len(terminalreporter.stats.get("skipped", []))
+    print(f"\n📊 Summary: {passed} passed, {failed} failed, {skipped} skipped")
+```
+
+:::tip[Plugin discovery]
+pytest automatically discovers and loads every `conftest.py` in your directory tree — no registration or import required. Hooks, fixtures, and options defined there are available to all tests in scope.
+:::

@@ -1,0 +1,672 @@
+---
+title: Formats & I/O
+description: Read and write JPEG, PNG, GIF, WebP, TIFF, PDF, and 50+ other formats. Format-specific save options, animated GIF creation, batch processing pipelines, format conversion scripts, and EXIF metadata handling.
+sidebar:
+  order: 6
+tags: [python, imaging]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Pillow supports more than 50 image formats out of the box. This guide covers format detection, format-specific save options, animated images, batch workflows, and reading camera EXIF metadata.
+
+---
+
+## Supported Formats Reference
+
+| Format | Extension(s) | Read | Write | Notes |
+|---|---|---|---|---|
+| **JPEG** | `.jpg`, `.jpeg` | ✅ | ✅ | Lossy, no transparency; ubiquitous |
+| **PNG** | `.png` | ✅ | ✅ | Lossless, full alpha channel support |
+| **GIF** | `.gif` | ✅ | ✅ | Animated support; 256-color palette |
+| **WebP** | `.webp` | ✅ | ✅ | Lossy + lossless; animated support |
+| **BMP** | `.bmp` | ✅ | ✅ | Uncompressed; large files |
+| **TIFF** | `.tif`, `.tiff` | ✅ | ✅ | Multi-page; many compression options |
+| **ICO** | `.ico` | ✅ | ✅ | Multi-size Windows icon |
+| **PDF** | `.pdf` | ❌ | ✅ | Write only; multi-page support |
+| **PPM/PGM/PBM** | `.ppm`, `.pgm`, `.pbm` | ✅ | ✅ | Simple text/binary formats |
+| **HEIF/HEIC** | `.heif`, `.heic` | ✅* | ✅* | Requires `pillow-heif` plugin |
+| **EPS** | `.eps` | ✅* | ✅ | Requires Ghostscript for read |
+| **TGA** | `.tga` | ✅ | ✅ | Truevision; used in game dev |
+| **PCX** | `.pcx` | ✅ | ✅ | Legacy PC format |
+| **SGI** | `.sgi`, `.rgb` | ✅ | ✅ | Silicon Graphics format |
+| **SPIDER** | `.spi` | ✅ | ✅ | Scientific image data |
+| **XBM** | `.xbm` | ✅ | ✅ | X Window System bitmap |
+| **DDS** | `.dds` | ✅ | ✅ | DirectDraw Surface; game textures |
+| **AVIF** | `.avif` | ✅* | ✅* | Requires `pillow-avif-plugin` |
+
+`*` = requires optional system library or plugin
+
+```python
+from PIL import Image
+
+# Detect all registered format extensions
+extensions = Image.registered_extensions()
+print(len(extensions), "extensions supported")
+# Output: 160+ extensions supported  (varies by Pillow build)
+
+# Check if a specific format is available
+from PIL import features
+print(features.check("webp"))          # True / False
+print(features.check("webp_anim"))     # True if animated WebP supported
+print(features.check("libtiff"))       # True if TIFF compression available
+```
+
+---
+
+## Detecting Image Format
+
+```python
+from PIL import Image
+
+# Format is populated when opening from a file
+img = Image.open("photo.jpg")
+print(img.format)           # "JPEG"
+print(img.format_description)  # "JPEG (ISO 10918)"
+
+# Format is None for programmatically created images
+new_img = Image.new("RGB", (100, 100))
+print(new_img.format)       # None
+
+# Detect format from bytes without fully opening
+import io
+with open("mystery_file", "rb") as f:
+    header = f.read(12)
+
+# Use PIL.Image.open() which reads format from header magic bytes, not extension
+with Image.open("mystery_file") as img:
+    print(img.format)   # Correct format based on file content, not filename
+```
+
+---
+
+## JPEG — Save Options
+
+JPEG is ideal for photographs where some quality loss is acceptable in exchange for small file sizes.
+
+```python
+from PIL import Image
+
+img = Image.open("photo.png").convert("RGB")   # PNG → JPEG requires RGB (no alpha)
+
+# Basic save
+img.save("photo.jpg")
+
+# Full control over JPEG compression options
+img.save("photo_optimized.jpg",
+    quality=85,          # 1–95: quality factor (85 is a good default, 95 is near-lossless)
+    optimize=True,       # run Huffman optimization pass — smaller files, slightly slower
+    progressive=True,    # progressive JPEG: loads blurry → sharp in browsers
+    subsampling=2,       # chroma subsampling: 0=4:4:4 (best quality), 1=4:2:2, 2=4:2:0 (default)
+    dpi=(300, 300),      # embed DPI metadata for print workflows
+    exif=b"",            # pass raw EXIF bytes (or use piexif to build EXIF)
+)
+
+# Size vs quality comparison
+for q in [30, 60, 75, 85, 95]:
+    img.save(f"photo_q{q}.jpg", quality=q, optimize=True)
+# Output: five JPEG files — q30 is visibly blocky but tiny (~5% of original PNG size),
+#         q85 looks clean and is ~10–15% of PNG size, q95 is near-perfect but larger
+```
+
+:::caution[JPEG Does Not Support Transparency]
+If your image has an alpha channel (RGBA mode), you must convert to RGB before saving as JPEG or the save will raise `OSError: cannot write mode RGBA as JPEG`. Always composite transparencies onto a background first.
+:::
+
+---
+
+## PNG — Save Options
+
+PNG is a lossless format that supports full alpha transparency and is ideal for graphics, screenshots, and icons.
+
+```python
+from PIL import Image
+
+img = Image.open("logo.png")   # RGBA with transparency
+
+# Basic lossless save (no quality loss ever)
+img.save("logo_out.png")
+
+# Compression control — only affects file size, not visual quality
+img.save("logo_compressed.png",
+    compress_level=9,    # 0 (no compression, largest) – 9 (maximum, smallest, slowest)
+    optimize=True,       # find optimal Huffman table — slightly smaller output
+)
+
+# Preserve transparency correctly
+img.save("logo_transparent.png", format="PNG")
+# Output: PNG with alpha channel intact — transparent areas remain transparent
+
+# Metadata in PNG
+from PIL import PngImagePlugin
+metadata = PngImagePlugin.PngInfo()
+metadata.add_text("Author", "My Studio")
+metadata.add_text("Description", "Company logo")
+img.save("logo_meta.png", pnginfo=metadata)
+# Output: PNG file that carries text metadata readable by image viewers and exiftool
+```
+
+---
+
+## GIF — Animated GIFs
+
+Pillow can both read and write animated GIFs:
+
+```python
+from PIL import Image
+
+# --- Reading an animated GIF ---
+gif = Image.open("animation.gif")
+print(gif.n_frames)   # Number of frames
+
+# Iterate over all frames
+from PIL import ImageSequence
+for i, frame in enumerate(ImageSequence.Iterator(gif)):
+    frame.save(f"frame_{i:03d}.png")
+    print(f"Frame {i}: size={frame.size}, duration={frame.info.get('duration')} ms")
+# Output: extracted PNG frames from the GIF animation
+
+# --- Creating an animated GIF from separate images ---
+frames = []
+for i in range(8):
+    # Build each frame as a palette-mode image for GIF compatibility
+    img = Image.new("RGB", (200, 200), color=(int(i * 255 / 7), 100, 200 - int(i * 200 / 7)))
+    img_p = img.quantize(colors=256)   # convert to palette mode (GIF requires it)
+    frames.append(img_p)
+
+frames[0].save(
+    "animation.gif",
+    save_all=True,            # write all frames as animation (required)
+    append_images=frames[1:], # remaining frames to append
+    loop=0,                   # 0 = loop forever; 1 = play once; N = play N times
+    duration=120,             # milliseconds per frame (or list: [100, 200, 100, ...])
+    optimize=True,            # optimize color palette
+    disposal=2,               # 2 = restore to background between frames (cleaner)
+)
+# Output: animated GIF cycling through 8 color-shifting frames, ~120ms each, looping forever
+```
+
+### Animated GIF from Photo Sequence
+
+```python
+from PIL import Image
+import os, glob
+
+def make_gif_from_photos(input_pattern: str, output_path: str, fps: int = 8) -> None:
+    """
+    Create an animated GIF from a sequence of photos.
+
+    Args:
+        input_pattern: Glob pattern for input files, e.g. "frames/*.jpg"
+        output_path: Output GIF path.
+        fps: Frames per second.
+    """
+    duration_ms = 1000 // fps
+    paths = sorted(glob.glob(input_pattern))
+    if not paths:
+        raise FileNotFoundError(f"No files matched: {input_pattern}")
+
+    frames = []
+    for path in paths:
+        frame = Image.open(path).convert("RGB")
+        frame.thumbnail((480, 480), Image.Resampling.LANCZOS)  # keep GIF size manageable
+        frames.append(frame.quantize(colors=256, method=Image.Quantize.MEDIANCUT))
+
+    frames[0].save(
+        output_path,
+        save_all=True,
+        append_images=frames[1:],
+        loop=0,
+        duration=duration_ms,
+        optimize=True,
+    )
+    print(f"Saved {len(frames)}-frame GIF ({fps} fps) → {output_path}")
+    # Output: animated GIF playing the photos in sequence at the specified framerate
+
+make_gif_from_photos("timelapse/*.jpg", "timelapse.gif", fps=10)
+```
+
+:::tip[GIF Color Limitation]
+GIF is limited to 256 colors per frame. For realistic photographs, use animated WebP instead — it has full color depth and much better compression. GIF remains popular for its universal browser support.
+:::
+
+---
+
+## WebP — Modern Format Options
+
+WebP delivers significantly smaller file sizes than JPEG/PNG with comparable quality:
+
+```python
+from PIL import Image
+
+img = Image.open("photo.jpg")
+
+# Lossy WebP (smaller file, like JPEG but better compression)
+img.save("photo.webp",
+    quality=85,          # 1–100 quality for lossy; 80 is a good default
+    method=6,            # 0 (fastest) – 6 (best compression, slower encode)
+    lossless=False,
+)
+
+# Lossless WebP (like PNG but typically smaller than PNG)
+img.save("photo_lossless.webp",
+    lossless=True,
+    quality=100,         # compression level for lossless (0=fastest, 100=smallest)
+)
+
+# WebP with alpha (better than PNG for web use in many cases)
+img_rgba = img.convert("RGBA")
+img_rgba.save("logo.webp", lossless=True)
+# Output: WebP files — typical savings: 25-34% smaller than JPEG at same visual quality
+
+# Animated WebP from frames
+frames = [Image.open(f"frame_{i:03d}.png") for i in range(10)]
+frames[0].save(
+    "animation.webp",
+    save_all=True,
+    append_images=frames[1:],
+    duration=100,        # ms per frame
+    loop=0,
+    quality=80,
+)
+# Output: animated WebP with full color — much smaller than equivalent GIF
+```
+
+---
+
+## TIFF — Print and Archive Options
+
+TIFF is the preferred format for print production and archiving because it is lossless and supports many compression schemes:
+
+```python
+from PIL import Image
+
+img = Image.open("document_scan.png")
+
+# Basic TIFF save
+img.save("scan.tiff")
+
+# With compression options
+img.save("scan_lzw.tiff",
+    compression="tiff_lzw",    # lossless LZW compression (most common)
+    dpi=(300, 300),             # DPI metadata for print
+)
+
+img.save("scan_deflate.tiff",
+    compression="tiff_deflate",  # lossless DEFLATE (similar to zlib/PNG)
+)
+
+# JPEG-compressed TIFF (lossy but very compact; used in some workflows)
+img.convert("RGB").save("scan_jpeg.tiff",
+    compression="jpeg",
+    quality=90,
+)
+
+# Uncompressed TIFF (maximum compatibility)
+img.save("scan_raw.tiff", compression="raw")
+
+# Multi-page TIFF (like PDF but raster — common for document scanning)
+pages = [Image.open(f"page_{i}.png") for i in range(1, 5)]
+pages[0].save(
+    "document.tiff",
+    save_all=True,
+    append_images=pages[1:],
+    compression="tiff_lzw",
+    dpi=(300, 300),
+)
+# Output: multi-page TIFF with 4 pages, each compressed with LZW, at 300 DPI
+
+print("Compression options: raw, tiff_lzw, tiff_lzw_float, tiff_deflate, "
+      "tiff_adobe_deflate, tiff_ccitt, tiff_bayer, tiff_thunderscan, jpeg, webp")
+```
+
+---
+
+## PDF — Writing Multi-Page Documents
+
+Pillow can write images into PDF files. Each image becomes one page:
+
+```python
+from PIL import Image
+import os, glob
+
+def images_to_pdf(input_pattern: str, output_path: str, dpi: int = 150) -> None:
+    """
+    Compile a folder of images into a single multi-page PDF.
+
+    Args:
+        input_pattern: Glob pattern, e.g. "scans/*.jpg"
+        output_path: Output PDF path.
+        dpi: Resolution embedded in PDF metadata.
+    """
+    paths = sorted(glob.glob(input_pattern))
+    if not paths:
+        raise FileNotFoundError(f"No files matched: {input_pattern}")
+
+    pages = []
+    for path in paths:
+        with Image.open(path) as img:
+            # PDF requires RGB (not RGBA or P mode)
+            pages.append(img.convert("RGB").copy())
+
+    first_page = pages[0]
+    first_page.save(
+        output_path,
+        format="PDF",
+        save_all=True,            # write all pages
+        append_images=pages[1:],  # subsequent pages
+        resolution=dpi,
+    )
+    print(f"Saved {len(pages)}-page PDF → {output_path}")
+    # Output: PDF document where each image occupies one full page at the specified DPI
+
+images_to_pdf("scans/*.jpg", "document.pdf", dpi=200)
+
+# Single-page PDF
+with Image.open("poster.png") as img:
+    img.convert("RGB").save("poster.pdf", format="PDF", resolution=300)
+    # Output: single-page PDF from the poster image at 300 DPI print resolution
+```
+
+:::caution[Pillow PDF Limitations]
+Pillow's PDF writer is basic — it embeds images as raster data only. For text, vector graphics, or advanced PDF features, use libraries like `reportlab`, `fpdf2`, or `pypdf` instead.
+:::
+
+---
+
+## Batch Processing Pattern
+
+The canonical pattern for processing a folder of images:
+
+```python
+import os
+from pathlib import Path
+from PIL import Image, ImageOps, UnidentifiedImageError
+
+def batch_resize_and_convert(
+    input_dir: str,
+    output_dir: str,
+    max_size: tuple = (1200, 1200),
+    output_format: str = "webp",
+    quality: int = 85,
+) -> dict:
+    """
+    Batch process: resize all images in input_dir and save to output_dir.
+
+    Returns a dict with counts: processed, skipped, errors.
+    """
+    input_path  = Path(input_dir)
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp"}
+    stats = {"processed": 0, "skipped": 0, "errors": 0}
+
+    for src_file in input_path.iterdir():
+        if src_file.suffix.lower() not in IMAGE_EXTS:
+            stats["skipped"] += 1
+            continue
+
+        dst_file = output_path / (src_file.stem + "." + output_format.lower())
+
+        try:
+            with Image.open(src_file) as img:
+                img.thumbnail(max_size, Image.Resampling.LANCZOS)
+                rgb = img.convert("RGB")
+                save_kwargs = {"quality": quality, "optimize": True}
+                if output_format.lower() == "webp":
+                    save_kwargs["method"] = 4
+                rgb.save(dst_file, format=output_format.upper(), **save_kwargs)
+            print(f"  ✓ {src_file.name:40s} → {dst_file.name}")
+            stats["processed"] += 1
+        except UnidentifiedImageError:
+            print(f"  ✗ {src_file.name}: not a recognized image format")
+            stats["errors"] += 1
+        except Exception as e:
+            print(f"  ✗ {src_file.name}: {e}")
+            stats["errors"] += 1
+
+    print(f"\nDone: {stats['processed']} processed, "
+          f"{stats['skipped']} skipped, {stats['errors']} errors")
+    return stats
+
+# Run the batch job
+stats = batch_resize_and_convert(
+    input_dir="product_photos/",
+    output_dir="product_photos_web/",
+    max_size=(1200, 1200),
+    output_format="webp",
+    quality=82,
+)
+```
+
+---
+
+## Format Conversion Script
+
+A flexible command-line-style conversion function:
+
+```python
+from pathlib import Path
+from PIL import Image
+
+# Format-specific default options
+FORMAT_DEFAULTS = {
+    "JPEG": {"quality": 85, "optimize": True, "progressive": True},
+    "PNG":  {"compress_level": 7, "optimize": True},
+    "WEBP": {"quality": 82, "method": 4, "optimize": True},
+    "TIFF": {"compression": "tiff_lzw"},
+    "BMP":  {},
+    "GIF":  {"optimize": True},
+}
+
+def convert_image(
+    src_path: str,
+    dst_format: str,
+    dst_path: str | None = None,
+    **overrides,
+) -> Path:
+    """
+    Convert an image from any Pillow-supported format to another.
+
+    Args:
+        src_path: Source image path.
+        dst_format: Target format string ("JPEG", "PNG", "WEBP", etc.)
+        dst_path: Optional explicit output path. If None, replaces extension.
+        **overrides: Override default format-specific save options.
+
+    Returns:
+        Path to the written output file.
+    """
+    src = Path(src_path)
+    fmt = dst_format.upper()
+
+    if dst_path is None:
+        ext_map = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp",
+                   "TIFF": ".tiff", "BMP": ".bmp", "GIF": ".gif", "PDF": ".pdf"}
+        dst = src.with_suffix(ext_map.get(fmt, "." + fmt.lower()))
+    else:
+        dst = Path(dst_path)
+
+    options = {**FORMAT_DEFAULTS.get(fmt, {}), **overrides}
+
+    with Image.open(src) as img:
+        # Handle mode requirements
+        if fmt == "JPEG" and img.mode in ("RGBA", "P", "LA"):
+            # Composite transparency onto white background for JPEG
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            if img.mode == "P":
+                img = img.convert("RGBA")
+            if "A" in img.mode:
+                bg.paste(img, mask=img.split()[-1])
+            else:
+                bg.paste(img)
+            img = bg
+        elif fmt in ("PNG", "WEBP"):
+            pass   # PNG and WebP support all modes; no conversion needed
+        else:
+            img = img.convert("RGB")
+
+        img.save(dst, format=fmt, **options)
+        print(f"Converted: {src.name} → {dst.name}")
+        return dst
+
+# Examples
+convert_image("photo.jpg", "WEBP")                    # photo.webp, default quality
+convert_image("logo.png",  "JPEG", quality=92)        # logo.jpg with 92 quality
+convert_image("scan.tiff", "PDF",  dst_path="doc.pdf")
+convert_image("icon.png",  "ICO")                     # icon.ico
+```
+
+---
+
+## Reading EXIF Metadata
+
+EXIF data is embedded in JPEG and TIFF files by digital cameras:
+
+```python
+from PIL import Image
+from PIL.ExifTags import TAGS, GPSTAGS
+
+def read_exif(image_path: str) -> dict:
+    """
+    Extract and decode all EXIF metadata from a JPEG image.
+
+    Returns a flat dict mapping tag name → value.
+    """
+    with Image.open(image_path) as img:
+        raw_exif = img._getexif()
+
+    if raw_exif is None:
+        print("No EXIF data found.")
+        return {}
+
+    decoded = {}
+    for tag_id, value in raw_exif.items():
+        tag_name = TAGS.get(tag_id, f"Unknown_{tag_id}")
+        decoded[tag_name] = value
+    return decoded
+
+def decode_gps(exif: dict) -> dict | None:
+    """Decode GPSInfo sub-IFD into readable lat/lon."""
+    gps_info_raw = exif.get("GPSInfo")
+    if not gps_info_raw:
+        return None
+
+    gps = {}
+    for key, val in gps_info_raw.items():
+        gps[GPSTAGS.get(key, key)] = val
+
+    def to_decimal(dms, ref):
+        d, m, s = dms
+        decimal = float(d) + float(m) / 60 + float(s) / 3600
+        if ref in ("S", "W"):
+            decimal = -decimal
+        return round(decimal, 6)
+
+    if all(k in gps for k in ("GPSLatitude", "GPSLatitudeRef",
+                               "GPSLongitude", "GPSLongitudeRef")):
+        return {
+            "latitude":  to_decimal(gps["GPSLatitude"],  gps["GPSLatitudeRef"]),
+            "longitude": to_decimal(gps["GPSLongitude"], gps["GPSLongitudeRef"]),
+            "altitude_m": float(gps.get("GPSAltitude", 0)),
+        }
+    return None
+
+# Usage
+exif = read_exif("vacation_photo.jpg")
+
+print(f"Camera    : {exif.get('Make', 'N/A')} {exif.get('Model', 'N/A')}")
+print(f"Date/Time : {exif.get('DateTime', 'N/A')}")
+print(f"Exposure  : {exif.get('ExposureTime', 'N/A')} s")
+print(f"Aperture  : f/{exif.get('FNumber', 'N/A')}")
+print(f"ISO       : {exif.get('ISOSpeedRatings', 'N/A')}")
+print(f"Focal len : {exif.get('FocalLength', 'N/A')} mm")
+print(f"Flash     : {exif.get('Flash', 'N/A')}")
+
+gps = decode_gps(exif)
+if gps:
+    print(f"GPS       : {gps['latitude']}, {gps['longitude']}  alt={gps['altitude_m']:.1f}m")
+# Output example:
+# Camera    : Apple iPhone 14 Pro
+# Date/Time : 2024:07:20 14:32:10
+# Exposure  : (1, 500) s
+# Aperture  : f/(28, 10)
+# ISO       : 50
+# GPS       : 48.8566, 2.3522  alt=35.0m
+```
+
+### Stripping EXIF for Privacy
+
+```python
+from PIL import Image
+import io
+
+def strip_exif(input_path: str, output_path: str) -> None:
+    """
+    Re-save an image with all metadata stripped.
+    Useful before publishing photos to preserve privacy (GPS, camera info, etc.).
+    """
+    with Image.open(input_path) as img:
+        # Re-save via BytesIO without any metadata
+        buf = io.BytesIO()
+        # Convert to avoid mode issues; do NOT pass exif= keyword
+        rgb = img.convert("RGB")
+        rgb.save(buf, format="JPEG", quality=95, optimize=True)
+        buf.seek(0)
+
+        # Write clean file
+        with open(output_path, "wb") as f:
+            f.write(buf.getvalue())
+
+    print(f"EXIF stripped: {input_path} → {output_path}")
+    # Output: identical-looking JPEG with no embedded GPS, camera model, or timestamp
+
+strip_exif("photo_with_gps.jpg", "photo_clean.jpg")
+```
+
+:::tip[piexif for EXIF Writing]
+To **write or modify** EXIF data (not just read it), use the `piexif` library alongside Pillow:
+
+```bash
+pip install piexif
+```
+
+```python
+import piexif
+
+exif_dict = {
+    "0th": {piexif.ImageIFD.Artist: b"My Name"},
+    "Exif": {piexif.ExifIFD.DateTimeOriginal: b"2024:01:15 10:30:00"},
+}
+exif_bytes = piexif.dump(exif_dict)
+
+img = Image.open("photo.jpg")
+img.save("photo_with_exif.jpg", exif=exif_bytes, quality=92)
+```
+:::
+
+---
+
+## Format Detection Without Opening
+
+```python
+from PIL import Image
+import imghdr   # standard library, detects common image types from header bytes
+
+def detect_format(path: str) -> str:
+    """Detect image format from file header magic bytes."""
+    detected = imghdr.what(path)
+    if detected:
+        return detected.upper()
+
+    # Fallback: let Pillow parse the header
+    try:
+        with Image.open(path) as img:
+            return img.format or "UNKNOWN"
+    except Exception:
+        return "UNKNOWN"
+
+print(detect_format("file_without_extension"))
+# Output: "JPEG" or "PNG" based on the actual file bytes, not the filename
+```

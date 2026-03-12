@@ -1,0 +1,497 @@
+---
+title: Events
+description: Use Tauri's event system to communicate between Rust and the frontend — emit, listen, stream progress, and manage cleanup properly.
+sidebar:
+  order: 4
+tags: [rust, javascript, desktop]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Tauri's event system enables **push-based communication** — the Rust backend can proactively send data to the frontend without the frontend needing to poll. Events complement commands: use commands for request/response patterns, events for streaming or notifications.
+
+## Event System Overview
+
+```
+Rust Backend                         Frontend (TypeScript)
+─────────────────────────────────────────────────────────
+app_handle.emit("event-name", data)  ──►  listen("event-name", handler)
+window.emit("event-name", data)      ──►  listen("event-name", handler)
+                                     ◄──  emit("event-name", data)
+```
+
+Two directions:
+- **Rust → Frontend**: `app_handle.emit()` or `window.emit()` in Rust; `listen()` in TypeScript
+- **Frontend → Rust**: `emit()` in TypeScript; `app.listen()` in Rust via `AppHandle`
+
+## Emitting Events from Rust
+
+### Global Emit (All Windows)
+
+```rust
+use tauri::{AppHandle, Manager};
+use serde::Serialize;
+
+#[derive(Serialize, Clone)]
+pub struct DownloadProgress {
+    pub file_name: String,
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
+    pub percent: f64,
+}
+
+// Emit to ALL windows
+#[tauri::command]
+pub async fn start_download(
+    url: String,
+    app: AppHandle,
+) -> Result<(), String> {
+    let file_name = url.split('/').last().unwrap_or("file").to_string();
+
+    // Simulate download progress
+    for i in 0..=100u64 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        app.emit("download-progress", DownloadProgress {
+            file_name: file_name.clone(),
+            downloaded_bytes: i * 1024,
+            total_bytes: 100 * 1024,
+            percent: i as f64,
+        })
+        .map_err(|e| e.to_string())?;
+    }
+
+    app.emit("download-complete", &file_name)
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+```
+
+### Window-Specific Emit
+
+```rust
+use tauri::{Manager, WebviewWindow};
+
+fn notify_window(window: &WebviewWindow, message: &str) {
+    window.emit("notification", message)
+        .unwrap_or_else(|e| eprintln!("Failed to emit: {e}"));
+}
+
+// Emit to a window by label
+fn notify_by_label(app: &AppHandle, label: &str, data: impl serde::Serialize + Clone) {
+    if let Some(window) = app.get_webview_window(label) {
+        window.emit("custom-event", data).ok();
+    }
+}
+```
+
+## Listening to Events in TypeScript
+
+```typescript
+import { listen, once, type UnlistenFn } from '@tauri-apps/api/event';
+
+// Define your event payload types
+interface DownloadProgress {
+  file_name: string;
+  downloaded_bytes: number;
+  total_bytes: number;
+  percent: number;
+}
+
+// Listen to an event (returns an unlisten function)
+async function setupListeners() {
+  const unlistenProgress = await listen<DownloadProgress>(
+    'download-progress',
+    (event) => {
+      console.log('Progress:', event.payload.percent.toFixed(1) + '%');
+      console.log('Source window ID:', event.windowLabel);
+    }
+  );
+
+  const unlistenComplete = await listen<string>(
+    'download-complete',
+    (event) => {
+      console.log('Download complete:', event.payload);
+      // Clean up — once the download is done, remove the progress listener
+      unlistenProgress();
+    }
+  );
+
+  // Return cleanup function
+  return () => {
+    unlistenProgress();
+    unlistenComplete();
+  };
+}
+```
+
+:::caution[Always Unlisten]
+Every call to `listen()` registers a persistent listener that survives component unmounts unless you explicitly call the returned `UnlistenFn`. Failing to unlisten causes memory leaks and handler duplication over time — especially in single-page apps where components mount and unmount repeatedly.
+:::
+
+## Listen Once
+
+Use `once` when you only need to handle an event a single time:
+
+```typescript
+import { once } from '@tauri-apps/api/event';
+
+// Automatically unlistens after the first event
+const event = await once<string>('setup-complete');
+console.log('Setup completed:', event.payload);
+```
+
+## React Integration — Proper Cleanup
+
+```typescript
+// src/hooks/useDownload.ts
+import { useState, useEffect, useCallback } from 'react';
+import { listen } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
+
+interface DownloadProgress {
+  file_name: string;
+  downloaded_bytes: number;
+  total_bytes: number;
+  percent: number;
+}
+
+export function useDownload() {
+  const [progress, setProgress] = useState(0);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [fileName, setFileName] = useState('');
+
+  useEffect(() => {
+    // Set up listeners when component mounts
+    let unlistenProgress: (() => void) | undefined;
+    let unlistenComplete: (() => void) | undefined;
+
+    async function setupListeners() {
+      unlistenProgress = await listen<DownloadProgress>(
+        'download-progress',
+        (event) => {
+          setProgress(event.payload.percent);
+          setFileName(event.payload.file_name);
+        }
+      );
+
+      unlistenComplete = await listen<string>(
+        'download-complete',
+        () => {
+          setIsDownloading(false);
+          setProgress(100);
+        }
+      );
+    }
+
+    setupListeners();
+
+    // CRITICAL: Clean up listeners on unmount
+    return () => {
+      unlistenProgress?.();
+      unlistenComplete?.();
+    };
+  }, []); // Empty dependency array — set up once on mount
+
+  const startDownload = useCallback(async (url: string) => {
+    setIsDownloading(true);
+    setProgress(0);
+
+    try {
+      await invoke('start_download', { url });
+    } catch (error) {
+      console.error('Download failed:', error);
+      setIsDownloading(false);
+    }
+  }, []);
+
+  return { progress, isDownloading, fileName, startDownload };
+}
+```
+
+## Emitting Events from TypeScript
+
+The frontend can also emit events that Rust listens to:
+
+```typescript
+import { emit, emitTo } from '@tauri-apps/api/event';
+
+// Emit to all windows and Rust listeners
+await emit('user-action', {
+  type: 'button-click',
+  target: 'submit-form',
+  timestamp: Date.now(),
+});
+
+// Emit to a specific window
+await emitTo('settings', 'preferences-updated', {
+  theme: 'dark',
+  fontSize: 14,
+});
+```
+
+```rust
+// Rust — listening to frontend events
+use tauri::{AppHandle, Manager};
+
+pub fn setup_frontend_listeners(app: &AppHandle) {
+    let app_handle = app.clone();
+
+    app.listen("user-action", move |event| {
+        let payload: serde_json::Value = serde_json::from_str(
+            event.payload()
+        ).unwrap_or_default();
+
+        println!("Frontend action: {}", payload);
+
+        // Process and potentially re-emit to other windows
+        app_handle.emit("action-processed", &payload).ok();
+    });
+}
+```
+
+## Channel API — Efficient Streaming (Tauri 2)
+
+For high-frequency streaming (progress, logs, real-time data), the `Channel` API is more efficient than events because it avoids the global event bus overhead:
+
+```rust
+use tauri::ipc::Channel;
+use serde::Serialize;
+
+#[derive(Serialize, Clone)]
+pub enum ProcessEvent {
+    Progress { percent: f64, message: String },
+    Log { level: String, message: String },
+    Complete { result: String },
+    Error { message: String },
+}
+
+#[tauri::command]
+pub async fn run_long_process(
+    input: String,
+    on_event: Channel<ProcessEvent>,
+) -> Result<(), String> {
+    on_event.send(ProcessEvent::Log {
+        level: "info".to_string(),
+        message: format!("Starting process with input: {input}"),
+    }).map_err(|e| e.to_string())?;
+
+    for i in 0..=100u64 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+        if i % 10 == 0 {
+            on_event.send(ProcessEvent::Log {
+                level: "debug".to_string(),
+                message: format!("Processing chunk {i}"),
+            }).map_err(|e| e.to_string())?;
+        }
+
+        on_event.send(ProcessEvent::Progress {
+            percent: i as f64,
+            message: format!("{i}% complete"),
+        }).map_err(|e| e.to_string())?;
+    }
+
+    on_event.send(ProcessEvent::Complete {
+        result: "Process finished successfully".to_string(),
+    }).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+```
+
+```typescript
+import { invoke, Channel } from '@tauri-apps/api/core';
+
+type ProcessEvent =
+  | { Progress: { percent: number; message: string } }
+  | { Log: { level: string; message: string } }
+  | { Complete: { result: string } }
+  | { Error: { message: string } };
+
+async function runProcess(input: string) {
+  const onEvent = new Channel<ProcessEvent>();
+
+  onEvent.onmessage = (event) => {
+    if ('Progress' in event) {
+      console.log(`${event.Progress.percent.toFixed(0)}%: ${event.Progress.message}`);
+    } else if ('Log' in event) {
+      console.log(`[${event.Log.level}] ${event.Log.message}`);
+    } else if ('Complete' in event) {
+      console.log('Done:', event.Complete.result);
+    } else if ('Error' in event) {
+      console.error('Error:', event.Error.message);
+    }
+  };
+
+  await invoke('run_long_process', { input, onEvent });
+}
+```
+
+:::tip[Channel vs Events]
+Use **Channel** when:
+- You need high-frequency updates (>10/second)
+- The stream is tied to a specific command invocation
+- You want structured, typed event variants via Rust enums
+
+Use **Events** when:
+- The notification comes from background Rust tasks (not triggered by a specific command)
+- You need to broadcast to multiple windows
+- The event is ad-hoc or infrequent
+:::
+
+## Typed Event Payloads
+
+Define shared TypeScript interfaces for all event payloads:
+
+```typescript
+// src/lib/events.ts
+export interface AppEvents {
+  'download-progress': {
+    file_name: string;
+    downloaded_bytes: number;
+    total_bytes: number;
+    percent: number;
+  };
+  'download-complete': string;
+  'theme-changed': { dark: boolean };
+  'notification': { title: string; body: string; level: 'info' | 'warn' | 'error' };
+  'update-available': { version: string; release_notes: string };
+}
+
+// Type-safe listen wrapper
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+
+export async function listenTyped<K extends keyof AppEvents>(
+  event: K,
+  handler: (payload: AppEvents[K]) => void
+): Promise<UnlistenFn> {
+  return listen<AppEvents[K]>(event, (e) => handler(e.payload));
+}
+```
+
+## EventTarget — Global vs Window-Specific
+
+In Tauri 2, events can target specific windows or the entire app:
+
+```rust
+use tauri::{AppHandle, Manager, EventTarget};
+
+// Emit to all targets (global)
+app.emit("global-event", "data").ok();
+
+// Emit to a specific window by label
+app.emit_to(EventTarget::webview_window("settings"), "settings-event", "data").ok();
+
+// Emit to any window labeled "main" OR "popup"
+app.emit_to(
+    EventTarget::labeled("main"),
+    "main-only-event",
+    "data"
+).ok();
+```
+
+```typescript
+// TypeScript — emit to a specific window
+import { emitTo } from '@tauri-apps/api/event';
+await emitTo('main', 'from-popup', { data: 'hello' });
+```
+
+## Progress Reporting Pattern
+
+A complete pattern for reporting long-running task progress:
+
+```rust
+// src-tauri/src/commands/tasks.rs
+use tauri::{AppHandle, Manager};
+use serde::Serialize;
+
+#[derive(Serialize, Clone)]
+pub struct TaskProgress {
+    pub task_id: String,
+    pub step: String,
+    pub current: u32,
+    pub total: u32,
+    pub done: bool,
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+pub async fn process_files(
+    files: Vec<String>,
+    task_id: String,
+    app: AppHandle,
+) -> Result<u32, String> {
+    let total = files.len() as u32;
+    let mut processed = 0u32;
+
+    for file in &files {
+        // Do actual work
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        processed += 1;
+
+        app.emit("task-progress", TaskProgress {
+            task_id: task_id.clone(),
+            step: format!("Processing {file}"),
+            current: processed,
+            total,
+            done: processed == total,
+            error: None,
+        }).map_err(|e| e.to_string())?;
+    }
+
+    Ok(processed)
+}
+```
+
+```typescript
+// React component using the progress pattern
+import { useState, useEffect } from 'react';
+import { listen } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
+import { randomUUID } from 'crypto';
+
+interface TaskProgress {
+  task_id: string;
+  step: string;
+  current: number;
+  total: number;
+  done: boolean;
+  error: string | null;
+}
+
+export function FileProcessor({ files }: { files: string[] }) {
+  const [progress, setProgress] = useState<TaskProgress | null>(null);
+  const [taskId] = useState(() => crypto.randomUUID());
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    listen<TaskProgress>('task-progress', (e) => {
+      if (e.payload.task_id === taskId) {
+        setProgress(e.payload);
+      }
+    }).then((fn) => { unlisten = fn; });
+
+    return () => unlisten?.();
+  }, [taskId]);
+
+  const start = async () => {
+    await invoke('process_files', { files, taskId });
+  };
+
+  return (
+    <div>
+      <button onClick={start}>Process {files.length} files</button>
+      {progress && (
+        <div>
+          <p>{progress.step}</p>
+          <progress value={progress.current} max={progress.total} />
+          <span>{progress.current}/{progress.total}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+```

@@ -1,0 +1,661 @@
+---
+title: Dockerfile
+description: Master Dockerfile instructions, layer caching, multi-stage builds, base image selection, and build secrets for production-ready images.
+sidebar:
+  order: 3
+tags: [devops, docker]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Dockerfile
+
+A `Dockerfile` is a text file containing instructions that Docker executes sequentially to build a container image. Each instruction creates a new **layer** that is independently cached and reused on subsequent builds when its inputs haven't changed.
+
+---
+
+## Dockerfile Instructions Reference
+
+### FROM
+
+Specifies the base image. Every Dockerfile must begin with `FROM` (except for parser directives and ARGs used before FROM).
+
+```dockerfile
+# Pin to a specific version tag
+FROM node:20-alpine
+
+# Pin to a specific immutable digest (most reproducible)
+FROM node:20-alpine@sha256:a3b4c5d6e7f80123456789abcdef
+
+# Named stage for multi-stage builds
+FROM node:20-alpine AS builder
+
+# Scratch: empty base for static binaries (Go, Rust)
+FROM scratch
+```
+
+:::caution[Never use :latest in production]
+`FROM ubuntu:latest` breaks reproducibility — the same tag can point to different images over time. Always pin a specific version tag or digest for production images.
+:::
+
+### RUN
+
+Executes a command during the build process. Each `RUN` creates a new layer.
+
+```dockerfile
+# Chain commands to reduce layers — clean up in the same RUN
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Alpine: use apk
+RUN apk add --no-cache curl git tini
+
+# Exec form (preferred — avoids shell string interpolation surprises)
+RUN ["apt-get", "install", "-y", "curl"]
+
+# Shell form with pipefail (important for pipe error detection)
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+RUN curl -fsSL https://example.com/installer | bash
+```
+
+:::tip[Clean package caches in the same RUN layer]
+Cleaning in a separate `RUN rm -rf /var/lib/apt/lists/*` layer does nothing to reduce image size because the files still exist in the previous layer's snapshot. Always chain the cleanup in the **same** `RUN` command.
+:::
+
+### COPY and ADD
+
+Copy files from the build context (or another stage) into the image.
+
+```dockerfile
+# Copy a single file
+COPY package.json .
+
+# Copy multiple files at once
+COPY package.json package-lock.json ./
+
+# Copy a directory
+COPY src/ ./src/
+
+# Copy with ownership set (avoids a separate chown RUN layer)
+COPY --chown=node:node . .
+
+# Copy from a previous build stage
+COPY --from=builder /app/dist ./dist
+
+# ADD can extract tar archives automatically
+ADD app.tar.gz /usr/src/
+
+# ADD can fetch URLs (avoid this — use RUN curl instead for clarity)
+ADD https://example.com/file.tar.gz /tmp/
+```
+
+:::tip[Prefer COPY over ADD]
+Use `COPY` for straightforward file copying. Only use `ADD` when you need its tar extraction or URL fetching features. `COPY` is explicit and easier to understand.
+:::
+
+### WORKDIR
+
+Sets the working directory for subsequent `RUN`, `CMD`, `ENTRYPOINT`, `COPY`, and `ADD` instructions.
+
+```dockerfile
+WORKDIR /app
+
+# Creates the directory if it doesn't exist
+# Equivalent to: mkdir -p /app && cd /app
+# Path can be set multiple times to change directory
+```
+
+### ENV and ARG
+
+```dockerfile
+# ENV: set environment variables that persist into the running container
+ENV NODE_ENV=production
+ENV PORT=3000
+
+# Multiple ENV in a single instruction
+ENV NODE_ENV=production \
+    PORT=3000 \
+    LOG_LEVEL=info \
+    TZ=UTC
+
+# ARG: build-time variables — NOT persisted in the final image
+ARG BUILD_VERSION=dev
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+
+# Use ARG in a RUN step
+RUN echo "Building version $BUILD_VERSION for $TARGETPLATFORM"
+
+# Pass ARG at build time:
+# docker build --build-arg BUILD_VERSION=1.2.3 .
+
+# ARG before FROM (for base image version pinning)
+ARG NODE_VERSION=20
+FROM node:${NODE_VERSION}-alpine
+```
+
+:::caution[ARG values appear in docker history]
+Even though `ARG` values are not in the final image environment, they ARE visible via `docker history`. Never use `ARG` or `ENV` for secrets. Use `--mount=type=secret` instead.
+:::
+
+### EXPOSE
+
+Documents which ports the container listens on at runtime. This is metadata only — it does **not** publish the port.
+
+```dockerfile
+EXPOSE 3000
+EXPOSE 80 443
+EXPOSE 8080/tcp
+EXPOSE 5353/udp
+```
+
+Publishing ports happens at runtime: `docker run -p 8080:80`.
+
+### VOLUME
+
+Creates a mount point and marks it as holding externally-mounted data. Volumes declared here are always created even if you don't pass `-v` at runtime.
+
+```dockerfile
+VOLUME /var/lib/postgresql/data
+VOLUME ["/data", "/logs"]
+```
+
+:::caution[VOLUME in Dockerfile is rarely needed]
+Declaring `VOLUME` in a Dockerfile creates an anonymous volume automatically, which can cause confusion. It's usually cleaner to mount volumes explicitly via `docker run -v` or Compose.
+:::
+
+### USER
+
+Sets the user and optionally the group for subsequent instructions and the default user in the running container.
+
+```dockerfile
+# Create a non-root user (Debian/Ubuntu)
+RUN groupadd --gid 1001 appgroup \
+    && useradd --uid 1001 --gid appgroup --shell /bin/sh --create-home appuser
+
+# Switch to non-root user
+USER appuser
+
+# Alpine: use addgroup/adduser
+RUN addgroup -S -g 1001 appgroup \
+    && adduser -S -u 1001 -G appgroup -D appuser
+
+USER 1001:1001
+```
+
+### LABEL
+
+Adds OCI-standard metadata to an image.
+
+```dockerfile
+LABEL org.opencontainers.image.title="My Application"
+LABEL org.opencontainers.image.description="Handles API requests"
+LABEL org.opencontainers.image.version="1.2.3"
+LABEL org.opencontainers.image.authors="team@example.com"
+LABEL org.opencontainers.image.source="https://github.com/org/repo"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.created="2024-01-01T00:00:00Z"
+```
+
+### HEALTHCHECK
+
+Tells Docker how to test whether the container is healthy.
+
+```dockerfile
+# HTTP health check via curl
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:3000/health || exit 1
+
+# HTTP check via wget (available in Alpine without installing curl)
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD wget -qO- http://localhost:8080/healthz || exit 1
+
+# TCP check (for databases)
+HEALTHCHECK --interval=10s --timeout=5s --retries=5 \
+  CMD pg_isready -U postgres || exit 1
+
+# Disable an inherited health check
+HEALTHCHECK NONE
+```
+
+Health check options:
+- `--interval`: time between checks (default 30s)
+- `--timeout`: time before a check is considered failed (default 30s)
+- `--start-period`: grace period during container startup (default 0s)
+- `--retries`: consecutive failures before marking unhealthy (default 3)
+
+### ENTRYPOINT and CMD
+
+```dockerfile
+# ENTRYPOINT: the executable — cannot be overridden without --entrypoint flag
+ENTRYPOINT ["node", "server.js"]
+
+# CMD: default arguments to ENTRYPOINT, or full default command if no ENTRYPOINT
+CMD ["--port", "3000"]
+
+# Combined example: gunicorn with overridable worker count
+ENTRYPOINT ["python", "-m", "gunicorn"]
+CMD ["--workers", "4", "--bind", "0.0.0.0:8000", "app:app"]
+
+# Shell form — avoid! Does not pass SIGTERM to the child process correctly
+ENTRYPOINT python server.py    # Bad — python runs as PID 1, signal handling broken
+```
+
+Override at runtime:
+```bash
+# Override CMD
+docker run myapp --port 8080
+
+# Override ENTRYPOINT
+docker run --entrypoint sh myapp
+
+# Override both
+docker run --entrypoint python myapp -c "print('hello')"
+```
+
+### Additional Instructions
+
+```dockerfile
+# SHELL: change default shell for subsequent RUN commands
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# ONBUILD: trigger when this image is used as a base
+ONBUILD COPY package.json ./
+ONBUILD RUN npm ci
+
+# STOPSIGNAL: signal sent to stop the container (default SIGTERM)
+STOPSIGNAL SIGTERM
+
+# Heredoc syntax (requires BuildKit — Docker 23+)
+RUN cat <<'EOF' > /etc/nginx/conf.d/default.conf
+server {
+  listen 80;
+  root /usr/share/nginx/html;
+}
+EOF
+```
+
+---
+
+## Layer Caching
+
+Docker caches each layer. If a layer and all layers **above it** are unchanged, the cache is reused. **The order of instructions critically affects build speed.**
+
+### Anti-Pattern: Invalidating Cache Too Early
+
+```dockerfile
+# BAD: COPY . happens before npm ci
+# Any change to any source file busts the npm ci cache
+FROM node:20-alpine
+WORKDIR /app
+COPY . .            # ← ANY file change invalidates everything below
+RUN npm ci          # ← re-runs on every code change — very slow
+```
+
+### Best Practice: Copy Dependencies First
+
+```dockerfile
+# GOOD: Copy package files separately, install deps, THEN copy source
+FROM node:20-alpine
+WORKDIR /app
+COPY package.json package-lock.json ./  # ← only changes when deps change
+RUN npm ci                              # ← cached unless package*.json changes
+COPY . .                                # ← source changes don't bust dep cache
+RUN npm run build
+```
+
+The same principle applies to all package managers:
+
+```dockerfile
+# Python (pip)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+
+# Go modules
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+# Rust cargo
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && echo "fn main() {}" > src/main.rs
+RUN cargo build --release  # cache deps
+COPY src/ ./src/
+RUN touch src/main.rs && cargo build --release  # rebuild with real source
+```
+
+---
+
+## Multi-Stage Builds
+
+Multi-stage builds use multiple `FROM` instructions. You selectively copy artifacts from earlier stages, keeping the **final image lean** by excluding build tools, compilers, and intermediate files.
+
+```dockerfile
+# syntax=docker/dockerfile:1
+
+# ── Stage 1: Install ALL dependencies (including devDependencies) ──────────
+FROM node:20-alpine AS deps-dev
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# ── Stage 2: Build ────────────────────────────────────────────────────────
+FROM deps-dev AS builder
+COPY . .
+RUN npm run build
+
+# ── Stage 3: Production dependencies only ────────────────────────────────
+FROM node:20-alpine AS deps-prod
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+# ── Stage 4: Final runtime image (lean) ───────────────────────────────────
+FROM node:20-alpine AS runtime
+WORKDIR /app
+
+# Non-root user
+RUN addgroup -S -g 1001 app && adduser -S -u 1001 -G app app
+
+# Copy only what is needed to run
+COPY --from=deps-prod --chown=app:app /app/node_modules ./node_modules
+COPY --from=builder   --chown=app:app /app/dist         ./dist
+COPY --chown=app:app package.json .
+
+USER app
+EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD wget -qO- http://localhost:3000/health || exit 1
+ENTRYPOINT ["node", "dist/server.js"]
+```
+
+Build a specific target stage:
+
+```bash
+# Build only the builder stage (for running tests in CI)
+docker build --target builder -t myapp:test .
+
+# Build the final production image
+docker build --target runtime -t myapp:latest .
+```
+
+---
+
+## .dockerignore
+
+Prevents files from being sent to the build context. A well-crafted `.dockerignore` dramatically speeds up builds and prevents accidental leakage of secrets.
+
+```bash
+# .dockerignore
+
+# Version control
+.git
+.gitignore
+.github
+
+# Node.js
+node_modules
+npm-debug.log
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+*.egg-info
+
+# Build artifacts
+dist
+build
+out
+target
+*.o
+*.a
+
+# Test output
+coverage
+.nyc_output
+htmlcov
+junit.xml
+
+# Editor and OS files
+.vscode
+.idea
+*.swp
+.DS_Store
+Thumbs.db
+
+# Documentation
+docs
+*.md
+LICENSE
+
+# Secrets and environment — CRITICAL
+.env
+.env.*
+*.key
+*.pem
+*.p12
+secrets/
+.aws/
+.kube/
+
+# CI configs
+.circleci
+.github
+Jenkinsfile
+```
+
+---
+
+## Base Image Selection
+
+| Base Image | Compressed Size | Use Case |
+|---|---|---|
+| `ubuntu:22.04` | ~29MB | General purpose, familiar tooling |
+| `debian:bookworm-slim` | ~25MB | Slim Debian, excellent compatibility |
+| `alpine:3.19` | ~3.5MB | Minimal, uses musl libc |
+| `node:20-slim` | ~70MB | Node.js on Debian slim |
+| `node:20-alpine` | ~20MB | Node.js on Alpine |
+| `python:3.12-slim` | ~45MB | Python on Debian slim |
+| `gcr.io/distroless/nodejs20` | ~45MB | No shell, no package mgr — hardened |
+| `gcr.io/distroless/static` | ~2MB | Static binaries only (Go, Rust) |
+| `scratch` | 0MB | Fully static binaries |
+
+:::tip[Distroless for hardened production]
+Google Distroless images contain only the app and its runtime dependencies — no shell, no package manager, no `curl`. They dramatically reduce attack surface and are ideal for compiled languages like Go. Debugging requires using `--target=debug` variants that include `busybox`.
+:::
+
+:::caution[Alpine and musl libc compatibility]
+Alpine uses musl libc instead of glibc. Some native Node.js modules, Python wheels, or compiled binaries built against glibc will fail on Alpine. Test Alpine-based images thoroughly for compatibility before adopting them.
+:::
+
+---
+
+## tini as PID 1
+
+The process running as PID 1 is responsible for reaping zombie processes and forwarding signals. Node.js, Python, and most application runtimes are not designed to be PID 1. Use `tini` as a minimal init system.
+
+```dockerfile
+FROM node:20-alpine
+# Install tini
+RUN apk add --no-cache tini
+# tini handles signal forwarding and zombie reaping
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "server.js"]
+```
+
+Or use Docker's built-in init:
+
+```bash
+docker run --init myapp
+```
+
+---
+
+## Build Secrets (BuildKit)
+
+Pass secrets to build steps without embedding them in image layers or `docker history`.
+
+```bash
+# Build with a secret from a file
+docker build --secret id=npmrc,src=$HOME/.npmrc -t myapp .
+
+# Build with a secret from environment variable
+docker build --secret id=ghtoken,env=GITHUB_TOKEN -t myapp .
+```
+
+```dockerfile
+# Mount and use the secret in a RUN command
+# The secret is NEVER written to any layer
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
+    npm ci
+
+RUN --mount=type=secret,id=ghtoken \
+    GITHUB_TOKEN=$(cat /run/secrets/ghtoken) \
+    pip install git+https://token:$GITHUB_TOKEN@github.com/org/private-repo.git
+```
+
+---
+
+## BuildKit and buildx
+
+```bash
+# Enable BuildKit (default in Docker 23.0+)
+export DOCKER_BUILDKIT=1
+
+# Multi-platform build
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -t myregistry/myapp:latest \
+  --push .
+
+# Build with registry cache
+docker buildx build \
+  --cache-from type=registry,ref=myregistry/myapp:buildcache \
+  --cache-to   type=registry,ref=myregistry/myapp:buildcache,mode=max \
+  -t myregistry/myapp:latest \
+  --push .
+
+# Create a multi-platform builder
+docker buildx create --name multibuilder --use
+docker buildx inspect --bootstrap
+```
+
+---
+
+## Linting with hadolint
+
+```bash
+# Install hadolint
+brew install hadolint
+
+# Lint a Dockerfile
+hadolint Dockerfile
+
+# Run via Docker (no installation needed)
+docker run --rm -i hadolint/hadolint < Dockerfile
+
+# Ignore specific rules
+hadolint --ignore DL3008 --ignore DL3009 Dockerfile
+```
+
+Common hadolint rules:
+- `DL3007` — avoid using `latest` tag in FROM
+- `DL3008` — pin versions in apt-get install
+- `DL3018` — pin versions in apk add
+- `DL3025` — use JSON notation for CMD and ENTRYPOINT
+- `SC2086` — quote shell variables
+
+---
+
+## Complete Examples
+
+<Tabs>
+  <TabItem label="Node.js">
+    ```dockerfile
+    # syntax=docker/dockerfile:1
+    FROM node:20-alpine AS deps
+    WORKDIR /app
+    COPY package.json package-lock.json ./
+    RUN npm ci --omit=dev && npm cache clean --force
+
+    FROM node:20-alpine AS builder
+    WORKDIR /app
+    COPY package.json package-lock.json ./
+    RUN npm ci
+    COPY . .
+    RUN npm run build
+
+    FROM node:20-alpine AS runtime
+    WORKDIR /app
+    ENV NODE_ENV=production
+    RUN apk add --no-cache tini \
+        && addgroup -S -g 1001 app \
+        && adduser -S -u 1001 -G app app
+    COPY --from=deps     --chown=app:app /app/node_modules ./node_modules
+    COPY --from=builder  --chown=app:app /app/dist         ./dist
+    COPY --chown=app:app package.json .
+    USER app
+    EXPOSE 3000
+    HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+      CMD wget -qO- http://localhost:3000/health || exit 1
+    ENTRYPOINT ["/sbin/tini", "--"]
+    CMD ["node", "dist/server.js"]
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```dockerfile
+    # syntax=docker/dockerfile:1
+    FROM python:3.12-slim AS builder
+    WORKDIR /app
+    RUN pip install --no-cache-dir uv
+    COPY pyproject.toml uv.lock ./
+    RUN uv sync --frozen --no-dev --no-editable
+
+    FROM python:3.12-slim AS runtime
+    WORKDIR /app
+    ENV PYTHONDONTWRITEBYTECODE=1 \
+        PYTHONUNBUFFERED=1 \
+        PATH="/app/.venv/bin:$PATH"
+    RUN addgroup --gid 1001 app \
+        && adduser --uid 1001 --gid 1001 --no-create-home --disabled-password app
+    COPY --from=builder --chown=app:app /app/.venv ./.venv
+    COPY --chown=app:app src/ ./src/
+    USER app
+    EXPOSE 8000
+    HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+      CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+    CMD ["python", "-m", "uvicorn", "src.main:app", \
+         "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```dockerfile
+    # syntax=docker/dockerfile:1
+    FROM golang:1.22-alpine AS builder
+    WORKDIR /src
+    # Cache module downloads separately from source
+    COPY go.mod go.sum ./
+    RUN go mod download && go mod verify
+    COPY . .
+    RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+        -ldflags="-s -w -extldflags=-static" \
+        -trimpath \
+        -o /out/server \
+        ./cmd/server
+
+    FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+    COPY --from=builder /out/server /server
+    USER nonroot:nonroot
+    EXPOSE 8080
+    HEALTHCHECK --interval=30s --timeout=5s CMD ["/server", "-healthcheck"]
+    ENTRYPOINT ["/server"]
+    ```
+  </TabItem>
+</Tabs>

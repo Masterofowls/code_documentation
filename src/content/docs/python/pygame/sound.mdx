@@ -1,0 +1,425 @@
+---
+title: Sound in Pygame
+description: Play background music and sound effects with pygame.mixer. Control volume, channels, panning, and handle common audio issues.
+sidebar:
+  order: 6
+tags: [python, gamedev]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Pygame's audio system is handled by `pygame.mixer`, which wraps SDL2_mixer. It provides two distinct audio layers: **`mixer.music`** for long-running background music, and **`mixer.Sound`** for short, frequently-played sound effects.
+
+## Initializing the Mixer
+
+The mixer must be initialized before any audio calls. `pygame.init()` initializes it with defaults, but for games you should call `pygame.mixer.pre_init()` *before* `pygame.init()` to set your preferred parameters:
+
+```python
+import pygame
+
+# Call BEFORE pygame.init() to set preferred audio parameters
+pygame.mixer.pre_init(
+    frequency = 44100,   # Sample rate in Hz (44100 = CD quality)
+    size      = -16,     # Bit depth: -16 = signed 16-bit, -32 = float32
+    channels  = 2,       # 1 = mono, 2 = stereo
+    buffer    = 512,     # Buffer size in samples (smaller = lower latency)
+)
+
+pygame.init()
+
+# Verify what was actually set
+freq, size, chans = pygame.mixer.get_init()
+print(f"Mixer: {freq}Hz, {size}-bit, {chans} channel(s)")
+```
+
+### Choosing Buffer Size
+
+| Buffer | Latency | Use case |
+|---|---|---|
+| `256` | ~6ms | Precise sound-on-hit feedback, rhythm games |
+| `512` | ~12ms | General games (recommended default) |
+| `1024` | ~23ms | Background music only |
+| `2048` | ~46ms | Minimal CPU usage, audio quality over latency |
+
+:::caution[Pre-init Timing]
+`pygame.mixer.pre_init()` **must** be called before `pygame.init()`. Calling it after has no effect. If you hear crackling or stuttering, try doubling the buffer size.
+:::
+
+## Background Music — `mixer.music`
+
+`mixer.music` streams audio from disk, making it ideal for long tracks (it doesn't load the whole file into RAM).
+
+```python
+# Load a track (replaces any currently loaded track)
+pygame.mixer.music.load("assets/sounds/theme.ogg")
+
+# Play: loops=-1 means loop forever; loops=0 means play once; loops=N = N+1 plays
+pygame.mixer.music.play(loops=-1)
+
+# Fade in over 2 seconds
+pygame.mixer.music.play(loops=-1, fade_ms=2000)
+
+# Start playback from a specific position (seconds)
+pygame.mixer.music.play(loops=0, start=30.0)
+
+# Pause / unpause (preserves position)
+pygame.mixer.music.pause()
+pygame.mixer.music.unpause()
+
+# Stop playback entirely (loses position)
+pygame.mixer.music.stop()
+
+# Rewind to start
+pygame.mixer.music.rewind()
+
+# Fade out over 1.5 seconds (non-blocking)
+pygame.mixer.music.fadeout(1500)
+
+# Volume: 0.0 (silent) to 1.0 (full)
+pygame.mixer.music.set_volume(0.6)
+vol = pygame.mixer.music.get_volume()
+
+# Check if still playing
+if pygame.mixer.music.get_busy():
+    print("Music is playing")
+
+# Queue a track to play when the current one ends
+pygame.mixer.music.queue("assets/sounds/boss.ogg")
+
+# Get playback position in milliseconds
+pos_ms = pygame.mixer.music.get_pos()
+```
+
+### Music End Event
+
+```python
+# Fire a custom event when the track finishes
+MUSIC_END = pygame.USEREVENT + 10
+pygame.mixer.music.set_endevent(MUSIC_END)
+
+for event in pygame.event.get():
+    if event.type == MUSIC_END:
+        # Track finished — load the next one
+        next_track = playlist.pop(0)
+        pygame.mixer.music.load(next_track)
+        pygame.mixer.music.play()
+```
+
+### Supported Music Formats
+
+| Format | Notes |
+|---|---|
+| OGG Vorbis | ✅ Best choice — open, compressed, widely supported |
+| MP3 | ✅ Works on most platforms (licensing issues on some) |
+| WAV | ✅ Uncompressed — large files |
+| FLAC | ✅ Lossless compressed |
+| MIDI | ⚠️ Platform-dependent, requires soundfont |
+| MOD/XM/IT | ✅ Tracker modules supported via SDL2_mixer |
+
+:::tip[Use OGG for Music]
+OGG Vorbis is the best format for Pygame music: open-source license, excellent compression, good quality, and universally supported by SDL2_mixer without additional dependencies.
+:::
+
+## Sound Effects — `mixer.Sound`
+
+`mixer.Sound` loads entire audio files into RAM. Use it for short clips (< 5 seconds) that need instant, low-latency playback.
+
+```python
+# Load a sound
+shoot_sfx   = pygame.mixer.Sound("assets/sounds/shoot.wav")
+explode_sfx = pygame.mixer.Sound("assets/sounds/explosion.ogg")
+jump_sfx    = pygame.mixer.Sound("assets/sounds/jump.wav")
+
+# Play once
+shoot_sfx.play()
+
+# Play and loop 3 extra times (total 4 plays)
+jump_sfx.play(loops=3)
+
+# Play with fade-in (milliseconds)
+explode_sfx.play(fade_ms=200)
+
+# Set volume for this sound (0.0–1.0)
+shoot_sfx.set_volume(0.4)
+vol = shoot_sfx.get_volume()
+
+# Get duration in seconds
+duration = explode_sfx.get_length()
+print(f"Explosion is {duration:.2f}s long")
+
+# Stop all instances of this sound
+shoot_sfx.stop()
+
+# Fade out all instances over 500ms
+explode_sfx.fadeout(500)
+
+# How many channels are currently playing this sound?
+count = shoot_sfx.get_num_channels()
+```
+
+## Channels
+
+The mixer has a pool of **channels** — each can play one sound at a time. By default there are 8 channels.
+
+```python
+# Set the total number of channels (call before playing anything)
+pygame.mixer.set_num_channels(16)
+
+# Get number of currently busy channels
+busy = pygame.mixer.get_busy()
+
+# Get a specific channel object
+channel_0 = pygame.mixer.Channel(0)
+
+# Reserve channel 0 for the player's footsteps
+pygame.mixer.set_reserved(1)  # Reserve first N channels
+
+# Play on a specific channel
+channel_0.play(shoot_sfx)
+channel_0.stop()
+channel_0.pause()
+channel_0.unpause()
+channel_0.set_volume(0.8)
+
+# Check if channel is busy
+if channel_0.get_busy():
+    print("Channel 0 is playing")
+
+# Find a free channel to play on
+free_chan = pygame.mixer.find_channel()
+if free_chan:
+    free_chan.play(jump_sfx)
+```
+
+## Stereo Panning
+
+```python
+# Channel.set_volume(left, right) — values 0.0–1.0
+channel = pygame.mixer.Channel(0)
+channel.play(shoot_sfx)
+
+# Pan hard left
+channel.set_volume(1.0, 0.0)
+
+# Pan hard right
+channel.set_volume(0.0, 1.0)
+
+# Center
+channel.set_volume(1.0, 1.0)
+
+# Dynamic panning based on position
+def pan_for_position(channel, sound, obj_x, screen_width):
+    """Pan a sound based on a game object's horizontal position."""
+    center = screen_width / 2
+    pan    = (obj_x - center) / center          # -1.0 to 1.0
+    left   = min(1.0, 1.0 - pan)
+    right  = min(1.0, 1.0 + pan)
+    channel.play(sound)
+    channel.set_volume(left, right)
+```
+
+## Sound Pooling for Rapid-Fire Effects
+
+When the same sound fires many times per second (machine gun, particle system), you need a pool of channels to avoid clipping:
+
+```python
+class SoundPool:
+    """Play a sound on the next available channel, cycling through a pool."""
+
+    def __init__(self, sound_path, pool_size=8):
+        self.sound    = pygame.mixer.Sound(sound_path)
+        self.channels = [pygame.mixer.Channel(i) for i in range(pool_size)]
+        self._index   = 0
+
+    def play(self, volume=1.0):
+        # Try each channel in round-robin until we find a free one
+        for _ in range(len(self.channels)):
+            ch = self.channels[self._index]
+            self._index = (self._index + 1) % len(self.channels)
+            if not ch.get_busy():
+                ch.set_volume(volume)
+                ch.play(self.sound)
+                return ch
+        # All busy — play anyway on the oldest (will cut it off)
+        ch = self.channels[self._index]
+        ch.set_volume(volume)
+        ch.play(self.sound)
+        return ch
+
+
+# Usage
+bullet_pool  = SoundPool("assets/sounds/bullet.wav",    pool_size=16)
+engine_pool  = SoundPool("assets/sounds/engine_rev.wav", pool_size=4)
+
+# In game loop:
+if player.fired:
+    bullet_pool.play(volume=0.5)
+```
+
+## Volume Control System
+
+```python
+class AudioManager:
+    """Centralized volume control for music and SFX."""
+
+    def __init__(self):
+        self._master_volume = 1.0
+        self._music_volume  = 0.7
+        self._sfx_volume    = 0.8
+        self._muted         = False
+
+    @property
+    def music_volume(self):
+        return 0.0 if self._muted else self._master_volume * self._music_volume
+
+    @property
+    def sfx_volume(self):
+        return 0.0 if self._muted else self._master_volume * self._sfx_volume
+
+    def set_master(self, v):
+        self._master_volume = max(0.0, min(1.0, v))
+        pygame.mixer.music.set_volume(self.music_volume)
+
+    def set_music(self, v):
+        self._music_volume = max(0.0, min(1.0, v))
+        pygame.mixer.music.set_volume(self.music_volume)
+
+    def set_sfx(self, v):
+        self._sfx_volume = max(0.0, min(1.0, v))
+
+    def toggle_mute(self):
+        self._muted = not self._muted
+        pygame.mixer.music.set_volume(self.music_volume)
+
+    def play_sfx(self, sound: pygame.mixer.Sound):
+        sound.set_volume(self.sfx_volume)
+        sound.play()
+
+    def play_music(self, path, loops=-1, fade_ms=0):
+        pygame.mixer.music.load(path)
+        pygame.mixer.music.set_volume(self.music_volume)
+        pygame.mixer.music.play(loops=loops, fade_ms=fade_ms)
+
+    def stop_music(self, fade_ms=0):
+        if fade_ms:
+            pygame.mixer.music.fadeout(fade_ms)
+        else:
+            pygame.mixer.music.stop()
+
+
+audio = AudioManager()
+audio.play_music("assets/sounds/theme.ogg", fade_ms=1000)
+```
+
+## Common Issues and Fixes
+
+:::caution[No Sound on Linux]
+If audio doesn't work on Linux, the SDL audio driver may not be set correctly. Try:
+```bash
+SDL_AUDIODRIVER=pulse python main.py   # PulseAudio
+SDL_AUDIODRIVER=alsa  python main.py   # ALSA
+```
+Or set it in your Python script before importing pygame:
+```python
+import os
+os.environ["SDL_AUDIODRIVER"] = "pulse"
+import pygame
+```
+:::
+
+:::caution[Crackling / Stuttering Audio]
+Increase the buffer size in `pre_init()`. Change `buffer=512` to `buffer=1024` or `2048`. On slower machines, the default 512 may be too small.
+:::
+
+:::caution[MP3 Looping Gaps]
+MP3 files often have a small silence at the start/end. Use **OGG Vorbis** for looping music — it supports seamless looping natively.
+:::
+
+:::tip[Test Audio Without Sound Hardware]
+Run with `SDL_AUDIODRIVER=dummy` to suppress audio on CI/CD servers or in headless test environments:
+```bash
+SDL_AUDIODRIVER=dummy python main.py
+```
+:::
+
+## Complete Audio Demo
+
+```python
+import pygame
+import sys
+import os
+
+os.environ.setdefault("SDL_AUDIODRIVER", "pulse")   # Linux fallback
+
+pygame.mixer.pre_init(44100, -16, 2, 512)
+pygame.init()
+screen = pygame.display.set_mode((600, 400))
+pygame.display.set_caption("Sound Demo")
+clock  = pygame.time.Clock()
+font   = pygame.font.SysFont(None, 28)
+
+# Generate simple beep sounds procedurally (no files needed for demo)
+import array, math
+
+def make_beep(freq=440, duration=0.15, volume=0.4, rate=44100):
+    n_samples = int(rate * duration)
+    buf = array.array("h", [0] * n_samples)
+    for i in range(n_samples):
+        t = i / rate
+        fade = min(1.0, (n_samples - i) / (rate * 0.05))
+        buf[i] = int(volume * 32767 * math.sin(2 * math.pi * freq * t) * fade)
+    sound = pygame.mixer.Sound(buffer=buf)
+    return sound
+
+beeps = {
+    "low":  make_beep(220),
+    "mid":  make_beep(440),
+    "high": make_beep(880),
+    "chord":make_beep(660, duration=0.3),
+}
+
+music_vol = 0.7
+sfx_vol   = 0.8
+key_map = {
+    pygame.K_1: "low",
+    pygame.K_2: "mid",
+    pygame.K_3: "high",
+    pygame.K_4: "chord",
+}
+
+running = True
+while running:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                running = False
+            if event.key in key_map:
+                name = key_map[event.key]
+                s = beeps[name]
+                s.set_volume(sfx_vol)
+                s.play()
+            if event.key == pygame.K_UP:
+                sfx_vol = min(1.0, sfx_vol + 0.1)
+            if event.key == pygame.K_DOWN:
+                sfx_vol = max(0.0, sfx_vol - 0.1)
+
+    screen.fill((20, 20, 35))
+
+    lines = [
+        "1/2/3/4 — play beep",
+        "UP/DOWN — SFX volume",
+        f"SFX Volume: {sfx_vol:.1f}",
+        f"Channels busy: {pygame.mixer.get_busy()}",
+    ]
+    for i, line in enumerate(lines):
+        s = font.render(line, True, (200, 210, 230))
+        screen.blit(s, (40, 60 + i * 36))
+
+    pygame.display.flip()
+    clock.tick(60)
+
+pygame.quit()
+sys.exit()
+```

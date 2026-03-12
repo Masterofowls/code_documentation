@@ -1,0 +1,512 @@
+---
+title: XML Schemas — DTD, XSD, RelaxNG & Schematron
+description: Validate XML documents with Document Type Definitions, XML Schema (XSD), RelaxNG, and Schematron. Learn type systems, cardinality constraints, and how to validate in Java, Python, and JavaScript.
+sidebar:
+  order: 4
+tags: [xml, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+XML validation is the process of checking that a document conforms to a defined structure. A schema specifies which elements and attributes are allowed, in what order, how many times, and with what data types.
+
+---
+
+## Document Type Definitions (DTD)
+
+DTD is the oldest XML schema language — it is part of the XML 1.0 specification itself. DTDs are compact but limited: they have no namespace support and only a few data types.
+
+### Internal DTD
+
+An internal DTD is embedded directly in the XML document's `DOCTYPE` declaration:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE bookstore [
+  <!ELEMENT bookstore (book+)>
+  <!ELEMENT book (title, author+, year, price)>
+  <!ELEMENT title (#PCDATA)>
+  <!ELEMENT author (#PCDATA)>
+  <!ELEMENT year (#PCDATA)>
+  <!ELEMENT price (#PCDATA)>
+
+  <!ATTLIST book
+    id       ID       #REQUIRED
+    category CDATA    #IMPLIED
+  >
+  <!ATTLIST title
+    lang     CDATA    "en"
+  >
+]>
+<bookstore>
+  <book id="b1" category="technical">
+    <title>Clean Code</title>
+    <author>Robert C. Martin</author>
+    <year>2008</year>
+    <price>35.99</price>
+  </book>
+</bookstore>
+```
+
+### External DTD
+
+An external DTD lives in a separate `.dtd` file:
+
+```xml
+<!-- bookstore.dtd -->
+<!ELEMENT bookstore (book+)>
+<!ELEMENT book (title, author+, year, price, tags?)>
+<!ELEMENT title (#PCDATA)>
+<!ELEMENT author (#PCDATA)>
+<!ELEMENT year (#PCDATA)>
+<!ELEMENT price (#PCDATA)>
+<!ELEMENT tags (tag*)>
+<!ELEMENT tag (#PCDATA)>
+
+<!ATTLIST book
+  id       ID         #REQUIRED
+  category (fiction | technical | biography | science) "fiction"
+  isbn     CDATA      #IMPLIED
+  inStock  (yes | no) "yes"
+>
+```
+
+Reference it from your XML:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE bookstore SYSTEM "bookstore.dtd">
+<bookstore>
+  <!-- document content -->
+</bookstore>
+```
+
+### DTD Content Models
+
+| Declaration | Meaning |
+|---|---|
+| `(a)` | Exactly element `a` |
+| `(a, b)` | `a` followed by `b` (sequence) |
+| `(a \| b)` | Either `a` or `b` (choice) |
+| `(a+)` | One or more `a` |
+| `(a*)` | Zero or more `a` |
+| `(a?)` | Zero or one `a` |
+| `(#PCDATA)` | Parsed character data (text) |
+| `EMPTY` | No content allowed |
+| `ANY` | Any content allowed |
+
+### DTD Attribute Types
+
+| Type | Meaning |
+|---|---|
+| `CDATA` | Any character data |
+| `ID` | Unique identifier within document |
+| `IDREF` | Reference to an `ID` elsewhere |
+| `IDREFS` | Space-separated list of `IDREF`s |
+| `NMTOKEN` | XML name token (letters, digits, `-`, `_`, `.`, `:`) |
+| `NMTOKENS` | Space-separated list of `NMTOKEN`s |
+| `NOTATION` | Refers to a declared notation |
+| `(val1\|val2)` | Enumerated list of allowed values |
+| `ENTITY` | References a declared unparsed entity |
+
+### DTD Default Values
+
+| Default | Meaning |
+|---|---|
+| `#REQUIRED` | Attribute must be present |
+| `#IMPLIED` | Attribute is optional, no default |
+| `#FIXED "val"` | Attribute must equal `"val"` if present |
+| `"val"` | Default value if attribute is absent |
+
+### DTD Entities
+
+```xml
+<!DOCTYPE doc [
+  <!-- Internal general entity -->
+  <!ENTITY company "Acme Corporation">
+  <!ENTITY copyright "&#169; 2024 Acme Corporation. All rights reserved.">
+
+  <!-- External general entity -->
+  <!ENTITY legal SYSTEM "legal-boilerplate.xml">
+
+  <!-- Parameter entity (used inside DTD only) -->
+  <!ENTITY % commonAttrs "id ID #REQUIRED
+                           class CDATA #IMPLIED">
+
+  <!ELEMENT heading (#PCDATA)>
+  <!ATTLIST heading %commonAttrs;>
+]>
+<doc>
+  <heading id="h1">Welcome to &company;</heading>
+  <footer>&copyright;</footer>
+  &legal;
+</doc>
+```
+
+:::caution[DTD Limitations]
+DTD has no support for XML namespaces, only a handful of data types (no integers, dates, enumerations beyond string), and cannot constrain the actual data values in element content. For serious validation, use XSD.
+:::
+
+---
+
+## XML Schema Definition (XSD)
+
+XSD is a powerful W3C schema language that is itself an XML document. It supports namespaces, a rich type system, and complex constraints.
+
+### Minimal XSD Example
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           elementFormDefault="qualified">
+
+  <xs:element name="bookstore" type="BookstoreType"/>
+
+  <xs:complexType name="BookstoreType">
+    <xs:sequence>
+      <xs:element name="book" type="BookType" minOccurs="1" maxOccurs="unbounded"/>
+    </xs:sequence>
+    <xs:attribute name="name" type="xs:string" use="optional"/>
+  </xs:complexType>
+
+  <xs:complexType name="BookType">
+    <xs:sequence>
+      <xs:element name="title"  type="TitleType"/>
+      <xs:element name="author" type="xs:string" minOccurs="1" maxOccurs="unbounded"/>
+      <xs:element name="year"   type="xs:gYear"/>
+      <xs:element name="price"  type="MoneyType"/>
+      <xs:element name="tags"   type="TagsType"  minOccurs="0"/>
+    </xs:sequence>
+    <xs:attribute name="id"       type="xs:ID"       use="required"/>
+    <xs:attribute name="category" type="CategoryType" default="fiction"/>
+    <xs:attribute name="isbn"     type="ISBNType"     use="optional"/>
+  </xs:complexType>
+
+  <xs:complexType name="TitleType">
+    <xs:simpleContent>
+      <xs:extension base="xs:string">
+        <xs:attribute name="lang" type="xs:language" default="en"/>
+      </xs:extension>
+    </xs:simpleContent>
+  </xs:complexType>
+
+  <xs:complexType name="TagsType">
+    <xs:sequence>
+      <xs:element name="tag" type="xs:string" minOccurs="0" maxOccurs="20"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- Money type: non-negative decimal with max 2 decimal places -->
+  <xs:simpleType name="MoneyType">
+    <xs:restriction base="xs:decimal">
+      <xs:minInclusive value="0.00"/>
+      <xs:fractionDigits value="2"/>
+      <xs:totalDigits value="10"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Enumerated category type -->
+  <xs:simpleType name="CategoryType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="fiction"/>
+      <xs:enumeration value="technical"/>
+      <xs:enumeration value="biography"/>
+      <xs:enumeration value="science"/>
+      <xs:enumeration value="history"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ISBN-13 pattern -->
+  <xs:simpleType name="ISBNType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="978-\d{1,5}-\d{1,7}-\d{1,7}-\d"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+</xs:schema>
+```
+
+### Built-in XSD Types
+
+#### Primitive Types
+
+| Type | Example Values |
+|---|---|
+| `xs:string` | `"Hello World"` |
+| `xs:boolean` | `true`, `false`, `1`, `0` |
+| `xs:decimal` | `3.14`, `-42.00` |
+| `xs:float` | `3.14E2`, `INF`, `NaN` |
+| `xs:double` | Same as float, double precision |
+| `xs:duration` | `P1Y2M3DT4H5M6S` (1 year 2 months…) |
+| `xs:dateTime` | `2024-01-15T14:30:00Z` |
+| `xs:date` | `2024-01-15` |
+| `xs:time` | `14:30:00+01:00` |
+| `xs:gYear` | `2024` |
+| `xs:gMonth` | `--01` (January) |
+| `xs:gDay` | `---15` (15th day) |
+| `xs:hexBinary` | `DEADBEEF` |
+| `xs:base64Binary` | `SGVsbG8=` |
+| `xs:anyURI` | `https://example.com/path` |
+| `xs:QName` | `ns:localName` |
+
+#### Derived Types
+
+| Type | Restriction of | Notes |
+|---|---|---|
+| `xs:integer` | `xs:decimal` | No fractional part |
+| `xs:long` | `xs:integer` | -9223372036854775808 to 9223372036854775807 |
+| `xs:int` | `xs:long` | -2147483648 to 2147483647 |
+| `xs:short` | `xs:int` | -32768 to 32767 |
+| `xs:byte` | `xs:short` | -128 to 127 |
+| `xs:positiveInteger` | `xs:integer` | > 0 |
+| `xs:nonNegativeInteger` | `xs:integer` | >= 0 |
+| `xs:negativeInteger` | `xs:integer` | < 0 |
+| `xs:unsignedLong` | `xs:nonNegativeInteger` | 0 to 18446744073709551615 |
+| `xs:normalizedString` | `xs:string` | No tabs, CR, LF |
+| `xs:token` | `xs:normalizedString` | No leading/trailing spaces |
+| `xs:language` | `xs:token` | RFC 3066 language tags (`en`, `fr-CA`) |
+| `xs:ID` | `xs:NCName` | Unique within document |
+| `xs:IDREF` | `xs:NCName` | References an `xs:ID` |
+
+### Occurrence Constraints
+
+```xml
+<!-- Exactly once (default) -->
+<xs:element name="title" type="xs:string"/>
+
+<!-- Optional — 0 or 1 -->
+<xs:element name="subtitle" type="xs:string" minOccurs="0"/>
+
+<!-- Required, multiple allowed -->
+<xs:element name="author" type="xs:string" minOccurs="1" maxOccurs="unbounded"/>
+
+<!-- Exactly 3 -->
+<xs:element name="rating" type="xs:integer" minOccurs="3" maxOccurs="3"/>
+
+<!-- 2 to 5 -->
+<xs:element name="tag" type="xs:string" minOccurs="2" maxOccurs="5"/>
+```
+
+### Complex Type Compositors
+
+```xml
+<!-- sequence — children must appear in order -->
+<xs:complexType name="AddressType">
+  <xs:sequence>
+    <xs:element name="street"  type="xs:string"/>
+    <xs:element name="city"    type="xs:string"/>
+    <xs:element name="zip"     type="xs:string"/>
+    <xs:element name="country" type="xs:string"/>
+  </xs:sequence>
+</xs:complexType>
+
+<!-- choice — exactly one of the listed children -->
+<xs:complexType name="ContactType">
+  <xs:choice>
+    <xs:element name="email" type="xs:string"/>
+    <xs:element name="phone" type="xs:string"/>
+    <xs:element name="fax"   type="xs:string"/>
+  </xs:choice>
+</xs:complexType>
+
+<!-- all — children in any order, each 0 or 1 time -->
+<xs:complexType name="PersonType">
+  <xs:all>
+    <xs:element name="firstName" type="xs:string"/>
+    <xs:element name="lastName"  type="xs:string"/>
+    <xs:element name="birthDate" type="xs:date" minOccurs="0"/>
+  </xs:all>
+</xs:complexType>
+```
+
+### Facets (Restriction Constraints)
+
+```xml
+<xs:simpleType name="PasswordType">
+  <xs:restriction base="xs:string">
+    <xs:minLength value="8"/>
+    <xs:maxLength value="64"/>
+    <xs:pattern value="[A-Za-z0-9!@#$%^&amp;*]+"/>
+  </xs:restriction>
+</xs:simpleType>
+
+<xs:simpleType name="AgeType">
+  <xs:restriction base="xs:integer">
+    <xs:minInclusive value="0"/>
+    <xs:maxInclusive value="150"/>
+  </xs:restriction>
+</xs:simpleType>
+
+<xs:simpleType name="PostalCode">
+  <xs:restriction base="xs:string">
+    <xs:pattern value="[A-Z]{2}\d{5}(-\d{4})?"/>
+  </xs:restriction>
+</xs:simpleType>
+```
+
+---
+
+## RelaxNG Overview
+
+RelaxNG is an ISO standard schema language. It is often considered more elegant than XSD and has a compact non-XML syntax:
+
+```xml
+<!-- RelaxNG compact syntax (.rnc) -->
+default namespace = ""
+
+start = element bookstore {
+  attribute name { text }?,
+  element book {
+    attribute id { xsd:ID },
+    attribute category { "fiction" | "technical" | "biography" }?,
+    element title {
+      attribute lang { xsd:language }?,
+      text
+    },
+    element author { text }+,
+    element year   { xsd:gYear },
+    element price  { xsd:decimal }
+  }+
+}
+```
+
+RelaxNG is used by the EPUB standard and is the official schema language for DITA and DocBook.
+
+---
+
+## Schematron Overview
+
+Schematron validates XML using **rules and assertions written in XPath**. It excels at cross-field validation that XSD cannot express:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<sch:schema xmlns:sch="http://purl.oclc.org/dsdl/schematron"
+            queryBinding="xslt2">
+
+  <sch:title>Bookstore Business Rules</sch:title>
+
+  <sch:pattern id="price-rules">
+    <sch:rule context="book">
+      <!-- Prices must be positive -->
+      <sch:assert test="price > 0">
+        Price for book '<sch:value-of select="title"/>' must be positive.
+      </sch:assert>
+      <!-- Fiction books should cost less than technical books -->
+      <sch:report test="@category='fiction' and price > 50">
+        Fiction book '<sch:value-of select="title"/>' is unusually expensive ($
+        <sch:value-of select="price"/>).
+      </sch:report>
+    </sch:rule>
+  </sch:pattern>
+
+  <sch:pattern id="author-rules">
+    <sch:rule context="book/author">
+      <!-- Author name should contain a space (first + last name) -->
+      <sch:assert test="contains(., ' ')">
+        Author '<sch:value-of select="."/>' appears to be missing a last name.
+      </sch:assert>
+    </sch:rule>
+  </sch:pattern>
+
+</sch:schema>
+```
+
+---
+
+## Validating XML Against a Schema
+
+<Tabs>
+<TabItem label="Java">
+```xml
+import javax.xml.XMLConstants;
+import javax.xml.transform.stream.StreamSource;
+import javax.xml.validation.*;
+import java.io.File;
+
+// XSD validation
+SchemaFactory factory = SchemaFactory.newInstance(XMLConstants.W3C_XML_SCHEMA_NS_URI);
+Schema schema = factory.newSchema(new File("bookstore.xsd"));
+Validator validator = schema.newValidator();
+
+try {
+    validator.validate(new StreamSource(new File("bookstore.xml")));
+    System.out.println("Document is valid.");
+} catch (SAXException e) {
+    System.err.println("Validation error: " + e.getMessage());
+}
+```
+</TabItem>
+<TabItem label="Python (lxml)">
+```bash
+pip install lxml
+```
+
+```xml
+from lxml import etree
+
+# XSD validation
+with open('bookstore.xsd', 'rb') as f:
+    schema_doc = etree.parse(f)
+schema = etree.XMLSchema(schema_doc)
+
+with open('bookstore.xml', 'rb') as f:
+    doc = etree.parse(f)
+
+if schema.validate(doc):
+    print("Document is valid.")
+else:
+    for error in schema.error_log:
+        print(f"Line {error.line}: {error.message}")
+
+# RelaxNG validation
+with open('bookstore.rng', 'rb') as f:
+    relaxng_doc = etree.parse(f)
+relaxng = etree.RelaxNG(relaxng_doc)
+relaxng.validate(doc)
+```
+</TabItem>
+<TabItem label="JavaScript (browser)">
+```js
+// Browser does not natively validate against XSD.
+// Use the xmllint WASM port or a server-side endpoint.
+
+// Simple well-formedness check with DOMParser:
+const parser = new DOMParser();
+const doc = parser.parseFromString(xmlString, 'application/xml');
+const errors = doc.getElementsByTagName('parsererror');
+
+if (errors.length > 0) {
+  console.error('Parse error:', errors[0].textContent);
+} else {
+  console.log('Document is well-formed.');
+}
+```
+</TabItem>
+<TabItem label="Node.js (libxmljs2)">
+```bash
+npm install libxmljs2
+```
+
+```js
+import libxml from 'libxmljs2';
+import { readFileSync } from 'fs';
+
+const xmlDoc = libxml.parseXml(readFileSync('bookstore.xml', 'utf8'));
+const xsdDoc = libxml.parseXml(readFileSync('bookstore.xsd', 'utf8'));
+
+const isValid = xmlDoc.validate(xsdDoc);
+
+if (isValid) {
+  console.log('Valid!');
+} else {
+  xmlDoc.validationErrors.forEach(err => {
+    console.error(`Line ${err.line}: ${err.message}`);
+  });
+}
+```
+</TabItem>
+</Tabs>
+
+:::tip[Schema-First Development]
+Define your XSD schema before writing any XML. Use it as the contract between systems. Tools like `xsd.exe` (Microsoft), `xjc` (Java), or `generateDS` (Python) can generate language-specific classes from your XSD automatically.
+:::

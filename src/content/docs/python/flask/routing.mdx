@@ -1,0 +1,585 @@
+---
+title: Routing in Flask
+description: Master URL routing, HTTP methods, Blueprints, the request and response objects, error handlers, and request lifecycle hooks.
+sidebar:
+  order: 3
+tags: [python, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Flask's routing system maps URLs to Python functions. Under the hood it uses **Werkzeug's routing module**, which supports variable rules, type converters, method restrictions, and URL building. This guide covers everything from basic routes to full Blueprint architecture.
+
+## The `@app.route()` Decorator
+
+Every URL in Flask is registered using the `route()` decorator (or `add_url_rule()` for programmatic registration):
+
+```python
+from flask import Flask
+
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    return '<h1>Home Page</h1>'
+
+# Equivalent programmatic form
+def about():
+    return '<h1>About Page</h1>'
+
+app.add_url_rule('/about', 'about', about)
+```
+
+## URL Variables
+
+Flask routes can contain **variable segments** that are passed as keyword arguments to your view function:
+
+```python
+from flask import Flask
+
+app = Flask(__name__)
+
+# String variable (default)
+@app.route('/users/<username>')
+def user_profile(username: str):
+    return f'<h2>Profile: {username}</h2>'
+
+# Integer variable
+@app.route('/posts/<int:post_id>')
+def show_post(post_id: int):
+    return f'Post #{post_id}'
+
+# Float variable
+@app.route('/prices/<float:amount>')
+def show_price(amount: float):
+    return f'Price: ${amount:.2f}'
+
+# UUID variable
+@app.route('/items/<uuid:item_id>')
+def show_item(item_id):
+    return f'Item: {item_id}'
+
+# Path variable (allows slashes)
+@app.route('/files/<path:filepath>')
+def serve_file(filepath: str):
+    return f'File: {filepath}'
+```
+
+Test the integer route:
+
+```bash
+curl http://127.0.0.1:5000/posts/42
+# Post #42
+
+curl http://127.0.0.1:5000/posts/not-a-number
+# 404 Not Found  (Flask rejects non-integer automatically)
+```
+
+### Built-in Converters
+
+| Converter | Example | Accepts |
+|-----------|---------|---------|
+| `string` | `<string:name>` | Any text without a slash (default) |
+| `int` | `<int:id>` | Positive integers |
+| `float` | `<float:val>` | Positive floating-point numbers |
+| `path` | `<path:subpath>` | Like string but also accepts slashes |
+| `uuid` | `<uuid:token>` | UUID strings |
+
+### Custom Converters
+
+```python
+from werkzeug.routing import BaseConverter
+
+class ListConverter(BaseConverter):
+    """Matches comma-separated values: /tags/python,flask,web"""
+    def to_python(self, value: str) -> list[str]:
+        return value.split(',')
+
+    def to_url(self, values: list[str]) -> str:
+        return ','.join(str(v) for v in values)
+
+app.url_map.converters['list'] = ListConverter
+
+@app.route('/tags/<list:tags>')
+def show_tags(tags: list[str]):
+    return {'tags': tags}
+```
+
+## HTTP Methods
+
+By default, routes only respond to GET requests. Use the `methods` parameter to accept others:
+
+```python
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+@app.route('/articles', methods=['GET'])
+def list_articles():
+    return jsonify([{'id': 1, 'title': 'Flask Routing'}])
+
+@app.route('/articles', methods=['POST'])
+def create_article():
+    data = request.get_json()
+    return jsonify(data), 201
+
+@app.route('/articles/<int:article_id>', methods=['GET', 'PUT', 'DELETE'])
+def article(article_id: int):
+    if request.method == 'GET':
+        return jsonify({'id': article_id})
+    elif request.method == 'PUT':
+        data = request.get_json()
+        return jsonify({'id': article_id, **data})
+    elif request.method == 'DELETE':
+        return '', 204
+```
+
+Test with curl:
+
+```bash
+# GET
+curl http://127.0.0.1:5000/articles
+# [{"id": 1, "title": "Flask Routing"}]
+
+# POST
+curl -X POST http://127.0.0.1:5000/articles \
+  -H "Content-Type: application/json" \
+  -d '{"title": "New Article", "body": "Content here"}'
+# {"title": "New Article", "body": "Content here"}
+
+# DELETE
+curl -X DELETE http://127.0.0.1:5000/articles/1 -w "%{http_code}"
+# 204
+```
+
+:::tip[Method Views]
+For resource-style routing, Flask provides `MethodView` which dispatches GET/POST/PUT/DELETE to corresponding methods automatically. Use `app.add_url_rule('/articles', view_func=ArticleListView.as_view('articles'))`.
+:::
+
+## url_for() — URL Building
+
+Always use `url_for()` to generate URLs instead of hardcoding them. It handles URL encoding, parameter insertion, and stays correct when routes change:
+
+```python
+from flask import Flask, url_for, redirect
+
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    return 'Home'
+
+@app.route('/users/<int:user_id>')
+def user_detail(user_id: int):
+    return f'User {user_id}'
+
+@app.route('/redirect-example')
+def redirect_example():
+    # Basic url_for
+    home_url = url_for('index')               # → '/'
+    user_url = url_for('user_detail', user_id=5)  # → '/users/5'
+
+    # Extra kwargs become query string parameters
+    search_url = url_for('index', q='flask', page=2)  # → '/?q=flask&page=2'
+
+    # External (absolute) URL
+    abs_url = url_for('index', _external=True)  # → 'http://localhost/''
+
+    return redirect(url_for('user_detail', user_id=1))
+```
+
+## redirect() and abort()
+
+```python
+from flask import Flask, redirect, url_for, abort, jsonify
+
+app = Flask(__name__)
+
+@app.route('/old-path')
+def old_path():
+    # 301 Permanent redirect
+    return redirect(url_for('new_path'), code=301)
+
+@app.route('/new-path')
+def new_path():
+    return 'New location!'
+
+@app.route('/admin')
+def admin():
+    # Abort with 403 Forbidden — raises an HTTPException
+    user_is_admin = False
+    if not user_is_admin:
+        abort(403)
+    return 'Admin panel'
+
+@app.route('/items/<int:item_id>')
+def get_item(item_id: int):
+    item = None  # imagine a DB lookup here
+    if item is None:
+        abort(404)
+    return jsonify(item)
+```
+
+## Error Handlers
+
+Register custom responses for HTTP error codes:
+
+```python
+from flask import Flask, jsonify, render_template
+
+app = Flask(__name__)
+
+@app.errorhandler(400)
+def bad_request(error):
+    return jsonify({'error': 'Bad Request', 'message': str(error)}), 400
+
+@app.errorhandler(403)
+def forbidden(error):
+    return jsonify({'error': 'Forbidden'}), 403
+
+@app.errorhandler(404)
+def not_found(error):
+    # Return JSON for API routes, HTML for browser routes
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'Not found'}), 404
+    return render_template('errors/404.html'), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    db.session.rollback()  # Rollback any failed transactions
+    return jsonify({'error': 'Internal Server Error'}), 500
+
+# Catch all unhandled exceptions in production
+@app.errorhandler(Exception)
+def handle_exception(error):
+    from werkzeug.exceptions import HTTPException
+    if isinstance(error, HTTPException):
+        return jsonify({'error': error.description}), error.code
+    app.logger.error(f'Unhandled exception: {error}', exc_info=True)
+    return jsonify({'error': 'Internal Server Error'}), 500
+```
+
+## Blueprints — Modular Routing
+
+Blueprints split a large application into self-contained modules, each with its own routes, templates, and static files:
+
+```python
+# app/auth/__init__.py
+from flask import Blueprint
+
+auth = Blueprint(
+    'auth',
+    __name__,
+    template_folder='templates',  # app/auth/templates/
+    url_prefix='/auth',
+)
+
+from app.auth import routes  # noqa: F401, E402
+```
+
+```python
+# app/auth/routes.py
+from flask import render_template, redirect, url_for, flash, request
+from app.auth import auth
+
+@auth.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        # handle login...
+        flash('Logged in successfully.', 'success')
+        return redirect(url_for('main.index'))
+    return render_template('auth/login.html')
+
+@auth.route('/logout')
+def logout():
+    flash('Logged out.', 'info')
+    return redirect(url_for('auth.login'))
+
+@auth.route('/register', methods=['GET', 'POST'])
+def register():
+    return render_template('auth/register.html')
+```
+
+```python
+# app/api/__init__.py
+from flask import Blueprint
+
+api = Blueprint('api', __name__)
+
+from app.api import routes  # noqa: F401, E402
+```
+
+```python
+# app/api/routes.py
+from flask import jsonify, request
+from app.api import api
+
+@api.route('/users')
+def get_users():
+    return jsonify({'users': []})
+
+@api.route('/users/<int:user_id>')
+def get_user(user_id: int):
+    return jsonify({'id': user_id})
+```
+
+Register blueprints in the factory:
+
+```python
+# app/__init__.py (excerpt)
+def create_app(config_name='default'):
+    app = Flask(__name__)
+    # ...
+
+    from app.main import main
+    app.register_blueprint(main)
+
+    from app.auth import auth
+    app.register_blueprint(auth, url_prefix='/auth')
+
+    from app.api import api
+    app.register_blueprint(api, url_prefix='/api/v1')
+
+    return app
+```
+
+URL generation with blueprints uses `blueprint_name.function_name`:
+
+```python
+url_for('auth.login')         # → '/auth/login'
+url_for('api.get_user', user_id=5)  # → '/api/v1/users/5'
+url_for('main.index')         # → '/'
+```
+
+## The Request Object
+
+The `request` proxy provides access to all incoming request data:
+
+```python
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+@app.route('/demo', methods=['GET', 'POST'])
+def demo():
+    # ── URL / query string ────────────────────────────────────────────────────
+    page = request.args.get('page', 1, type=int)       # ?page=2
+    query = request.args.get('q', '')                  # ?q=flask
+    all_args = request.args.to_dict()                  # All query params as dict
+
+    # ── Form data (application/x-www-form-urlencoded or multipart/form-data) ──
+    username = request.form.get('username', '')
+    all_form = request.form.to_dict()
+
+    # ── JSON body (application/json) ─────────────────────────────────────────
+    json_data = request.get_json()                     # Returns None if not JSON
+    json_force = request.get_json(force=True)          # Parse even without Content-Type
+    json_silent = request.get_json(silent=True)        # Return None instead of 400
+
+    # ── Headers ───────────────────────────────────────────────────────────────
+    auth_header = request.headers.get('Authorization', '')
+    content_type = request.content_type
+    user_agent = request.user_agent.string
+
+    # ── Request metadata ──────────────────────────────────────────────────────
+    method = request.method                            # 'GET', 'POST', etc.
+    url = request.url                                  # Full URL
+    path = request.path                                # Path only: '/demo'
+    host = request.host                                # 'localhost:5000'
+    remote_addr = request.remote_addr                  # Client IP
+    is_json = request.is_json                          # Boolean
+    is_secure = request.is_secure                      # True if HTTPS
+
+    return jsonify({
+        'page': page,
+        'query': query,
+        'method': method,
+        'path': path,
+        'is_json': is_json,
+    })
+```
+
+### File Uploads
+
+```python
+import os
+from flask import Flask, request, redirect, url_for
+from werkzeug.utils import secure_filename
+
+app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = '/tmp/uploads'
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB limit
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'pdf'}
+
+def allowed_file(filename: str) -> bool:
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    if 'file' not in request.files:
+        return {'error': 'No file part'}, 400
+
+    file = request.files['file']
+
+    if file.filename == '' or not file.filename:
+        return {'error': 'No file selected'}, 400
+
+    if not allowed_file(file.filename):
+        return {'error': 'File type not allowed'}, 400
+
+    filename = secure_filename(file.filename)
+    file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+    return {'message': f'File {filename} uploaded successfully'}, 201
+```
+
+## The Response Object and jsonify()
+
+Flask view functions can return several types. Flask converts them to `Response` objects:
+
+```python
+from flask import Flask, jsonify, make_response, Response
+import json
+
+app = Flask(__name__)
+
+# String → 200 with text/html
+@app.route('/text')
+def text_response():
+    return 'Hello!'  # status 200, text/html
+
+# Tuple → (body, status) or (body, status, headers)
+@app.route('/created')
+def created():
+    return {'id': 1}, 201
+
+# jsonify → proper application/json Content-Type
+@app.route('/json')
+def json_response():
+    return jsonify({'key': 'value', 'number': 42})
+
+# make_response → full control over response
+@app.route('/custom')
+def custom_response():
+    resp = make_response(json.dumps({'message': 'custom'}), 200)
+    resp.headers['Content-Type'] = 'application/json'
+    resp.headers['X-Custom-Header'] = 'my-value'
+    resp.set_cookie('session_token', 'abc123', httponly=True, samesite='Lax')
+    return resp
+
+# Streaming response
+@app.route('/stream')
+def stream():
+    def generate():
+        for i in range(10):
+            yield f'data: chunk {i}\n\n'
+    return Response(generate(), mimetype='text/event-stream')
+```
+
+## before_request / after_request Hooks
+
+```python
+from flask import Flask, request, g, jsonify
+import time
+
+app = Flask(__name__)
+
+@app.before_request
+def start_timer():
+    """Record request start time."""
+    g.start_time = time.perf_counter()
+
+@app.before_request
+def authenticate():
+    """Reject unauthenticated API requests."""
+    if request.path.startswith('/api/'):
+        token = request.headers.get('Authorization', '')
+        if not token.startswith('Bearer '):
+            return jsonify({'error': 'Unauthorized'}), 401
+
+@app.after_request
+def add_timing_header(response):
+    """Add Server-Timing header to every response."""
+    elapsed = time.perf_counter() - g.get('start_time', time.perf_counter())
+    response.headers['Server-Timing'] = f'total;dur={elapsed * 1000:.2f}'
+    return response
+
+@app.after_request
+def add_security_headers(response):
+    """Add security headers to every response."""
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    return response
+
+@app.teardown_request
+def teardown(exception):
+    """Clean up resources after every request, even if an exception occurred."""
+    if exception:
+        app.logger.error(f'Request teardown with exception: {exception}')
+```
+
+## The `g` Object
+
+`g` is a namespace object that stores data for the **duration of a single request**. It's reset for every new request:
+
+```python
+from flask import Flask, g, request
+
+app = Flask(__name__)
+
+def get_db():
+    """Get (or create) a DB connection for this request."""
+    if 'db' not in g:
+        g.db = connect_to_database()
+    return g.db
+
+@app.teardown_appcontext
+def close_db(error):
+    """Close the DB connection at the end of the request."""
+    db = g.pop('db', None)
+    if db is not None:
+        db.close()
+
+@app.before_request
+def load_current_user():
+    """Attach the current user to g for use in all view functions."""
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    g.current_user = verify_token(token) if token else None
+
+@app.route('/profile')
+def profile():
+    if g.current_user is None:
+        return {'error': 'Not authenticated'}, 401
+    return {'user': g.current_user.username}
+```
+
+## Viewing All Registered Routes
+
+```bash
+flask routes
+```
+
+```
+Endpoint         Methods    Rule
+---------------  ---------  ---------------------------
+api.get_user     GET        /api/v1/users/<int:user_id>
+api.get_users    GET        /api/v1/users
+auth.login       GET, POST  /auth/login
+auth.logout      GET        /auth/logout
+auth.register    GET, POST  /auth/register
+main.index       GET        /
+static           GET        /static/<path:filename>
+```
+
+:::tip[Debugging URL Map]
+You can inspect the URL map programmatically from the shell:
+```python
+flask shell
+>>> for rule in app.url_map.iter_rules():
+...     print(rule, rule.methods)
+```
+:::
+
+:::caution[Trailing Slash Behaviour]
+Flask treats `/users/` (with trailing slash) and `/users` (without) differently. A route defined as `/users/` will redirect `/users` to `/users/`. A route defined as `/users` will return 404 for `/users/`. Be consistent in your route definitions.
+:::

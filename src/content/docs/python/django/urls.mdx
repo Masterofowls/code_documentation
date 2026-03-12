@@ -1,0 +1,504 @@
+---
+title: URL Routing
+description: Configure URL patterns in Django using path(), re_path(), namespaces, URL parameters, reversing, and custom converters.
+sidebar:
+  order: 5
+tags: [python, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Django's URL dispatcher maps incoming request paths to view functions or classes. URL patterns are defined in `urls.py` files using a clean, readable Python syntax.
+
+---
+
+## How URL Routing Works
+
+When a request arrives, Django:
+
+1. Loads the root `URLconf` specified by `ROOT_URLCONF` in `settings.py`
+2. Iterates through `urlpatterns` in order
+3. Stops at the **first match** and calls the corresponding view
+4. If no pattern matches, raises a `404` response
+
+```
+Request: GET /blog/my-first-post/
+                  │
+                  ▼
+        mysite/urls.py
+        ├── path("admin/", ...)        ✗ no match
+        ├── path("blog/", include("blog.urls"))
+        │                 │
+        │       blog/urls.py
+        │       ├── path("", post_list)         ✗ no match
+        │       └── path("<slug:slug>/", post_detail)  ✓ match!
+        │                                              slug="my-first-post"
+        │
+        └── calls post_detail(request, slug="my-first-post")
+```
+
+---
+
+## Root URLconf
+
+```python
+# mysite/urls.py
+from django.contrib import admin
+from django.urls import path, include
+from django.conf import settings
+from django.conf.urls.static import static
+
+urlpatterns = [
+    # Django admin
+    path("admin/", admin.site.urls),
+
+    # App URL modules
+    path("", include("core.urls")),              # Homepage
+    path("blog/", include("blog.urls", namespace="blog")),
+    path("accounts/", include("django.contrib.auth.urls")),
+    path("api/", include("api.urls", namespace="api")),
+    path("users/", include("users.urls", namespace="users")),
+]
+
+# Serve media files in development only
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+    urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
+```
+
+---
+
+## path() — Simple URL Patterns
+
+`path()` is the preferred way to define URL patterns for most use cases.
+
+```python
+from django.urls import path
+from . import views
+
+urlpatterns = [
+    # No parameters — matches "/posts/" exactly
+    path("posts/", views.post_list, name="post-list"),
+
+    # Integer parameter
+    path("posts/<int:pk>/", views.post_detail, name="post-detail"),
+
+    # String parameter (matches any non-empty string without /)
+    path("posts/<str:slug>/", views.post_by_slug, name="post-slug"),
+
+    # Slug parameter (letters, numbers, hyphens, underscores)
+    path("posts/<slug:slug>/", views.post_detail, name="post-detail"),
+
+    # UUID parameter
+    path("items/<uuid:item_id>/", views.item_detail, name="item-detail"),
+
+    # Multiple parameters
+    path("posts/<int:year>/<int:month>/<slug:slug>/", views.post_archive, name="post-archive"),
+
+    # Nested path (matches /)
+    path("docs/<path:doc_path>/", views.serve_doc, name="docs"),
+]
+```
+
+### Built-in Path Converters
+
+| Converter | Pattern | Example |
+|-----------|---------|---------|
+| `str` | Any non-empty string, no `/` | `my-post`, `hello` |
+| `int` | Zero or positive integer | `42`, `0`, `1337` |
+| `slug` | Letters, numbers, hyphens, underscores | `my-post-title`, `slug_123` |
+| `uuid` | UUID string | `550e8400-e29b-41d4-a716-446655440000` |
+| `path` | Any non-empty string including `/` | `docs/intro/setup` |
+
+---
+
+## re_path() — Regex Patterns
+
+Use `re_path()` when you need more control than `path()` converters offer.
+
+```python
+from django.urls import re_path
+from . import views
+
+urlpatterns = [
+    # Match year/month/day format
+    re_path(
+        r"^archive/(?P<year>[0-9]{4})/(?P<month>[0-9]{2})/(?P<day>[0-9]{2})/$",
+        views.archive,
+        name="archive",
+    ),
+
+    # Optional trailing slash
+    re_path(r"^about/?$", views.about, name="about"),
+
+    # One of several values
+    re_path(
+        r"^(?P<format>json|xml|csv)/$",
+        views.export,
+        name="export",
+    ),
+
+    # Legacy URL support (redirect old pattern)
+    re_path(
+        r"^old-posts/(?P<pk>\d+)/$",
+        views.legacy_redirect,
+    ),
+]
+```
+
+:::tip[Prefer path() Over re_path()]
+Use `path()` with built-in converters when possible — it's more readable and provides automatic type conversion. Only reach for `re_path()` when you genuinely need regex.
+:::
+
+---
+
+## include() — Modular URL Configuration
+
+Split URL patterns across apps for maintainability.
+
+```python
+# blog/urls.py
+from django.urls import path
+from . import views
+
+app_name = "blog"  # ← App namespace declaration
+
+urlpatterns = [
+    path("", views.PostListView.as_view(), name="post-list"),
+    path("create/", views.PostCreateView.as_view(), name="post-create"),
+    path("<slug:slug>/", views.PostDetailView.as_view(), name="post-detail"),
+    path("<slug:slug>/edit/", views.PostUpdateView.as_view(), name="post-update"),
+    path("<slug:slug>/delete/", views.PostDeleteView.as_view(), name="post-delete"),
+]
+```
+
+```python
+# mysite/urls.py
+from django.urls import path, include
+
+urlpatterns = [
+    # Include with namespace specified in include() call
+    path("blog/", include("blog.urls", namespace="blog")),
+
+    # Or use the app_name defined in the module
+    path("blog/", include("blog.urls")),  # namespace comes from app_name
+
+    # Include a list of patterns inline (less common)
+    path("api/", include([
+        path("health/", health_check_view),
+        path("version/", version_view),
+    ])),
+]
+```
+
+---
+
+## URL Parameters
+
+URL parameters captured by path converters are passed as keyword arguments to views:
+
+```python
+# URL pattern
+path("posts/<int:year>/<slug:slug>/", views.post_detail, name="post-detail")
+
+# View receives the captured values
+def post_detail(request, year: int, slug: str):
+    post = get_object_or_404(Post, publish_date__year=year, slug=slug)
+    return render(request, "blog/post_detail.html", {"post": post})
+```
+
+### Query String Parameters
+
+Access query string values via `request.GET`:
+
+```python
+# URL: /posts/?category=python&page=2&sort=newest
+def post_list(request):
+    category = request.GET.get("category", "")       # "python"
+    page = request.GET.get("page", 1)                 # "2" (always a string)
+    sort = request.GET.get("sort", "newest")          # "newest"
+
+    # Multiple values for the same key: ?tag=python&tag=django
+    tags = request.GET.getlist("tag")  # ["python", "django"]
+
+    # Convert types manually
+    try:
+        page = int(page)
+    except ValueError:
+        page = 1
+```
+
+---
+
+## App Namespaces
+
+Namespaces prevent URL name collisions between different apps.
+
+```python
+# blog/urls.py
+app_name = "blog"  # ← This sets the namespace
+
+urlpatterns = [
+    path("", views.post_list, name="post-list"),
+    path("<slug:slug>/", views.post_detail, name="post-detail"),
+]
+
+# shop/urls.py
+app_name = "shop"
+
+urlpatterns = [
+    path("", views.product_list, name="post-list"),  # Same name — no conflict!
+]
+```
+
+Reference namespaced URLs with `app_name:url_name`:
+
+```python
+# In Python code
+from django.urls import reverse
+
+reverse("blog:post-list")               # /blog/
+reverse("blog:post-detail", kwargs={"slug": "my-post"})  # /blog/my-post/
+reverse("shop:post-list")               # /shop/  (different URL, same name)
+```
+
+```html
+<!-- In templates -->
+<a href="{% url 'blog:post-list' %}">Blog</a>
+<a href="{% url 'blog:post-detail' slug=post.slug %}">{{ post.title }}</a>
+<a href="{% url 'shop:post-list' %}">Shop</a>
+```
+
+---
+
+## URL Reversing
+
+Never hardcode URLs. Always use `reverse()` in Python and `{% url %}` in templates.
+
+```python
+from django.urls import reverse
+from django.shortcuts import redirect
+
+
+def my_view(request):
+    # Simple reverse
+    url = reverse("post-list")
+    # → "/blog/"
+
+    # With positional args
+    url = reverse("post-detail", args=["my-post-slug"])
+    # → "/blog/my-post-slug/"
+
+    # With keyword args (preferred)
+    url = reverse("post-detail", kwargs={"slug": "my-post-slug"})
+    # → "/blog/my-post-slug/"
+
+    # With namespace
+    url = reverse("blog:post-detail", kwargs={"slug": "my-post"})
+    # → "/blog/my-post/"
+
+    # With query string (not built-in — add manually)
+    base_url = reverse("post-list")
+    full_url = f"{base_url}?category=python&page=2"
+    # → "/blog/?category=python&page=2"
+
+    # redirect() accepts view names directly
+    return redirect("blog:post-list")
+    return redirect("blog:post-detail", slug="my-post")
+```
+
+```html
+<!-- Template examples -->
+{% url 'post-list' %}
+{% url 'post-detail' slug=post.slug %}
+{% url 'post-detail' slug=post.slug as post_url %}
+
+<!-- Conditional link -->
+{% if post_url %}
+  <a href="{{ post_url }}">Read more</a>
+{% endif %}
+
+<!-- Append query string manually -->
+<a href="{% url 'post-list' %}?page={{ page_obj.next_page_number }}">Next</a>
+```
+
+---
+
+## Custom Path Converters
+
+Create your own converter when built-in ones don't fit your needs:
+
+```python
+# blog/converters.py
+
+
+class FourDigitYearConverter:
+    """Matches exactly four-digit years between 2000 and 2099."""
+    regex = r"20[0-9]{2}"
+
+    def to_python(self, value: str) -> int:
+        return int(value)
+
+    def to_url(self, value: int) -> str:
+        return str(value)
+
+
+class ISODateConverter:
+    """Matches ISO 8601 date strings: YYYY-MM-DD."""
+    regex = r"\d{4}-\d{2}-\d{2}"
+
+    def to_python(self, value: str):
+        from datetime import date
+        year, month, day = value.split("-")
+        return date(int(year), int(month), int(day))
+
+    def to_url(self, value) -> str:
+        return value.isoformat()
+```
+
+Register and use the converter:
+
+```python
+# blog/urls.py
+from django.urls import path, register_converter
+from . import converters, views
+
+register_converter(converters.FourDigitYearConverter, "year")
+register_converter(converters.ISODateConverter, "isodate")
+
+urlpatterns = [
+    path("archive/<year:year>/", views.year_archive, name="year-archive"),
+    # → /archive/2024/  (year passed as int)
+
+    path("events/<isodate:date>/", views.events_on_date, name="events-on-date"),
+    # → /events/2024-12-01/  (date passed as datetime.date)
+]
+```
+
+---
+
+## 404 and 500 Handlers
+
+Django uses special handler views for HTTP errors. Customize them in your root `urls.py`:
+
+```python
+# mysite/urls.py
+from django.urls import path
+from . import views
+
+# These must be in the root URLconf (not included modules)
+handler400 = "mysite.views.bad_request"       # 400 Bad Request
+handler403 = "mysite.views.permission_denied" # 403 Forbidden
+handler404 = "mysite.views.page_not_found"    # 404 Not Found
+handler500 = "mysite.views.server_error"      # 500 Server Error
+```
+
+```python
+# mysite/views.py
+from django.shortcuts import render
+
+
+def page_not_found(request, exception):
+    return render(request, "errors/404.html", status=404)
+
+
+def server_error(request):
+    return render(request, "errors/500.html", status=500)
+
+
+def permission_denied(request, exception):
+    return render(request, "errors/403.html", status=403)
+
+
+def bad_request(request, exception):
+    return render(request, "errors/400.html", status=400)
+```
+
+```html
+<!-- templates/errors/404.html -->
+{% extends "base.html" %}
+
+{% block title %}Page Not Found{% endblock %}
+
+{% block content %}
+  <h1>404 — Page Not Found</h1>
+  <p>The page you're looking for doesn't exist.</p>
+  <a href="{% url 'post-list' %}">← Back to Blog</a>
+{% endblock %}
+```
+
+:::caution[DEBUG Must Be False]
+Custom error handlers only work when `DEBUG = False`. During development, Django shows its own debug error pages regardless.
+:::
+
+---
+
+## URL Patterns: Full Example
+
+```python
+# mysite/urls.py
+from django.contrib import admin
+from django.urls import path, include
+
+urlpatterns = [
+    path("admin/", admin.site.urls),
+    path("", include("core.urls")),
+    path("blog/", include("blog.urls", namespace="blog")),
+    path("accounts/", include("django.contrib.auth.urls")),
+    path("api/v1/", include("api.urls", namespace="api_v1")),
+]
+
+handler404 = "mysite.views.page_not_found"
+handler500 = "mysite.views.server_error"
+
+# blog/urls.py
+from django.urls import path
+from . import views
+
+app_name = "blog"
+
+urlpatterns = [
+    path("", views.PostListView.as_view(), name="post-list"),
+    path("create/", views.PostCreateView.as_view(), name="post-create"),
+    path("tag/<slug:tag_slug>/", views.PostListView.as_view(), name="posts-by-tag"),
+    path("<slug:slug>/", views.PostDetailView.as_view(), name="post-detail"),
+    path("<slug:slug>/edit/", views.PostUpdateView.as_view(), name="post-update"),
+    path("<slug:slug>/delete/", views.PostDeleteView.as_view(), name="post-delete"),
+]
+```
+
+---
+
+## Checking All URLs
+
+Use `django-extensions` to list every registered URL:
+
+```bash
+pip install django-extensions
+# Add 'django_extensions' to INSTALLED_APPS
+
+python manage.py show_urls
+# /                     core.views.home               home
+# /blog/                blog.views.PostListView        blog:post-list
+# /blog/create/         blog.views.PostCreateView      blog:post-create
+# /blog/<slug>/         blog.views.PostDetailView      blog:post-detail
+# ...
+```
+
+Or use the built-in URL resolver to inspect patterns programmatically:
+
+```python
+# In Django shell
+from django.urls import reverse, resolve
+
+# Reverse a name to a URL
+reverse("blog:post-list")              # '/blog/'
+
+# Resolve a URL to its view and kwargs
+result = resolve("/blog/my-post/")
+result.func           # <function PostDetailView.as_view.<locals>.view at 0x...>
+result.kwargs         # {'slug': 'my-post'}
+result.url_name       # 'post-detail'
+result.app_name       # 'blog'
+result.namespace      # 'blog'
+```

@@ -1,0 +1,705 @@
+---
+title: "IO — Reading and Writing Data"
+description: "Complete Pandas IO reference — read_csv, read_excel, read_json, read_sql, read_parquet, writing to all formats, handling large files with chunks, memory optimization, and file format benchmarks."
+sidebar:
+  order: 6
+tags: [python, data]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Pandas can read from and write to virtually every common data format. This guide covers the full parameter reference for each reader, strategies for large files, memory optimization with dtype casting, and a benchmark comparison of storage formats.
+
+## Reading CSV Files
+
+`read_csv()` is the most commonly used IO function. Understanding its parameters is essential for handling real-world files.
+
+### Essential Parameters
+
+```python
+import pandas as pd
+
+df = pd.read_csv(
+    "orders.csv",
+    sep=",",                          # field delimiter (default ",")
+    header=0,                         # row number for column names (default 0)
+    index_col=None,                   # column to use as row index
+    usecols=["id", "date", "amount"], # read only these columns
+    dtype={"id": int, "amount": float},  # explicit types (faster + safer)
+    parse_dates=["date"],             # parse these columns as datetime
+    na_values=["NA", "N/A", "null", "-"],  # treat as NaN
+    keep_default_na=True,             # also use pandas default NaN strings
+    skiprows=0,                       # skip N rows from the top
+    nrows=1000,                       # read only the first N rows
+    encoding="utf-8",                 # file encoding
+    low_memory=False,                 # disable mixed-type guessing
+)
+print(df.head())
+print(df.dtypes)
+```
+
+```text
+     id        date     amount
+0  1001  2024-01-15    1299.99
+1  1002  2024-01-16      29.99
+2  1003  2024-01-16      89.99
+3  1004  2024-01-17     449.99
+4  1005  2024-01-18     199.99
+
+id               int64
+date    datetime64[ns]
+amount         float64
+dtype: object
+```
+
+### Non-Standard Delimiters
+
+```python
+# Tab-separated (TSV)
+df_tsv = pd.read_csv("data.tsv", sep="\t")
+
+# Pipe-separated
+df_pipe = pd.read_csv("data.txt", sep="|")
+
+# Multiple whitespace (use regex separator)
+df_ws = pd.read_csv("data.txt", sep=r"\s+", engine="python")
+
+# No header row — provide column names manually
+df_noheader = pd.read_csv(
+    "data.csv",
+    header=None,
+    names=["order_id", "customer", "amount", "date"],
+)
+print(df_noheader.head(2))
+```
+
+```text
+   order_id customer  amount        date
+0      1001    Alice  1299.99  2024-01-15
+1      1002      Bob    29.99  2024-01-16
+```
+
+### Date Parsing
+
+```python
+# Parse multiple date columns
+df = pd.read_csv(
+    "events.csv",
+    parse_dates=["start_date", "end_date"],
+)
+
+# Custom date parser for non-standard formats
+from datetime import datetime
+date_parser = lambda x: datetime.strptime(x, "%d/%m/%Y")
+
+df = pd.read_csv(
+    "uk_dates.csv",
+    parse_dates=["date"],
+    date_format="%d/%m/%Y",
+)
+print(df.dtypes)
+```
+
+```text
+date    datetime64[ns]
+value          float64
+dtype: object
+```
+
+:::tip[Explicit dtypes = Faster Reads]
+Always pass `dtype={"col": type}` for large CSV files. Without it, Pandas reads two passes over the data — once to infer types, once to load. Explicit dtypes reduce memory use by up to 75% for integer columns (using `int32` vs default `int64`) and prevent silent type coercion errors.
+:::
+
+### Skipping and Sampling Rows
+
+```python
+# Skip the first 3 rows (e.g., metadata rows)
+df = pd.read_csv("file.csv", skiprows=3)
+
+# Skip specific row indices
+df = pd.read_csv("file.csv", skiprows=[0, 2, 5])
+
+# Read only the first 1000 rows (for inspection)
+df_sample = pd.read_csv("huge_file.csv", nrows=1000)
+
+# Skip footer rows
+df = pd.read_csv("file.csv", skipfooter=2, engine="python")
+```
+
+## Reading Excel Files
+
+```python
+# Read the first sheet
+df = pd.read_excel("report.xlsx")
+
+# Specify sheet by name or index
+df_q1 = pd.read_excel("report.xlsx", sheet_name="Q1")
+df_idx = pd.read_excel("report.xlsx", sheet_name=0)
+
+# Read multiple sheets at once — returns a dict of DataFrames
+all_sheets = pd.read_excel("report.xlsx", sheet_name=None)
+print(list(all_sheets.keys()))
+# {'Q1': DataFrame, 'Q2': DataFrame, 'Q3': DataFrame}
+
+# Combine all sheets
+combined = pd.concat(all_sheets.values(), ignore_index=True)
+```
+
+```python
+# Advanced options
+df = pd.read_excel(
+    "report.xlsx",
+    sheet_name="Sales",
+    header=1,                          # header is in row 2
+    index_col=0,                       # first column as index
+    usecols="A:E",                     # read columns A through E
+    dtype={"amount": float},
+    na_values=["N/A", "-"],
+    skiprows=2,
+)
+print(df.head(3))
+```
+
+```text
+            region  product  units   revenue
+date
+2024-01-05   North        A    120  12000.00
+2024-01-12   North        B     85   8500.00
+2024-01-20   South        A     98   9800.00
+```
+
+:::caution[Excel Performance]
+`read_excel()` is significantly slower than `read_csv()` for large files because Excel files are ZIP archives with XML inside. For files over 50,000 rows, export to CSV or Parquet first, then read with Pandas. Use `openpyxl` for `.xlsx` and `xlrd` (version 1.x) for `.xls` files.
+:::
+
+## Reading JSON Files
+
+```python
+import json
+
+# Basic JSON array of objects (default orient="records" equivalent)
+df = pd.read_json("orders.json")
+print(df.head(3))
+```
+
+```text
+   order_id customer  amount       date
+0      1001    Alice  1299.99  2024-01-15
+1      1002      Bob    29.99  2024-01-16
+2      1003    Carol    89.99  2024-01-16
+```
+
+```python
+# orient parameter — controls JSON structure
+# "records": [{col: val, ...}, ...]
+# "split":   {"columns": [...], "index": [...], "data": [...]}
+# "index":   {index: {col: val, ...}}
+# "columns": {col: {index: val, ...}}
+# "values":  just the array of values
+
+df_split = pd.read_json('{"columns":["a","b"],"index":[0,1],"data":[[1,2],[3,4]]}',
+                         orient="split")
+print(df_split)
+```
+
+```text
+   a  b
+0  1  2
+1  3  4
+```
+
+```python
+# Read from a URL directly
+df_web = pd.read_json(
+    "https://api.example.com/data.json",
+    dtype={"id": int, "value": float},
+)
+```
+
+```python
+# Nested JSON — normalize first
+from pandas import json_normalize
+
+nested = [
+    {"id": 1, "name": "Alice", "address": {"city": "London", "zip": "EC1A"}},
+    {"id": 2, "name": "Bob",   "address": {"city": "Paris",  "zip": "75001"}},
+]
+df_flat = json_normalize(nested, sep="_")
+print(df_flat)
+```
+
+```text
+   id   name address_city address_zip
+0   1  Alice       London        EC1A
+1   2    Bob        Paris       75001
+```
+
+## Reading SQL with SQLAlchemy
+
+```python
+from sqlalchemy import create_engine
+import pandas as pd
+
+# ── PostgreSQL ─────────────────────────────────────────────────────────────
+pg_engine = create_engine(
+    "postgresql+psycopg2://user:password@localhost:5432/mydb"
+)
+
+# ── MySQL ──────────────────────────────────────────────────────────────────
+mysql_engine = create_engine(
+    "mysql+pymysql://user:password@localhost:3306/mydb"
+)
+
+# ── SQLite (file-based, no server required) ────────────────────────────────
+sqlite_engine = create_engine("sqlite:///local.db")
+
+# Read entire table
+df = pd.read_sql_table("orders", con=sqlite_engine)
+
+# Read with a SQL query
+df = pd.read_sql(
+    "SELECT order_id, customer, amount FROM orders WHERE amount > 100",
+    con=sqlite_engine,
+)
+print(df.head(3))
+```
+
+```text
+   order_id customer   amount
+0      1001    Alice  1299.99
+1      1003    Carol    89.99
+2      1004    Alice   449.99
+```
+
+```python
+# Parameterized queries (safe against SQL injection)
+from sqlalchemy import text
+
+query = text("SELECT * FROM orders WHERE customer = :name AND amount > :min_amount")
+df = pd.read_sql(query, con=sqlite_engine, params={"name": "Alice", "min_amount": 100})
+
+# Parse date columns from SQL
+df = pd.read_sql(
+    "SELECT * FROM orders",
+    con=sqlite_engine,
+    parse_dates=["order_date"],
+    index_col="order_id",
+)
+```
+
+## Reading Parquet Files
+
+```python
+# Read Parquet (requires pyarrow or fastparquet)
+df = pd.read_parquet("data.parquet")
+
+# Read only specific columns (columnar skip — very fast)
+df = pd.read_parquet("data.parquet", columns=["date", "revenue", "region"])
+
+# Read with filters pushed down (avoids loading filtered rows)
+df = pd.read_parquet(
+    "data.parquet",
+    filters=[("region", "==", "North"), ("revenue", ">", 10000)],
+)
+print(df.head(3))
+```
+
+```text
+        date region  revenue
+0 2024-01-05  North    12000
+5 2024-03-07  North    10500
+9 2024-04-22  North    11600
+```
+
+```python
+# Read a directory of partitioned Parquet files
+df = pd.read_parquet("data/partitioned/")  # reads all .parquet files in the directory
+```
+
+## Read Clipboard
+
+```python
+# Read tabular data copied from a spreadsheet or web page
+# (paste data into clipboard, then run:)
+df = pd.read_clipboard()
+
+# With explicit separator
+df = pd.read_clipboard(sep="\t")
+```
+
+## Writing CSV
+
+```python
+# Basic write — no index by default is a common best practice
+df.to_csv("output.csv", index=False)
+
+# With options
+df.to_csv(
+    "output.csv",
+    index=False,
+    sep=",",
+    encoding="utf-8-sig",    # UTF-8 with BOM for Excel compatibility
+    float_format="%.2f",     # 2 decimal places for floats
+    date_format="%Y-%m-%d",  # ISO date format
+    na_rep="",               # how to represent NaN
+    columns=["id", "name", "amount"],  # subset of columns
+)
+```
+
+```python
+# Append to an existing CSV (no header on subsequent writes)
+import os
+file = "log.csv"
+write_header = not os.path.exists(file)
+df.to_csv(file, mode="a", header=write_header, index=False)
+```
+
+## Writing Excel
+
+```python
+# Single sheet
+df.to_excel("output.xlsx", index=False, sheet_name="Report")
+
+# Multiple sheets in one workbook
+with pd.ExcelWriter("multi_sheet.xlsx", engine="openpyxl") as writer:
+    df.to_excel(writer, sheet_name="Sales",      index=False)
+    summary.to_excel(writer, sheet_name="Summary", index=False)
+    monthly.to_excel(writer, sheet_name="Monthly", index=False)
+```
+
+```python
+# With formatting (requires openpyxl)
+with pd.ExcelWriter("formatted.xlsx", engine="openpyxl") as writer:
+    df.to_excel(writer, sheet_name="Data", index=False, startrow=1)
+    ws = writer.sheets["Data"]
+    ws["A1"] = "Sales Report Q1 2024"
+    # Set column widths
+    for col in ws.columns:
+        ws.column_dimensions[col[0].column_letter].width = 15
+```
+
+## Writing JSON
+
+```python
+# Array of records (most common / interoperable)
+df.to_json("output.json", orient="records", indent=2)
+
+# Other orients
+df.to_json("output.json", orient="split")   # explicit columns/index/data
+df.to_json("output.json", orient="index")   # keyed by index
+
+# With date handling
+df.to_json(
+    "output.json",
+    orient="records",
+    date_format="iso",         # ISO 8601 dates
+    double_precision=4,        # decimal places for floats
+    force_ascii=False,         # allow Unicode characters
+    indent=2,
+)
+```
+
+## Writing to SQL
+
+```python
+from sqlalchemy import create_engine
+
+engine = create_engine("sqlite:///sales.db")
+
+# Write DataFrame to SQL table
+df.to_sql(
+    name="orders",
+    con=engine,
+    if_exists="replace",   # "fail", "replace", or "append"
+    index=False,
+    chunksize=1000,        # insert N rows at a time
+    dtype={                # explicit SQL column types
+        "order_id": "INTEGER",
+        "amount":   "REAL",
+        "date":     "TEXT",
+    },
+)
+
+# Verify write
+result = pd.read_sql("SELECT COUNT(*) AS n FROM orders", con=engine)
+print(result)
+```
+
+```text
+   n
+0  10
+```
+
+## Writing Parquet
+
+```python
+# Write with snappy compression (fast, decent ratio)
+df.to_parquet("output.parquet", compression="snappy", index=False)
+
+# Write with gzip compression (slower, better ratio)
+df.to_parquet("output.parquet", compression="gzip")
+
+# Write without compression (fastest read/write, largest file)
+df.to_parquet("output.parquet", compression=None)
+
+# Partition by column (creates directory structure)
+df.to_parquet(
+    "data/partitioned/",
+    partition_cols=["region", "product"],
+    compression="snappy",
+)
+```
+
+## Handling Large Files with Chunks
+
+For files too large to fit in RAM, process them in chunks.
+
+```python
+import pandas as pd
+
+# Process a huge CSV in chunks of 100,000 rows
+results = []
+
+for chunk in pd.read_csv("huge_file.csv", chunksize=100_000):
+    # Process each chunk independently
+    chunk_summary = (
+        chunk
+        .query("status == 'completed'")
+        .groupby("region")["revenue"]
+        .sum()
+        .reset_index()
+    )
+    results.append(chunk_summary)
+
+# Combine all chunk summaries
+final = (
+    pd.concat(results, ignore_index=True)
+    .groupby("region")["revenue"]
+    .sum()
+    .reset_index()
+)
+print(final)
+```
+
+```text
+  region    revenue
+0   East  36700000
+1  North  42600000
+2  South  37200000
+```
+
+```python
+# Using a context manager for cleaner chunk iteration
+with pd.read_csv("huge_file.csv", chunksize=50_000) as reader:
+    chunk_list = [
+        chunk.assign(total=chunk["qty"] * chunk["price"])
+        for chunk in reader
+    ]
+
+result = pd.concat(chunk_list, ignore_index=True)
+```
+
+:::tip[Chunk Size Guidelines]
+A good starting chunk size is `chunksize=100_000` for most machines with 8 GB RAM. Monitor memory with `psutil.Process().memory_info().rss` inside the loop. If memory grows across chunks, you have a reference leak — ensure you're not appending the full chunks to a list.
+:::
+
+## Memory Optimization with dtypes
+
+```python
+import pandas as pd
+
+def optimize_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+    """Downcast numeric columns and convert strings to category."""
+    df = df.copy()
+
+    # Downcast integers
+    int_cols = df.select_dtypes(include=["int64"]).columns
+    df[int_cols] = df[int_cols].apply(pd.to_numeric, downcast="integer")
+
+    # Downcast floats
+    float_cols = df.select_dtypes(include=["float64"]).columns
+    df[float_cols] = df[float_cols].apply(pd.to_numeric, downcast="float")
+
+    # Convert low-cardinality strings to category
+    obj_cols = df.select_dtypes(include=["object"]).columns
+    for col in obj_cols:
+        num_unique = df[col].nunique()
+        if num_unique / len(df) < 0.50:   # less than 50% unique → category
+            df[col] = df[col].astype("category")
+
+    return df
+
+# Before
+df = pd.read_csv("sales.csv")
+print(f"Memory before: {df.memory_usage(deep=True).sum() / 1024:.1f} KB")
+print(df.dtypes)
+```
+
+```text
+Memory before: 28.4 KB
+
+date        object
+region      object
+product     object
+rep         object
+revenue      int64
+units        int64
+discount   float64
+dtype: object
+```
+
+```python
+df_opt = optimize_dtypes(df)
+print(f"Memory after:  {df_opt.memory_usage(deep=True).sum() / 1024:.1f} KB")
+print(df_opt.dtypes)
+```
+
+```text
+Memory after:  8.1 KB
+
+date       category
+region     category
+product    category
+rep        category
+revenue       int32
+units         int16
+discount    float32
+dtype: object
+```
+
+```python
+# Specify dtypes at read time (most efficient approach)
+df_optimized = pd.read_csv(
+    "sales.csv",
+    dtype={
+        "region":   "category",
+        "product":  "category",
+        "rep":      "category",
+        "revenue":  "int32",
+        "units":    "int16",
+        "discount": "float32",
+    },
+    parse_dates=["date"],
+)
+```
+
+## File Format Comparison
+
+| Format | Extension | Read Speed | Write Speed | File Size | Random Access | Human Readable | Best For |
+|---|---|---|---|---|---|---|---|
+| CSV | `.csv` | Slow | Slow | Large | No | Yes | Interchange, small files, debugging |
+| Parquet | `.parquet` | Fast | Medium | Small | Column-level | No | Analytics, large datasets, archival |
+| Feather | `.feather` | Very Fast | Very Fast | Medium | No | No | Intermediate results, IPC between tools |
+| HDF5 | `.h5` | Fast | Fast | Medium | Yes | No | Time series, large numerical arrays |
+| Excel | `.xlsx` | Very Slow | Very Slow | Large | No | Yes | Human consumption, reporting |
+| JSON | `.json` | Medium | Medium | Large | No | Yes | APIs, nested data, web interchange |
+| Pickle | `.pkl` | Fast | Fast | Medium | No | No | Python-only caching (not portable) |
+
+```python
+import time
+import pandas as pd
+
+# Generate a sample DataFrame for benchmarking
+df = pd.DataFrame({
+    "id":      range(1_000_000),
+    "value":   pd.np.random.randn(1_000_000),
+    "label":   pd.Categorical(["A","B","C","D"] * 250_000),
+})
+
+# Benchmark writes
+for fmt, kwargs in [
+    ("csv",     {"path_or_buf": "bench.csv",     "index": False}),
+    ("parquet", {"path": "bench.parquet"}),
+    ("feather", {"path": "bench.feather"}),
+]:
+    start = time.time()
+    getattr(df, f"to_{fmt}")(**kwargs)
+    print(f"Write {fmt:8s}: {time.time()-start:.3f}s")
+```
+
+```text
+Write csv     : 2.847s
+Write parquet : 0.312s
+Write feather : 0.089s
+```
+
+:::tip[Choose Parquet for Data Pipelines]
+Parquet is the recommended format for any data pipeline or reusable dataset. It preserves dtypes (including `category`, `datetime64`, `Int64`), compresses well, supports column-level reads (you only load the columns you query), and is supported by Pandas, Polars, Spark, DuckDB, BigQuery, Redshift, and Athena.
+:::
+
+## SQLAlchemy Connection Reference
+
+```python
+from sqlalchemy import create_engine, text
+
+# ── Connection strings by database ─────────────────────────────────────────
+connections = {
+    # SQLite (local file — no server needed)
+    "sqlite":     "sqlite:///path/to/local.db",
+    "sqlite_mem": "sqlite:///:memory:",
+
+    # PostgreSQL (pip install psycopg2-binary)
+    "postgres": "postgresql+psycopg2://user:pass@localhost:5432/dbname",
+
+    # MySQL / MariaDB (pip install pymysql)
+    "mysql":    "mysql+pymysql://user:pass@localhost:3306/dbname",
+
+    # MS SQL Server (pip install pyodbc)
+    "mssql":    "mssql+pyodbc://user:pass@server/dbname?driver=ODBC+Driver+17+for+SQL+Server",
+}
+
+engine = create_engine(connections["sqlite"])
+
+# ── Full round-trip example ─────────────────────────────────────────────────
+df = pd.DataFrame({
+    "name": ["Alice", "Bob", "Carol"],
+    "sales": [45200, 39800, 52100],
+})
+
+# Write
+df.to_sql("sales_summary", con=engine, if_exists="replace", index=False)
+
+# Read back
+result = pd.read_sql("SELECT * FROM sales_summary ORDER BY sales DESC", con=engine)
+print(result)
+```
+
+```text
+    name  sales
+0  Carol  52100
+1  Alice  45200
+2    Bob  39800
+```
+
+```python
+# Use connection pooling for repeated queries
+from sqlalchemy import create_engine
+from sqlalchemy.pool import QueuePool
+
+engine = create_engine(
+    "postgresql+psycopg2://user:pass@localhost:5432/prod",
+    poolclass=QueuePool,
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,
+    pool_recycle=3600,
+)
+
+# Always use context manager to return connections to pool
+with engine.connect() as conn:
+    df = pd.read_sql(text("SELECT * FROM orders LIMIT 100"), con=conn)
+```
+
+:::caution[Never Hardcode Credentials]
+Always load database credentials from environment variables or a secrets manager. Use `python-dotenv` locally and your cloud provider's secret store in production. Never commit connection strings containing passwords to version control.
+
+```python
+import os
+from sqlalchemy import create_engine
+
+engine = create_engine(
+    f"postgresql+psycopg2://{os.environ['DB_USER']}:{os.environ['DB_PASS']}"
+    f"@{os.environ['DB_HOST']}:{os.environ['DB_PORT']}/{os.environ['DB_NAME']}"
+)
+```
+:::

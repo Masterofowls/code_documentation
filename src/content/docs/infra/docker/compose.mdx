@@ -1,0 +1,656 @@
+---
+title: Docker Compose
+description: Define and run multi-container applications with Docker Compose v2. Full stack examples, override files, health checks, and scaling patterns.
+sidebar:
+  order: 4
+tags: [devops, docker]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Docker Compose
+
+Docker Compose is a tool for defining and running multi-container applications. You describe your entire application stack — services, networks, volumes — in a single `compose.yml` file and manage it with simple commands.
+
+:::tip[Compose v2 vs legacy]
+Docker Compose v2 is a Go rewrite integrated into the Docker CLI as `docker compose` (space, no hyphen). The legacy Python-based `docker-compose` is deprecated. Always use `docker compose` in new projects and CI pipelines.
+:::
+
+---
+
+## compose.yml Structure
+
+The `compose.yml` file has five top-level keys:
+
+```yaml
+# compose.yml
+name: myapp   # Project name (defaults to directory name)
+
+services:    # Container definitions
+  web: ...
+  db: ...
+
+networks:    # Custom networks
+  frontend: ...
+  backend: ...
+
+volumes:     # Named persistent volumes
+  pgdata: ...
+
+configs:     # Non-sensitive configuration files (Swarm)
+  nginx_conf: ...
+
+secrets:     # Sensitive data (Swarm or file-based)
+  db_password: ...
+```
+
+---
+
+## Service Definition
+
+A service definition controls every aspect of how a container is built and run.
+
+```yaml
+services:
+  api:
+    # ── Image or Build ──────────────────────────────────────────────────────
+    image: myregistry/myapp:1.2.3      # Use pre-built image
+
+    # OR build from local Dockerfile:
+    build:
+      context: .                       # Build context (directory)
+      dockerfile: Dockerfile           # Path to Dockerfile
+      target: runtime                  # Multi-stage target
+      args:
+        BUILD_VERSION: "1.2.3"         # Build-time ARG values
+      cache_from:
+        - myregistry/myapp:buildcache
+
+    # ── Identity ────────────────────────────────────────────────────────────
+    container_name: myapp-api          # Fixed name (cannot scale if set)
+
+    # ── Ports ───────────────────────────────────────────────────────────────
+    ports:
+      - "3000:3000"                    # host:container
+      - "127.0.0.1:9229:9229"          # Bind to loopback only
+
+    # ── Environment ─────────────────────────────────────────────────────────
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      DATABASE_URL: postgres://admin:${POSTGRES_PASSWORD}@db:5432/myapp
+
+    # Load vars from a file (one KEY=VALUE per line)
+    env_file:
+      - .env
+      - .env.local                     # Merged on top of .env
+
+    # ── Volumes ─────────────────────────────────────────────────────────────
+    volumes:
+      - ./src:/app/src                 # Bind mount (host:container)
+      - appdata:/app/data              # Named volume
+      - /tmp/logs:/app/logs            # Absolute host path
+
+    # ── Dependencies ────────────────────────────────────────────────────────
+    depends_on:
+      db:
+        condition: service_healthy     # Wait for healthy status
+      redis:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully  # One-shot job
+
+    # ── Restart Policy ──────────────────────────────────────────────────────
+    restart: unless-stopped            # no | always | on-failure | unless-stopped
+
+    # ── Health Check ────────────────────────────────────────────────────────
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    # ── Command / Entrypoint ────────────────────────────────────────────────
+    command: ["node", "dist/server.js"]
+    entrypoint: ["/sbin/tini", "--"]
+
+    # ── Networks ────────────────────────────────────────────────────────────
+    networks:
+      - frontend
+      - backend
+
+    # ── Resource Limits ─────────────────────────────────────────────────────
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+
+    # ── Profiles ────────────────────────────────────────────────────────────
+    profiles:
+      - tools                          # Only starts with --profile tools
+
+    # ── Logging ─────────────────────────────────────────────────────────────
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # ── Labels ──────────────────────────────────────────────────────────────
+    labels:
+      com.example.version: "1.0"
+      com.example.team: "platform"
+```
+
+---
+
+## Networks
+
+### Default Network
+
+By default, Compose creates a single bridge network named `<project>_default` and attaches all services. Services reach each other using the **service name** as a hostname.
+
+```yaml
+services:
+  web:
+    image: nginx:alpine
+    # Can reach 'api' at http://api:3000
+    # Can reach 'db' at postgres://db:5432
+  api:
+    image: node:20-alpine
+  db:
+    image: postgres:16
+# No explicit networks needed — all share the default network
+```
+
+### Custom Named Networks
+
+Segment traffic between tiers:
+
+```yaml
+services:
+  nginx:
+    networks:
+      - frontend            # Only on frontend
+
+  api:
+    networks:
+      - frontend            # Accessible from nginx
+      - backend             # Can reach db and redis
+
+  db:
+    networks:
+      - backend             # Not reachable from nginx directly
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true          # No external internet access from backend containers
+```
+
+### Network Aliases
+
+A container can be reached by multiple hostnames:
+
+```yaml
+services:
+  postgres:
+    networks:
+      backend:
+        aliases:
+          - database
+          - db
+          - pg
+```
+
+### Using an Externally Created Network
+
+```yaml
+networks:
+  shared:
+    external: true
+    name: my-shared-network
+```
+
+---
+
+## Volumes
+
+### Named Volumes (Recommended for Persistent Data)
+
+```yaml
+services:
+  db:
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:                    # Docker manages lifecycle
+    driver: local
+
+  shared-uploads:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/nfs/uploads
+
+  external-vol:
+    external: true           # Must already exist
+    name: prod-pgdata-2024
+```
+
+### Bind Mounts (Development Hot Reload)
+
+```yaml
+services:
+  api:
+    volumes:
+      - ./src:/app/src                       # Hot reload source
+      - ./config/app.json:/app/config.json:ro  # Read-only config file
+```
+
+### tmpfs (In-Memory, Ephemeral)
+
+```yaml
+services:
+  cache:
+    tmpfs:
+      - /tmp:size=100m
+      - /run:size=50m
+```
+
+---
+
+## depends_on with Health Conditions
+
+```yaml
+services:
+  api:
+    depends_on:
+      db:
+        condition: service_healthy               # Wait for HEALTHCHECK to pass
+      redis:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully  # Wait for container to exit 0
+
+  db-migrate:
+    image: myapp:latest
+    command: ["npm", "run", "db:migrate"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: no                                  # Run once and exit
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: myapp
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+```
+
+:::tip[Startup order vs readiness]
+`depends_on` with `condition: service_started` only waits for the container to start — not for the application to be ready. Always use `condition: service_healthy` with a `healthcheck` for databases and other services that need warm-up time.
+:::
+
+---
+
+## Override Files
+
+Compose automatically merges `compose.yml` with `compose.override.yml`. Use override files to separate environment-specific configuration.
+
+```bash
+# Automatically merged files (if both exist)
+compose.yml
+compose.override.yml   # Development overrides (auto-loaded)
+
+# Explicit multi-file usage
+docker compose -f compose.yml -f compose.prod.yml up -d
+```
+
+**`compose.yml` (base — shared across all environments):**
+
+```yaml
+services:
+  api:
+    build:
+      context: .
+      target: runtime
+    environment:
+      NODE_ENV: development
+      PORT: "3000"
+    expose:
+      - "3000"    # Internal port only
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: devpassword
+      POSTGRES_DB: myapp
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin"]
+      interval: 10s
+      retries: 5
+
+volumes:
+  pgdata:
+```
+
+**`compose.override.yml` (development — auto-loaded):**
+
+```yaml
+services:
+  api:
+    ports:
+      - "3000:3000"    # Expose to host for local dev
+      - "9229:9229"    # Node.js debugger
+    volumes:
+      - ./src:/app/src  # Hot reload
+    environment:
+      DEBUG: "app:*"
+      LOG_LEVEL: debug
+    command: ["npm", "run", "dev"]
+```
+
+**`compose.prod.yml` (production — explicit):**
+
+```yaml
+services:
+  api:
+    image: myregistry/myapp:${VERSION:?VERSION required}
+    restart: always
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: warn
+    deploy:
+      replicas: 3
+      resources:
+        limits:
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+```
+
+---
+
+## Core Compose Commands
+
+```bash
+# Start all services, build if necessary, detached
+docker compose up -d
+
+# Start and force a rebuild of all images
+docker compose up -d --build
+
+# Start specific services only (and their dependencies)
+docker compose up -d api db
+
+# Stop and remove containers + networks (keeps volumes)
+docker compose down
+
+# Stop and remove containers, networks, AND named volumes
+docker compose down -v
+
+# Remove orphaned containers (from removed service definitions)
+docker compose down --remove-orphans
+
+# List service status
+docker compose ps
+
+# Stream logs from all services
+docker compose logs -f
+
+# Stream logs from a specific service
+docker compose logs -f api
+
+# Execute a command in a running service container
+docker compose exec api sh
+
+# Run a one-off command in a new container (removed after)
+docker compose run --rm api npm run db:migrate
+
+# Build images without starting containers
+docker compose build
+
+# Build a specific service
+docker compose build api
+
+# Pull latest images for all services
+docker compose pull
+
+# Restart a specific service (apply config changes)
+docker compose restart api
+
+# Scale a service to N replicas
+docker compose up -d --scale api=3
+
+# Check resource usage
+docker compose top
+
+# Stop services without removing containers
+docker compose stop
+
+# Start previously stopped containers
+docker compose start
+```
+
+---
+
+## Full Stack Example
+
+A production-ready example: Node.js API + PostgreSQL + Redis + Nginx reverse proxy.
+
+```yaml
+# compose.yml
+name: fullstack
+
+services:
+  nginx:
+    image: nginx:1.25-alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - frontend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  api:
+    build:
+      context: ./api
+      target: runtime
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - frontend
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-myapp}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  redis:
+    image: redis:7-alpine
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 128mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redisdata:/data
+    networks:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Database admin tool — only available with --profile admin
+  adminer:
+    image: adminer:4
+    ports:
+      - "8080:8080"
+    networks:
+      - backend
+    profiles:
+      - admin
+    restart: no
+
+networks:
+  frontend:
+  backend:
+    internal: true
+
+volumes:
+  pgdata:
+  redisdata:
+```
+
+Accompanying `.env`:
+
+```bash
+# .env — do not commit to version control
+POSTGRES_USER=admin
+POSTGRES_PASSWORD=supersecret_change_me
+POSTGRES_DB=myapp
+VERSION=1.2.3
+```
+
+Nginx reverse proxy configuration:
+
+```nginx
+# nginx/nginx.conf
+upstream api_backend {
+    server api:3000;  # Compose DNS round-robins to all api replicas
+}
+
+server {
+    listen 80;
+
+    location /health {
+        return 200 "ok\n";
+        add_header Content-Type text/plain;
+    }
+
+    location /api/ {
+        proxy_pass         http://api_backend/;
+        proxy_http_version 1.1;
+        proxy_set_header   Host               $host;
+        proxy_set_header   X-Real-IP          $remote_addr;
+        proxy_set_header   X-Forwarded-For    $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto  $scheme;
+        proxy_set_header   Connection         "";
+        proxy_read_timeout 60s;
+    }
+
+    location / {
+        root /usr/share/nginx/html;
+        try_files $uri $uri/ /index.html;
+    }
+}
+```
+
+Bring up the stack:
+
+```bash
+# Start everything
+docker compose up -d
+
+# Include the admin profile for Adminer
+docker compose --profile admin up -d
+
+# Watch startup logs
+docker compose logs -f
+
+# Run database migrations (one-off)
+docker compose run --rm api npm run db:migrate
+
+# Scale API to 3 replicas (remove container_name from api service first)
+docker compose up -d --scale api=3
+
+# Tear down (preserving volume data)
+docker compose down
+
+# Full teardown including volumes
+docker compose down -v
+```
+
+:::caution[Port conflicts when scaling]
+When using `--scale api=3`, remove any fixed `container_name` and fixed host-side port mapping (e.g., `"3000:3000"`) from the scaled service. Only one container can bind to a host port. Let Nginx proxy to the service name instead — Docker Compose DNS will round-robin across all replicas.
+:::

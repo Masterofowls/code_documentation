@@ -1,0 +1,798 @@
+---
+title: Advanced Python
+description: Generators, decorators, async/await, metaclasses, descriptors, type hints, and performance tips.
+sidebar:
+  order: 10
+tags: [python]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+This guide covers the Python features that separate proficient programmers from experts — generators, decorators, the async model, metaclasses, descriptors, and performance tooling.
+
+---
+
+## Generators & itertools
+
+A generator function uses `yield` to produce values lazily — it suspends execution and resumes on the next call to `next()`. This keeps memory usage flat regardless of the sequence size.
+
+```python
+# Simple generator
+def countdown(n: int):
+    while n > 0:
+        yield n
+        n -= 1
+
+for x in countdown(5):
+    print(x, end=' ')
+# 5 4 3 2 1
+
+# Generators are iterators — call next() manually
+gen = countdown(3)
+print(next(gen))  # 3
+print(next(gen))  # 2
+print(next(gen))  # 1
+# next(gen) would now raise StopIteration
+```
+
+### Memory Efficiency
+
+```python
+import sys
+
+# List — all values in memory at once
+big_list = [x ** 2 for x in range(1_000_000)]
+print(sys.getsizeof(big_list))   # ~8 MB
+
+# Generator — one value at a time
+big_gen = (x ** 2 for x in range(1_000_000))
+print(sys.getsizeof(big_gen))    # ~104 bytes
+```
+
+### yield from — Delegating to Sub-generators
+
+```python
+def flatten(nested):
+    for item in nested:
+        if isinstance(item, list):
+            yield from flatten(item)   # delegate to recursive call
+        else:
+            yield item
+
+data = [1, [2, 3], [4, [5, 6]], 7]
+print(list(flatten(data)))  # [1, 2, 3, 4, 5, 6, 7]
+```
+
+### Generator Pipelines
+
+Chain generators to build memory-efficient data pipelines:
+
+```python
+from pathlib import Path
+
+def read_lines(path: str):
+    with open(path, encoding='utf-8') as f:
+        yield from f
+
+def grep(lines, pattern: str):
+    for line in lines:
+        if pattern in line:
+            yield line
+
+def strip_newlines(lines):
+    for line in lines:
+        yield line.rstrip('\n')
+
+# Pipeline — only one line lives in memory at a time
+pipeline = strip_newlines(grep(read_lines('app.log'), 'ERROR'))
+for error_line in pipeline:
+    print(error_line)
+```
+
+### Infinite Sequences
+
+```python
+import itertools
+
+def naturals():
+    n = 1
+    while True:
+        yield n
+        n += 1
+
+# Take the first 5 squares from an infinite sequence
+squares = (x**2 for x in naturals())
+print(list(itertools.islice(squares, 5)))  # [1, 4, 9, 16, 25]
+
+# itertools.count / cycle / repeat
+for i, letter in zip(itertools.count(10, 2), 'ABCDE'):
+    print(i, letter)
+# 10 A  12 B  14 C  16 D  18 E
+```
+
+---
+
+## Decorators Deep Dive
+
+A decorator is a callable that accepts a function (or class) and returns a replacement. `functools.wraps` copies metadata so the decorated function still looks like the original.
+
+### Function Decorator with Arguments
+
+```python
+import functools
+import time
+
+def retry(max_attempts: int = 3, delay: float = 1.0):
+    """Retry a function on exception."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exc: Exception | None = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as exc:
+                    last_exc = exc
+                    print(f'Attempt {attempt} failed: {exc}')
+                    if attempt < max_attempts:
+                        time.sleep(delay)
+            raise RuntimeError(f'All {max_attempts} attempts failed') from last_exc
+        return wrapper
+    return decorator
+
+@retry(max_attempts=3, delay=0.5)
+def fetch_data(url: str) -> str:
+    # simulate flaky network call
+    import random
+    if random.random() < 0.7:
+        raise ConnectionError('timeout')
+    return 'data'
+```
+
+### Class-Based Decorator
+
+```python
+import functools
+
+class RateLimit:
+    """Allow at most `calls` invocations per `period` seconds."""
+
+    def __init__(self, calls: int, period: float):
+        self.calls = calls
+        self.period = period
+        self._timestamps: list[float] = []
+
+    def __call__(self, func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            import time
+            now = time.monotonic()
+            self._timestamps = [t for t in self._timestamps
+                                 if now - t < self.period]
+            if len(self._timestamps) >= self.calls:
+                raise RuntimeError('Rate limit exceeded')
+            self._timestamps.append(now)
+            return func(*args, **kwargs)
+        return wrapper
+
+@RateLimit(calls=5, period=1.0)
+def send_message(text: str) -> None:
+    print(f'Sent: {text}')
+```
+
+### Built-in Decorators
+
+```python
+from dataclasses import dataclass, field
+
+# @property — computed attribute with get/set/delete
+class Circle:
+    def __init__(self, radius: float) -> None:
+        self._radius = radius
+
+    @property
+    def radius(self) -> float:
+        return self._radius
+
+    @radius.setter
+    def radius(self, value: float) -> None:
+        if value < 0:
+            raise ValueError('Radius must be non-negative')
+        self._radius = value
+
+    @property
+    def area(self) -> float:
+        import math
+        return math.pi * self._radius ** 2
+
+c = Circle(5)
+print(c.area)   # 78.53981633974483
+c.radius = 10
+print(c.area)   # 314.1592653589793
+
+# @classmethod — alternative constructors
+# @staticmethod — utility functions tied to a class
+class Temperature:
+    def __init__(self, celsius: float) -> None:
+        self.celsius = celsius
+
+    @classmethod
+    def from_fahrenheit(cls, f: float) -> 'Temperature':
+        return cls((f - 32) * 5 / 9)
+
+    @staticmethod
+    def is_freezing(celsius: float) -> bool:
+        return celsius <= 0
+
+t = Temperature.from_fahrenheit(212)
+print(t.celsius)                    # 100.0
+print(Temperature.is_freezing(-5))  # True
+
+# @dataclass — auto-generates __init__, __repr__, __eq__
+@dataclass(order=True)
+class Point:
+    x: float
+    y: float
+    label: str = field(default='', compare=False)
+
+p1 = Point(1, 2)
+p2 = Point(1, 2, label='origin')
+print(p1 == p2)   # True (label excluded from comparison)
+print(p1)         # Point(x=1, y=2, label='')
+```
+
+---
+
+## Context Managers
+
+```python
+from contextlib import contextmanager, ExitStack, suppress
+import time
+
+# @contextmanager — turn a generator into a context manager
+@contextmanager
+def timer(label: str = ''):
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - start
+        print(f'{label} took {elapsed:.4f}s')
+
+with timer('matrix multiply'):
+    result = sum(i * i for i in range(10_000_000))
+# matrix multiply took 0.4321s
+
+# contextmanager with a yielded value
+@contextmanager
+def managed_db_connection(dsn: str):
+    conn = {'dsn': dsn, 'open': True}  # placeholder
+    try:
+        yield conn
+    except Exception:
+        print('Rolling back')
+        raise
+    finally:
+        conn['open'] = False
+        print('Connection closed')
+
+with managed_db_connection('postgresql://localhost/mydb') as conn:
+    print(conn['open'])  # True
+# Connection closed
+
+# ExitStack — manage a dynamic number of context managers
+def process_files(paths: list[str]) -> None:
+    with ExitStack() as stack:
+        files = [
+            stack.enter_context(open(p, encoding='utf-8'))
+            for p in paths
+        ]
+        for f in files:
+            print(f.readline())
+
+# suppress — silence specific exceptions
+with suppress(FileNotFoundError):
+    open('maybe_missing.txt')  # no error raised
+print('Continuing normally')   # Continuing normally
+```
+
+---
+
+## async/await
+
+Python's `asyncio` implements cooperative multitasking on a single thread. Coroutines yield control at `await` points, letting the event loop run other tasks.
+
+```python
+import asyncio
+import time
+
+# Basic coroutine
+async def greet(name: str, delay: float) -> str:
+    await asyncio.sleep(delay)   # releases control to event loop
+    return f'Hello, {name}!'
+
+# asyncio.gather — run concurrently, not sequentially
+async def main() -> None:
+    start = time.perf_counter()
+    results = await asyncio.gather(
+        greet('Alice', 1.0),
+        greet('Bob',   1.5),
+        greet('Carol', 0.5),
+    )
+    elapsed = time.perf_counter() - start
+    for r in results:
+        print(r)
+    print(f'Total: {elapsed:.2f}s')  # ~1.5s, not 3.0s
+
+asyncio.run(main())
+# Hello, Alice!
+# Hello, Bob!
+# Hello, Carol!
+# Total: 1.51s
+```
+
+### async for / async with
+
+```python
+import asyncio
+
+# async for — iterate an async generator
+async def async_range(n: int):
+    for i in range(n):
+        await asyncio.sleep(0)  # yield to event loop
+        yield i
+
+async def consume() -> None:
+    async for value in async_range(5):
+        print(value, end=' ')
+    # 0 1 2 3 4
+
+# async with — async context manager (e.g., aiohttp session)
+# pip install aiohttp
+async def fetch_urls(urls: list[str]) -> list[str]:
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        async def fetch_one(url: str) -> str:
+            async with session.get(url) as resp:
+                return await resp.text()
+        return await asyncio.gather(*(fetch_one(u) for u in urls))
+
+asyncio.run(consume())
+```
+
+### Tasks and Cancellation
+
+```python
+import asyncio
+
+async def slow_task(name: str, seconds: float) -> str:
+    try:
+        await asyncio.sleep(seconds)
+        return f'{name} done'
+    except asyncio.CancelledError:
+        print(f'{name} was cancelled')
+        raise   # always re-raise CancelledError
+
+async def main() -> None:
+    task = asyncio.create_task(slow_task('worker', 10.0))
+    await asyncio.sleep(1)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+asyncio.run(main())
+# worker was cancelled
+```
+
+<Aside type="tip">
+  Use `asyncio` for I/O-bound concurrency (HTTP, databases, file I/O). For CPU-bound work, `asyncio` won't help — use `ProcessPoolExecutor` via `loop.run_in_executor()` instead.
+</Aside>
+
+---
+
+## Type System
+
+```python
+from typing import TypeVar, Generic, Protocol, Literal, TypedDict, Final, overload
+from collections.abc import Callable
+
+# TypeVar with bounds
+T = TypeVar('T')
+Numeric = TypeVar('Numeric', int, float)
+
+def double(x: Numeric) -> Numeric:
+    return x * 2
+
+print(double(3))    # 6   (int)
+print(double(2.5))  # 5.0 (float)
+
+# Protocol — structural subtyping (duck typing with types)
+class Drawable(Protocol):
+    def draw(self) -> None: ...
+
+class Circle:
+    def draw(self) -> None:
+        print('Drawing circle')
+
+class Square:
+    def draw(self) -> None:
+        print('Drawing square')
+
+def render_all(shapes: list[Drawable]) -> None:
+    for s in shapes:
+        s.draw()
+
+render_all([Circle(), Square()])   # works — no inheritance needed
+
+# Literal — restrict to specific values
+Mode = Literal['r', 'w', 'a', 'rb', 'wb']
+
+def open_file(path: str, mode: Mode) -> None:
+    with open(path, mode): pass
+
+# TypedDict — typed dict structure
+class Config(TypedDict):
+    host: str
+    port: int
+    debug: bool
+
+cfg: Config = {'host': 'localhost', 'port': 8080, 'debug': False}
+
+# Final — prevent reassignment
+MAX_RETRIES: Final = 3
+
+# overload — type-narrow based on argument type
+@overload
+def process(x: int) -> int: ...
+@overload
+def process(x: str) -> str: ...
+
+def process(x):
+    if isinstance(x, int):
+        return x * 2
+    return x.upper()
+
+print(process(5))      # 10
+print(process('hi'))   # HI
+
+# Generic class
+class Box(Generic[T]):
+    def __init__(self, value: T) -> None:
+        self._value = value
+
+    def unwrap(self) -> T:
+        return self._value
+
+box: Box[int] = Box(42)
+print(box.unwrap())  # 42
+```
+
+---
+
+## Metaclasses
+
+Every class in Python is an instance of a metaclass. The default is `type`. Metaclasses let you intercept and customise class creation.
+
+```python
+# type() creates classes dynamically
+Dog = type('Dog', (object,), {'speak': lambda self: 'Woof!'})
+d = Dog()
+print(d.speak())  # Woof!
+
+# Custom metaclass
+class SingletonMeta(type):
+    """Ensure only one instance of each class is ever created."""
+    _instances: dict = {}
+
+    def __call__(cls, *args, **kwargs):
+        if cls not in cls._instances:
+            cls._instances[cls] = super().__call__(*args, **kwargs)
+        return cls._instances[cls]
+
+class Database(metaclass=SingletonMeta):
+    def __init__(self) -> None:
+        self.connected = False
+
+db1 = Database()
+db2 = Database()
+print(db1 is db2)  # True — same object
+
+# __new__ vs __init__ in metaclasses
+class AutoRegister(type):
+    registry: dict[str, type] = {}
+
+    def __new__(mcs, name, bases, namespace):
+        cls = super().__new__(mcs, name, bases, namespace)
+        if bases:   # skip the base class itself
+            mcs.registry[name] = cls
+        return cls
+
+class Plugin(metaclass=AutoRegister):
+    pass
+
+class ImagePlugin(Plugin):
+    pass
+
+class VideoPlugin(Plugin):
+    pass
+
+print(AutoRegister.registry)
+# {'ImagePlugin': <class '__main__.ImagePlugin'>, 'VideoPlugin': ...}
+```
+
+<Aside type="caution">
+  Metaclasses are powerful but increase cognitive overhead significantly. Before reaching for a metaclass, consider whether a class decorator, `__init_subclass__`, or `__class_getitem__` solves the same problem more simply.
+</Aside>
+
+---
+
+## Descriptors
+
+Descriptors power Python's attribute access protocol. Any class that defines `__get__`, `__set__`, or `__delete__` is a descriptor — including `property`, `classmethod`, and `staticmethod`.
+
+```python
+class Validator:
+    """Descriptor that enforces a minimum value."""
+
+    def __init__(self, min_value: float) -> None:
+        self.min_value = min_value
+        self.name: str = ''   # set by __set_name__
+
+    def __set_name__(self, owner, name: str) -> None:
+        self.name = name       # called when class is created
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self   # accessed on the class itself
+        return obj.__dict__.get(self.name)
+
+    def __set__(self, obj, value: float) -> None:
+        if value < self.min_value:
+            raise ValueError(
+                f'{self.name} must be >= {self.min_value}, got {value}'
+            )
+        obj.__dict__[self.name] = value
+
+class Product:
+    price    = Validator(min_value=0.0)
+    quantity = Validator(min_value=0)
+
+    def __init__(self, price: float, quantity: int) -> None:
+        self.price = price
+        self.quantity = quantity
+
+p = Product(9.99, 5)
+print(p.price)      # 9.99
+try:
+    p.price = -1    # ValueError: price must be >= 0.0, got -1
+except ValueError as e:
+    print(e)
+```
+
+### How @property Works Internally
+
+```python
+# property is a data descriptor implemented in C.
+# This is a pure-Python equivalent:
+class myproperty:
+    def __init__(self, fget=None, fset=None, fdel=None):
+        self.fget = fget
+        self.fset = fset
+        self.fdel = fdel
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self
+        if self.fget is None:
+            raise AttributeError('unreadable attribute')
+        return self.fget(obj)
+
+    def __set__(self, obj, value):
+        if self.fset is None:
+            raise AttributeError("can't set attribute")
+        self.fset(obj, value)
+
+    def setter(self, fset):
+        return type(self)(self.fget, fset, self.fdel)
+```
+
+**Data descriptors** (define `__set__` or `__delete__`) take precedence over instance `__dict__`. **Non-data descriptors** (only `__get__`) are overridden by instance attributes.
+
+---
+
+## Memory & Performance
+
+### `__slots__`
+
+```python
+import sys
+
+class RegularPoint:
+    def __init__(self, x: float, y: float) -> None:
+        self.x = x
+        self.y = y
+
+class SlottedPoint:
+    __slots__ = ('x', 'y')
+
+    def __init__(self, x: float, y: float) -> None:
+        self.x = x
+        self.y = y
+
+r = RegularPoint(1.0, 2.0)
+s = SlottedPoint(1.0, 2.0)
+
+print(sys.getsizeof(r.__dict__))  # 232 — dict overhead
+print(sys.getsizeof(s))           # 56  — no __dict__
+```
+
+<Aside type="tip">
+  Use `__slots__` when creating millions of small objects (e.g., nodes in a graph). It removes the per-instance `__dict__`, saving ~200 bytes per object.
+</Aside>
+
+### Profiling
+
+```python
+import cProfile
+import pstats
+import timeit
+import io
+
+# timeit — micro-benchmarks
+t = timeit.timeit(
+    stmt='[x**2 for x in range(1000)]',
+    number=10_000,
+)
+print(f'{t:.3f}s for 10,000 iterations')
+
+# cProfile — line-by-line CPU profiling
+def heavy_work():
+    return sum(i * i for i in range(500_000))
+
+pr = cProfile.Profile()
+pr.enable()
+heavy_work()
+pr.disable()
+
+buf = io.StringIO()
+ps = pstats.Stats(pr, stream=buf).sort_stats('cumulative')
+ps.print_stats(5)
+print(buf.getvalue())
+```
+
+### gc module
+
+```python
+import gc
+
+# Force a collection (useful in tests)
+gc.collect()
+
+# Find reference cycles
+gc.set_debug(gc.DEBUG_LEAK)
+
+# Disable GC for a hot loop (re-enable after)
+gc.disable()
+result = list(range(10_000_000))
+gc.enable()
+```
+
+---
+
+## Pattern Matching (Python 3.10+)
+
+`match`/`case` is structural pattern matching — more powerful than a `switch` statement.
+
+```python
+# Match on type and structure
+def handle_command(command: dict) -> str:
+    match command:
+        case {'action': 'quit'}:
+            return 'Exiting...'
+
+        case {'action': 'move', 'direction': ('north' | 'south' | 'east' | 'west') as d}:
+            return f'Moving {d}'
+
+        case {'action': 'attack', 'target': str(target), 'damage': int(dmg)} if dmg > 0:
+            return f'Attacking {target} for {dmg} damage'
+
+        case {'action': str(unknown)}:
+            return f'Unknown action: {unknown}'
+
+        case _:
+            return 'Invalid command'
+
+print(handle_command({'action': 'move', 'direction': 'north'}))
+# Moving north
+
+print(handle_command({'action': 'attack', 'target': 'dragon', 'damage': 15}))
+# Attacking dragon for 15 damage
+```
+
+### Matching Data Classes
+
+```python
+from dataclasses import dataclass
+
+@dataclass
+class Point:
+    x: float
+    y: float
+
+@dataclass
+class Circle:
+    center: Point
+    radius: float
+
+def describe_shape(shape) -> str:
+    match shape:
+        case Circle(center=Point(x=0, y=0), radius=r):
+            return f'Circle at origin, radius={r}'
+        case Circle(center=Point(x=x, y=y), radius=r):
+            return f'Circle at ({x}, {y}), radius={r}'
+        case Point(x=0, y=0):
+            return 'Origin point'
+        case Point(x=x, y=y):
+            return f'Point at ({x}, {y})'
+        case _:
+            return 'Unknown shape'
+
+print(describe_shape(Circle(Point(0, 0), 5)))    # Circle at origin, radius=5
+print(describe_shape(Circle(Point(3, 4), 2)))    # Circle at (3, 4), radius=2
+print(describe_shape(Point(0, 0)))               # Origin point
+```
+
+---
+
+## Walrus Operator (:=)
+
+The walrus operator (`:=`) assigns a value as part of an expression, removing the need for a pre-assignment line.
+
+```python
+import re
+
+# Without walrus — two lines
+line = 'ERROR: disk full'
+m = re.match(r'ERROR: (.+)', line)
+if m:
+    print(m.group(1))
+
+# With walrus — assign and test in one expression
+if m := re.match(r'ERROR: (.+)', line):
+    print(m.group(1))   # disk full
+
+# Practical: read chunks until EOF
+def process_file(path: str) -> int:
+    total = 0
+    with open(path, 'rb') as f:
+        while chunk := f.read(4096):   # stops when read() returns b''
+            total += len(chunk)
+    return total
+
+# Practical: filter while computing
+numbers = [1, 4, 9, 16, 25, 36]
+large_roots = [
+    root
+    for n in numbers
+    if (root := n ** 0.5) > 4
+]
+print(large_roots)  # [4.47..., 5.0, 6.0]
+
+# Practical: avoid calling a function twice
+import random
+
+def expensive_lookup(key: str) -> int | None:
+    return random.randint(1, 10) if key == 'valid' else None
+
+results = []
+for key in ['valid', 'missing', 'valid']:
+    if value := expensive_lookup(key):
+        results.append(value)
+print(results)  # [7, 3] or similar (only valid keys)
+```
+
+<Aside type="tip">
+  The walrus operator shines in `while` loops reading streams, list comprehensions with filtering, and `if` statements that also need the matched value. Avoid it where it reduces clarity — a named variable on the line above is sometimes cleaner.
+</Aside>

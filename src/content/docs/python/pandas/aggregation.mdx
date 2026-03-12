@@ -1,0 +1,630 @@
+---
+title: "Aggregation and GroupBy"
+description: "Master Pandas aggregation — groupby mechanics, agg() with multiple functions, named aggregations, transform, filter, pivot_table, crosstab, rolling windows, and multi-level grouping with full output shown."
+sidebar:
+  order: 5
+tags: [python, data]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Aggregation transforms detailed row-level data into summary statistics. Pandas provides a rich set of tools — from simple `groupby()` sums to complex rolling window computations — all following the split-apply-combine pattern.
+
+## Sample Dataset
+
+```python
+import pandas as pd
+import numpy as np
+
+sales = pd.DataFrame({
+    "date":     pd.to_datetime([
+        "2024-01-05","2024-01-12","2024-01-20","2024-02-03",
+        "2024-02-18","2024-03-07","2024-03-15","2024-03-28",
+        "2024-04-10","2024-04-22",
+    ]),
+    "region":   ["North","North","South","East","South","North","East","South","East","North"],
+    "product":  ["A","B","A","B","A","A","B","B","A","A"],
+    "rep":      ["Alice","Alice","Bob","Carol","Bob","Alice","Carol","Bob","Carol","Alice"],
+    "revenue":  [12000, 8500, 9800, 11200, 14300, 10500, 9700, 13100, 15800, 11600],
+    "units":    [120, 85, 98, 112, 143, 105, 97, 131, 158, 116],
+    "discount": [0.05, 0.10, 0.08, 0.05, 0.12, 0.07, 0.10, 0.08, 0.06, 0.05],
+})
+print(sales)
+```
+
+```text
+        date region product    rep  revenue  units  discount
+0 2024-01-05  North       A  Alice    12000    120      0.05
+1 2024-01-12  North       B  Alice     8500     85      0.10
+2 2024-01-20  South       A    Bob     9800     98      0.08
+3 2024-02-03   East       B  Carol    11200    112      0.05
+4 2024-02-18  South       A    Bob    14300    143      0.12
+5 2024-03-07  North       A  Alice    10500    105      0.07
+6 2024-03-15   East       B  Carol     9700     97      0.10
+7 2024-03-28  South       B    Bob    13100    131      0.08
+8 2024-04-10   East       A  Carol    15800    158      0.06
+9 2024-04-22  North       A  Alice    11600    116      0.05
+```
+
+## GroupBy Basics
+
+The `groupby()` method implements the **split-apply-combine** pattern:
+1. **Split** the DataFrame into groups based on a key
+2. **Apply** an aggregation function to each group
+3. **Combine** the results into a new DataFrame
+
+```python
+# Total revenue by region
+print(sales.groupby("region")["revenue"].sum())
+```
+
+```text
+region
+East     36700
+North    42600
+South    37200
+Name: revenue, dtype: int64
+```
+
+```python
+# Multiple aggregations on one column
+print(sales.groupby("region")["revenue"].agg(["sum", "mean", "min", "max", "count"]))
+```
+
+```text
+        sum         mean    min    max  count
+region
+East  36700  12233.333333   9700  15800      3
+North 42600  10650.000000   8500  12000      4
+South 37200  12400.000000   9800  14300      3
+```
+
+```python
+# Groupby multiple keys
+print(sales.groupby(["region", "product"])["revenue"].sum())
+```
+
+```text
+region  product
+East    A          15800
+        B          20900
+North   A          34100
+        B           8500
+South   A          24100
+        B          13100
+Name: revenue, dtype: int64
+```
+
+```python
+# Reset index to get a flat DataFrame
+summary = (
+    sales.groupby(["region", "product"])["revenue"]
+    .sum()
+    .reset_index()
+    .rename(columns={"revenue": "total_revenue"})
+)
+print(summary)
+```
+
+```text
+  region product  total_revenue
+0   East       A          15800
+1   East       B          20900
+2  North       A          34100
+3  North       B           8500
+4  South       A          24100
+5  South       B          13100
+```
+
+## agg() with Multiple Functions
+
+```python
+# Apply multiple functions to multiple columns
+result = sales.groupby("region").agg(
+    total_revenue=("revenue", "sum"),
+    avg_revenue=("revenue", "mean"),
+    max_revenue=("revenue", "max"),
+    total_units=("units", "sum"),
+    avg_discount=("discount", "mean"),
+)
+print(result.round(3))
+```
+
+```text
+        total_revenue  avg_revenue  max_revenue  total_units  avg_discount
+region
+East            36700     12233.33        15800          367         0.070
+North           42600     10650.00        12000          426         0.068
+South           37200     12400.00        14300          372         0.093
+```
+
+```python
+# Dict-style agg — different functions per column
+result2 = sales.groupby("product").agg({
+    "revenue":  ["sum", "mean", "std"],
+    "units":    ["sum", "mean"],
+    "discount": "mean",
+})
+print(result2.round(2))
+```
+
+```text
+        revenue                   units        discount
+            sum      mean     std   sum   mean     mean
+product
+A         63800  12760.00  1979.4   640  128.0     0.07
+B         44700  11175.00  1817.0   425  106.2     0.08
+```
+
+## Named Aggregations
+
+Named aggregations using `pd.NamedAgg` give clean, flat output column names.
+
+```python
+result = sales.groupby("rep").agg(
+    total_revenue  = pd.NamedAgg(column="revenue",  aggfunc="sum"),
+    avg_revenue    = pd.NamedAgg(column="revenue",  aggfunc="mean"),
+    deal_count     = pd.NamedAgg(column="revenue",  aggfunc="count"),
+    total_units    = pd.NamedAgg(column="units",    aggfunc="sum"),
+    avg_discount   = pd.NamedAgg(column="discount", aggfunc="mean"),
+    best_deal      = pd.NamedAgg(column="revenue",  aggfunc="max"),
+)
+print(result.round(2))
+```
+
+```text
+       total_revenue  avg_revenue  deal_count  total_units  avg_discount  best_deal
+rep
+Alice          42600        10650           4          426          0.07      12000
+Bob            37200        12400           3          372          0.09      14300
+Carol          36700        12233           3          367          0.07      15800
+```
+
+:::tip[Prefer Named Aggregations]
+Named aggregations produce flat, readable column names and avoid the multi-level column index that `{"col": ["f1", "f2"]}` creates. They are also self-documenting — the output column name describes what was computed.
+:::
+
+## Iterating Over Groups
+
+```python
+# Iterate over groups — useful for per-group debugging
+for group_name, group_df in sales.groupby("region"):
+    print(f"\n=== {group_name} ===")
+    print(group_df[["date", "rep", "revenue"]].to_string(index=False))
+```
+
+```text
+=== East ===
+      date    rep  revenue
+2024-02-03  Carol    11200
+2024-03-15  Carol     9700
+2024-04-10  Carol    15800
+
+=== North ===
+      date    rep  revenue
+2024-01-05  Alice    12000
+2024-01-12  Alice     8500
+2024-03-07  Alice    10500
+2024-04-22  Alice    11600
+
+=== South ===
+      date    rep  revenue
+2024-01-20    Bob     9800
+2024-02-18    Bob    14300
+2024-03-28    Bob    13100
+```
+
+## transform() — Broadcast Group Statistics Back
+
+`transform()` returns a Series the same length as the original DataFrame, with the group statistic broadcast to each row. This is ideal for adding group-level features.
+
+```python
+# Add region average revenue as a new column (same shape as original)
+sales["region_avg_revenue"] = sales.groupby("region")["revenue"].transform("mean")
+sales["vs_region_avg"]      = (sales["revenue"] - sales["region_avg_revenue"]).round(0)
+
+print(sales[["rep", "region", "revenue", "region_avg_revenue", "vs_region_avg"]])
+```
+
+```text
+     rep region  revenue  region_avg_revenue  vs_region_avg
+0  Alice  North    12000           10650.0         1350.0
+1  Alice  North     8500           10650.0        -2150.0
+2    Bob  South     9800           12400.0        -2600.0
+3  Carol   East    11200           12233.3        -1033.0
+4    Bob  South    14300           12400.0         1900.0
+5  Alice  North    10500           10650.0         -150.0
+6  Carol   East     9700           12233.3        -2533.0
+7    Bob  South    13100           12400.0          700.0
+8  Carol   East    15800           12233.3         3567.0
+9  Alice  North    11600           10650.0          950.0
+```
+
+```python
+# Normalize revenue within each region (z-score)
+sales["revenue_zscore"] = (
+    sales.groupby("region")["revenue"]
+    .transform(lambda x: (x - x.mean()) / x.std())
+    .round(2)
+)
+print(sales[["rep", "region", "revenue", "revenue_zscore"]])
+```
+
+```text
+     rep region  revenue  revenue_zscore
+0  Alice  North    12000            1.15
+1  Alice  North     8500           -1.80
+2    Bob  South     9800           -1.14
+3  Carol   East    11200           -0.53
+4    Bob  South    14300            0.86
+5  Alice  North    10500           -0.06
+6  Carol   East     9700           -1.16
+7    Bob  South    13100            0.28
+8  Carol   East    15800            1.69
+9  Alice  North    11600            0.71
+```
+
+## filter() — Keep or Remove Entire Groups
+
+`filter()` keeps or drops entire groups based on a function that returns `True` or `False` for each group.
+
+```python
+# Keep only regions where total revenue exceeds 38,000
+high_rev_regions = sales.groupby("region").filter(
+    lambda g: g["revenue"].sum() > 38000
+)
+print(high_rev_regions[["region", "rep", "revenue"]])
+```
+
+```text
+  region    rep  revenue
+0  North  Alice    12000
+1  North  Alice     8500
+5  North  Alice    10500
+9  North  Alice    11600
+```
+
+```python
+# Keep only reps with at least 3 deals
+active_reps = sales.groupby("rep").filter(lambda g: len(g) >= 3)
+print(active_reps[["rep", "revenue"]].sort_values("rep"))
+```
+
+```text
+     rep  revenue
+0  Alice    12000
+1  Alice     8500
+5  Alice    10500
+9  Alice    11600
+3  Carol    11200
+6  Carol     9700
+8  Carol    15800
+```
+
+## pivot_table()
+
+`pivot_table()` is a powerful summarization tool combining groupby and reshape in one step.
+
+```python
+pt = pd.pivot_table(
+    sales,
+    values="revenue",
+    index="region",
+    columns="product",
+    aggfunc="sum",
+    fill_value=0,
+    margins=True,
+    margins_name="Total",
+)
+print(pt)
+```
+
+```text
+product    A       B   Total
+region
+East   15800   20900   36700
+North  34100    8500   42600
+South  24100   13100   37200
+Total  74000   42500  116500
+```
+
+```python
+# Multiple value columns
+pt2 = pd.pivot_table(
+    sales,
+    values=["revenue", "units"],
+    index="rep",
+    columns="product",
+    aggfunc="sum",
+    fill_value=0,
+)
+print(pt2)
+```
+
+```text
+       revenue        units
+product      A      B     A     B
+rep
+Alice    34100   8500   341    85
+Bob      24100  13100   241   131
+Carol    15800  20900   158   209
+```
+
+## crosstab()
+
+`crosstab()` counts the frequency of combinations of two categorical variables.
+
+```python
+ct = pd.crosstab(sales["region"], sales["product"])
+print(ct)
+```
+
+```text
+product  A  B
+region
+East     1  2
+North    3  1
+South    2  1
+```
+
+```python
+# With values and aggregation
+ct_revenue = pd.crosstab(
+    sales["region"],
+    sales["product"],
+    values=sales["revenue"],
+    aggfunc="sum",
+)
+print(ct_revenue)
+```
+
+```text
+product      A      B
+region
+East     15800  20900
+North    34100   8500
+South    24100  13100
+```
+
+```python
+# Normalize to get proportions
+ct_pct = pd.crosstab(sales["region"], sales["product"], normalize="all") * 100
+print(ct_pct.round(1))
+```
+
+```text
+product     A     B
+region
+East      5.2  17.4
+North    30.4   5.2
+South    17.4   5.2
+```
+
+## Rolling Windows
+
+Rolling window calculations apply a function over a sliding window of N rows.
+
+```python
+# Create a daily time series
+daily = pd.DataFrame({
+    "date":    pd.date_range("2024-01-01", periods=10),
+    "revenue": [12000, 8500, 9800, 11200, 14300, 10500, 9700, 13100, 15800, 11600],
+}).set_index("date")
+
+print(daily)
+```
+
+```text
+            revenue
+date
+2024-01-01    12000
+2024-01-02     8500
+2024-01-03     9800
+2024-01-04    11200
+2024-01-05    14300
+2024-01-06    10500
+2024-01-07     9700
+2024-01-08    13100
+2024-01-09    15800
+2024-01-10    11600
+```
+
+```python
+# 3-day rolling mean
+daily["rolling_3d_mean"] = daily["revenue"].rolling(window=3).mean().round(0)
+# 3-day rolling sum
+daily["rolling_3d_sum"]  = daily["revenue"].rolling(window=3).sum()
+# 3-day rolling std
+daily["rolling_3d_std"]  = daily["revenue"].rolling(window=3).std().round(0)
+
+print(daily)
+```
+
+```text
+            revenue  rolling_3d_mean  rolling_3d_sum  rolling_3d_std
+date
+2024-01-01    12000              NaN             NaN             NaN
+2024-01-02     8500              NaN             NaN             NaN
+2024-01-03     9800          10100.0         30300.0          1768.0
+2024-01-04    11200           9833.0         29500.0          1351.0
+2024-01-05    14300          11767.0         35300.0          2253.0
+2024-01-06    10500          12000.0         36000.0          1908.0
+2024-01-07     9700          11500.0         34500.0          2408.0
+2024-01-08    13100          11100.0         33300.0          1720.0
+2024-01-09    15800          12867.0         38600.0          3096.0
+2024-01-10    11600          13500.0         40500.0          2100.0
+```
+
+```python
+# min_periods — compute even when window isn't full yet
+daily["rolling_3d_min"] = daily["revenue"].rolling(window=3, min_periods=1).mean().round(0)
+print(daily[["revenue", "rolling_3d_min"]].head(4))
+```
+
+```text
+            revenue  rolling_3d_min
+date
+2024-01-01    12000         12000.0
+2024-01-02     8500         10250.0
+2024-01-03     9800         10100.0
+2024-01-04    11200          9833.0
+```
+
+## Expanding Windows
+
+Expanding windows grow from the first row to the current row — equivalent to "cumulative to date."
+
+```python
+daily["expanding_mean"] = daily["revenue"].expanding().mean().round(0)
+daily["expanding_max"]  = daily["revenue"].expanding().max()
+daily["expanding_sum"]  = daily["revenue"].expanding().sum()
+
+print(daily[["revenue", "expanding_mean", "expanding_max", "expanding_sum"]])
+```
+
+```text
+            revenue  expanding_mean  expanding_max  expanding_sum
+date
+2024-01-01    12000         12000.0          12000          12000
+2024-01-02     8500         10250.0          12000          20500
+2024-01-03     9800         10100.0          12000          30300
+2024-01-04    11200         10375.0          12000          41500
+2024-01-05    14300         11160.0          14300          55800
+2024-01-06    10500         11050.0          14300          66300
+2024-01-07     9700         10871.0          14300          76000
+2024-01-08    13100         11137.0          14300          89100
+2024-01-09    15800          11656.0         15800         104900
+2024-01-10    11600          11650.0         15800         116500
+```
+
+## Cumulative Functions
+
+```python
+daily["cumsum"]  = daily["revenue"].cumsum()
+daily["cumprod"] = (daily["revenue"] / 10000).cumprod().round(4)   # normalized
+daily["cummax"]  = daily["revenue"].cummax()
+daily["cummin"]  = daily["revenue"].cummin()
+
+print(daily[["revenue", "cumsum", "cummax", "cummin"]])
+```
+
+```text
+            revenue   cumsum  cummax  cummin
+date
+2024-01-01    12000    12000   12000   12000
+2024-01-02     8500    20500   12000    8500
+2024-01-03     9800    30300   12000    8500
+2024-01-04    11200    41500   12000    8500
+2024-01-05    14300    55800   14300    8500
+2024-01-06    10500    66300   14300    8500
+2024-01-07     9700    76000   14300    8500
+2024-01-08    13100    89100   14300    8500
+2024-01-09    15800   104900   15800    8500
+2024-01-10    11600   116500   15800    8500
+```
+
+## value_counts() and nunique()
+
+```python
+# value_counts — frequency table with percentages
+print(sales["region"].value_counts())
+print()
+print(sales["region"].value_counts(normalize=True).round(3))
+```
+
+```text
+region
+North    4
+East     3
+South    3
+Name: count, dtype: int64
+
+region
+North    0.4
+East     0.3
+South    0.3
+Name: proportion, dtype: float64
+```
+
+```python
+# nunique — count distinct values per column
+print(sales.nunique())
+```
+
+```text
+date        10
+region       3
+product      2
+rep          3
+revenue     10
+units       10
+discount     5
+dtype: int64
+```
+
+```python
+# nunique per group
+print(sales.groupby("region")[["product", "rep"]].nunique())
+```
+
+```text
+        product  rep
+region
+East          2    1
+North         2    1
+South         2    1
+```
+
+## describe() per Group
+
+```python
+print(sales.groupby("region")["revenue"].describe().round(2))
+```
+
+```text
+        count          mean          std       min        25%       50%        75%       max
+region
+East      3.0  12233.333333  3052.697490   9700.0  10450.00  11200.0  13500.00  15800.0
+North     4.0  10650.000000  1468.521600   8500.0   9875.00  11050.0  11725.00  12000.0
+South     3.0  12400.000000  2264.950330   9800.0  11550.00  13100.0  13700.00  14300.0
+```
+
+## Multi-Level GroupBy
+
+```python
+# Group by two keys and apply multiple aggregations
+multi = sales.groupby(["region", "product"]).agg(
+    total_rev  = ("revenue",  "sum"),
+    avg_rev    = ("revenue",  "mean"),
+    deals      = ("revenue",  "count"),
+    top_rep    = ("rep",      lambda x: x.mode()[0]),
+)
+print(multi.round(0))
+```
+
+```text
+                 total_rev   avg_rev  deals  top_rep
+region product
+East   A             15800  15800.0      1    Carol
+       B             20900  10450.0      2    Carol
+North  A             34100  11367.0      3    Alice
+       B              8500   8500.0      1    Alice
+South  A             24100  12050.0      2      Bob
+       B             13100  13100.0      1      Bob
+```
+
+```python
+# Access a specific group from the multi-level result
+print(multi.loc["North"])
+```
+
+```text
+         total_rev   avg_rev  deals  top_rep
+product
+A            34100  11367.0      3    Alice
+B             8500   8500.0      1    Alice
+```
+
+:::caution[GroupBy Performance Tips]
+For large DataFrames: convert groupby key columns to `category` dtype before grouping (`df["col"] = df["col"].astype("category")`). This can reduce memory use by 50–90% and speed up `groupby()` operations significantly. Also avoid `apply()` with custom lambda functions on large groups — use built-in agg functions whenever possible, as they run in optimized Cython.
+:::

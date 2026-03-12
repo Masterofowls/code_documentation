@@ -1,0 +1,552 @@
+---
+title: Drawing with ImageDraw
+description: Draw shapes, lines, text, and annotations onto Pillow images using ImageDraw. Covers rectangles, ellipses, polygons, arcs, text rendering, TrueType fonts, watermarks, and text overlays.
+sidebar:
+  order: 4
+tags: [python, imaging]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+The `PIL.ImageDraw` module provides a 2D graphics API for drawing directly onto `Image` objects. It supports all the primitives you need to annotate photos, generate charts, create UI mockups, or build dynamic image assets.
+
+---
+
+## The ImageDraw Object
+
+Drawing always follows the same three-step pattern:
+
+```python
+from PIL import Image, ImageDraw
+
+# 1. Open or create an image
+img = Image.new("RGB", (600, 400), color=(255, 255, 255))
+
+# 2. Create a Draw object — it wraps the image and writes directly to its pixels
+draw = ImageDraw.Draw(img)
+
+# 3. Call drawing methods
+draw.rectangle([50, 50, 200, 150], fill=(100, 149, 237), outline=(0, 0, 0), width=3)
+
+# No explicit "commit" step — changes are live in img immediately
+img.save("draw_demo.png")
+# Output: white 600×400 image with a cornflower-blue filled rectangle,
+#         black 3-pixel border, at position (50,50)→(200,150)
+```
+
+:::caution[Draw Objects Modify the Image In Place]
+`ImageDraw.Draw(img)` does **not** make a copy. Every drawing call immediately modifies `img`. If you need a pristine copy after drawing, call `img.copy()` before creating the Draw object.
+
+```python
+original = img.copy()   # save a clean copy first
+draw = ImageDraw.Draw(img)
+draw.line([(0,0),(100,100)], fill="red", width=2)
+# original is still clean; img has the red line
+```
+:::
+
+---
+
+## Rectangles: `draw.rectangle()`
+
+```python
+from PIL import Image, ImageDraw
+
+img = Image.new("RGB", (500, 300), "white")
+draw = ImageDraw.Draw(img)
+
+# Filled rectangle — xy is [(x0,y0), (x1,y1)] or [x0, y0, x1, y1]
+draw.rectangle([20, 20, 180, 120], fill=(52, 152, 219))           # solid blue
+draw.rectangle([200, 20, 360, 120], outline=(231, 76, 60), width=4) # outline only, red border
+draw.rectangle([380, 20, 480, 120], fill=(46, 204, 113), outline=(0, 100, 0), width=2)
+# filled green with dark green border
+
+# Rounded rectangle (Pillow ≥ 8.2)
+draw.rounded_rectangle([20, 150, 200, 270], radius=20, fill=(155, 89, 182))
+draw.rounded_rectangle([220, 150, 400, 270], radius=30, outline=(230, 126, 34), width=3)
+
+img.save("rectangles.png")
+# Output: white canvas with 3 rectangles in the top row (blue, red-outlined, green)
+#         and 2 rounded rectangles in the bottom row (purple filled, orange outlined)
+```
+
+---
+
+## Ellipses: `draw.ellipse()`
+
+```python
+from PIL import Image, ImageDraw
+
+img = Image.new("RGB", (500, 300), "white")
+draw = ImageDraw.Draw(img)
+
+# Full circle — bounding box is a square
+draw.ellipse([20, 20, 120, 120], fill=(231, 76, 60))              # red circle
+draw.ellipse([140, 20, 300, 120], fill=(52, 152, 219), outline=(0,0,0), width=2)  # wide ellipse
+draw.ellipse([320, 20, 480, 280], outline=(46, 204, 113), width=4)  # tall outlined ellipse
+
+img.save("ellipses.png")
+# Output: white canvas with a red circle, a wide blue ellipse, and a tall green-outlined oval
+```
+
+---
+
+## Lines: `draw.line()`
+
+```python
+from PIL import Image, ImageDraw
+import math
+
+img = Image.new("RGB", (500, 500), (30, 30, 30))   # dark background
+draw = ImageDraw.Draw(img)
+
+# Simple straight line
+draw.line([(0, 0), (500, 500)], fill=(255, 255, 255), width=2)
+
+# Zigzag polyline — line() accepts a list of points
+points = [(50, 250), (100, 100), (200, 400), (300, 100), (400, 400), (450, 250)]
+draw.line(points, fill=(255, 215, 0), width=3)   # golden zigzag
+
+# Starburst — draw lines from center to edges at regular angles
+cx, cy = 250, 250
+for angle_deg in range(0, 360, 15):
+    angle_rad = math.radians(angle_deg)
+    ex = cx + int(220 * math.cos(angle_rad))
+    ey = cy + int(220 * math.sin(angle_rad))
+    draw.line([(cx, cy), (ex, ey)], fill=(100, 200, 255), width=1)
+
+img.save("lines.png")
+# Output: dark canvas with a white diagonal, a golden zigzag, and a blue starburst pattern
+```
+
+---
+
+## Polygons: `draw.polygon()`
+
+```python
+from PIL import Image, ImageDraw
+import math
+
+img = Image.new("RGB", (500, 300), "white")
+draw = ImageDraw.Draw(img)
+
+def regular_polygon_points(cx, cy, radius, sides):
+    """Return (x, y) vertices of a regular polygon."""
+    points = []
+    for i in range(sides):
+        angle = math.radians(i * 360 / sides - 90)   # -90 so first vertex is at top
+        x = cx + int(radius * math.cos(angle))
+        y = cy + int(radius * math.sin(angle))
+        points.append((x, y))
+    return points
+
+# Triangle
+draw.polygon(regular_polygon_points(80, 150, 70, 3), fill=(231, 76, 60), outline=(0,0,0))
+
+# Pentagon
+draw.polygon(regular_polygon_points(220, 150, 70, 5), fill=(52, 152, 219), outline=(0,0,0))
+
+# Hexagon
+draw.polygon(regular_polygon_points(360, 150, 70, 6), fill=(46, 204, 113), outline=(0,0,0))
+
+# Star (8-point using two overlapping squares)
+star_outer = regular_polygon_points(460, 150, 70, 4)
+star_inner = regular_polygon_points(460, 150, 35, 4)
+# interleave outer and inner vertices
+star_points = []
+for outer, inner in zip(star_outer, star_inner):
+    star_points.extend([outer, inner])
+draw.polygon(star_points, fill=(255, 215, 0), outline=(180, 140, 0))
+
+img.save("polygons.png")
+# Output: white canvas with a red triangle, blue pentagon, green hexagon, and gold star
+```
+
+---
+
+## Arcs, Chords, and Pie Slices
+
+```python
+from PIL import Image, ImageDraw
+
+img = Image.new("RGB", (600, 200), "white")
+draw = ImageDraw.Draw(img)
+
+# arc() — draws only the arc line (no fill)
+draw.arc([20, 20, 180, 180], start=0, end=270, fill=(231, 76, 60), width=4)
+# Output: 3/4 of a circle arc in red
+
+# chord() — closes the arc with a straight line
+draw.chord([220, 20, 380, 180], start=0, end=270, fill=(52, 152, 219), outline=(0,0,180), width=2)
+# Output: blue filled chord — like a slice with the arc end connected by a straight line
+
+# pieslice() — filled wedge from the center
+draw.pieslice([420, 20, 580, 180], start=0, end=270, fill=(46, 204, 113), outline=(0,100,0), width=2)
+# Output: 3/4 green pie slice — like a Pac-Man shape
+
+img.save("arcs.png")
+# Output: three arc variations side by side on white background
+```
+
+### Simple Pie Chart
+
+```python
+from PIL import Image, ImageDraw
+
+def draw_pie_chart(data: dict, size: int = 400, output_path: str = "pie.png"):
+    img = Image.new("RGBA", (size, size), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    total = sum(data.values())
+    colors = [(231,76,60),(52,152,219),(46,204,113),(155,89,182),(243,156,18),(26,188,156)]
+    start = -90   # start at top
+    for i, (label, value) in enumerate(data.items()):
+        angle = 360 * value / total
+        draw.pieslice([40, 40, size-40, size-40],
+                      start=start, end=start + angle,
+                      fill=colors[i % len(colors)],
+                      outline="white", width=2)
+        start += angle
+    img.save(output_path)
+    # Output: colorful pie chart, each segment proportional to its data value
+
+draw_pie_chart({"Python": 40, "JavaScript": 30, "Rust": 15, "Go": 15})
+```
+
+---
+
+## Points: `draw.point()`
+
+```python
+from PIL import Image, ImageDraw
+import random
+
+img = Image.new("RGB", (400, 400), "black")
+draw = ImageDraw.Draw(img)
+
+# Draw 5000 random colored points (pixels)
+for _ in range(5000):
+    x = random.randint(0, 399)
+    y = random.randint(0, 399)
+    r = random.randint(100, 255)
+    draw.point((x, y), fill=(r, 50, 200))
+
+img.save("points.png")
+# Output: black canvas scattered with thousands of purple-to-red dots
+```
+
+---
+
+## Text Rendering: `draw.text()`
+
+### Default Font
+
+```python
+from PIL import Image, ImageDraw, ImageFont
+
+img = Image.new("RGB", (500, 200), "white")
+draw = ImageDraw.Draw(img)
+
+# Load the built-in bitmap font (always available, no file needed)
+font_small = ImageFont.load_default()
+
+# Pillow ≥ 10: load_default() accepts a size parameter
+font_medium = ImageFont.load_default(size=24)
+font_large  = ImageFont.load_default(size=48)
+
+draw.text((20, 20),  "Small text (default)",  font=font_small,  fill=(0, 0, 0))
+draw.text((20, 60),  "Medium text (size=24)", font=font_medium, fill=(50, 50, 200))
+draw.text((20, 110), "Large text",             font=font_large,  fill=(200, 50, 50))
+
+img.save("text_default_font.png")
+# Output: three lines of text in increasing sizes on white background
+#         Small is tiny (8px), Medium is readable, Large is prominent
+```
+
+### TrueType Fonts with `ImageFont.truetype()`
+
+```python
+from PIL import Image, ImageDraw, ImageFont
+
+img = Image.new("RGB", (600, 300), (40, 40, 40))   # dark background
+draw = ImageDraw.Draw(img)
+
+# Load a TrueType font from disk — provide the full path or filename if on system path
+# Common system paths:
+#   Windows: C:\Windows\Fonts\arial.ttf
+#   macOS:   /System/Library/Fonts/Helvetica.ttc
+#   Linux:   /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+
+try:
+    heading = ImageFont.truetype("arialbd.ttf", size=48)    # Arial Bold
+    body    = ImageFont.truetype("arial.ttf",   size=22)
+    mono    = ImageFont.truetype("cour.ttf",    size=18)    # Courier New
+except OSError:
+    # Fallback if system fonts not available
+    heading = ImageFont.load_default(size=48)
+    body    = ImageFont.load_default(size=22)
+    mono    = ImageFont.load_default(size=18)
+
+draw.text((30, 30),  "Pillow Typography",  font=heading, fill=(255, 255, 255))
+draw.text((30, 110), "Regular body text with TrueType rendering", font=body, fill=(200, 200, 200))
+draw.text((30, 160), "code_block = monospaced_font(size=18)",      font=mono, fill=(100, 220, 100))
+
+img.save("text_truetype.png")
+# Output: dark background with white heading, gray body text, and green monospaced code text
+```
+
+---
+
+## Measuring Text: `getbbox()` and `getlength()`
+
+```python
+from PIL import Image, ImageDraw, ImageFont
+
+img = Image.new("RGB", (500, 300), "white")
+draw = ImageDraw.Draw(img)
+font = ImageFont.load_default(size=32)
+
+text = "Centered Text"
+
+# getbbox() returns (left, top, right, bottom) — pixel bounding box of the text
+# Call it on the draw object (Pillow ≥ 9.2 recommended approach)
+bbox = draw.textbbox((0, 0), text, font=font)
+text_w = bbox[2] - bbox[0]    # width  = right - left
+text_h = bbox[3] - bbox[1]    # height = bottom - top
+print(f"Text size: {text_w}×{text_h} px")
+
+# Center the text on the image
+img_w, img_h = img.size
+x = (img_w - text_w) // 2
+y = (img_h - text_h) // 2
+draw.text((x, y), text, font=font, fill=(0, 0, 0))
+
+# Draw a bounding box around the text to visualize it
+draw.rectangle([x + bbox[0], y + bbox[1], x + bbox[2], y + bbox[3]],
+               outline=(255, 0, 0), width=1)
+
+img.save("centered_text.png")
+# Output: white image with black centered text and a thin red bounding box around it
+
+# getlength() returns the horizontal advance for single-line text
+length = draw.textlength(text, font=font)
+print(f"Text advance length: {length:.1f} px")
+```
+
+---
+
+## Multiline Text: `draw.multiline_text()`
+
+```python
+from PIL import Image, ImageDraw, ImageFont
+
+img = Image.new("RGB", (500, 350), (250, 250, 250))
+draw = ImageDraw.Draw(img)
+font = ImageFont.load_default(size=20)
+
+poem = """\
+Roses are red,
+Violets are blue,
+Pillow draws text,
+So should you too."""
+
+# multiline_text() handles \\n characters and line spacing
+draw.multiline_text(
+    xy=(40, 40),
+    text=poem,
+    font=font,
+    fill=(40, 40, 40),
+    spacing=8,          # extra pixels between lines (on top of font leading)
+    align="left",       # "left", "center", or "right"
+)
+
+# Right-aligned multiline text
+draw.multiline_text(
+    xy=(460, 200),
+    text="— Anonymous\nPoet, 2024",
+    font=font,
+    fill=(150, 150, 150),
+    spacing=6,
+    align="right",
+    anchor="ra",        # anchor: r=right, a=ascender — aligns right edge to x=460
+)
+
+img.save("multiline_text.png")
+# Output: light gray image with a 4-line poem left-aligned at top,
+#         and a 2-line attribution right-aligned at the bottom
+```
+
+:::tip[Text Anchors]
+The `anchor` parameter controls which part of the text aligns to the `xy` coordinate. Common values: `"lt"` (left-top, default), `"mm"` (center-center), `"rb"` (right-bottom), `"ms"` (middle-baseline). Use `"mm"` for perfectly centered labels.
+:::
+
+---
+
+## Creating a Watermark Function
+
+```python
+from PIL import Image, ImageDraw, ImageFont
+
+def add_watermark(
+    image_path: str,
+    watermark_text: str,
+    output_path: str,
+    font_size: int = 36,
+    opacity: int = 100,          # 0 = invisible, 255 = fully opaque
+    position: str = "bottom-right",
+    padding: int = 20,
+) -> None:
+    """
+    Add a text watermark to an image.
+
+    Args:
+        image_path: Path to the source image.
+        watermark_text: Text to overlay.
+        output_path: Where to save the result.
+        font_size: Font size in points.
+        opacity: Watermark opacity 0–255.
+        position: "bottom-right", "bottom-left", "top-right", "top-left", "center".
+        padding: Pixels from the edge.
+    """
+    with Image.open(image_path) as base:
+        base = base.convert("RGBA")
+
+        # Create a fully transparent overlay layer the same size as base
+        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+
+        font = ImageFont.load_default(size=font_size)
+
+        # Measure the text
+        bbox = draw.textbbox((0, 0), watermark_text, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+        w, h = base.size
+
+        # Calculate position
+        positions = {
+            "bottom-right": (w - text_w - padding, h - text_h - padding),
+            "bottom-left":  (padding, h - text_h - padding),
+            "top-right":    (w - text_w - padding, padding),
+            "top-left":     (padding, padding),
+            "center":       ((w - text_w) // 2, (h - text_h) // 2),
+        }
+        x, y = positions.get(position, positions["bottom-right"])
+
+        # Draw a subtle drop shadow first (optional)
+        shadow_offset = max(1, font_size // 20)
+        draw.text((x + shadow_offset, y + shadow_offset), watermark_text,
+                  font=font, fill=(0, 0, 0, opacity // 2))
+
+        # Draw the watermark text in white with specified opacity
+        draw.text((x, y), watermark_text, font=font,
+                  fill=(255, 255, 255, opacity))
+
+        # Composite the overlay onto the base
+        result = Image.alpha_composite(base, overlay)
+        result.convert("RGB").save(output_path, quality=92)
+        print(f"Saved watermarked image: {output_path}")
+
+# Usage
+add_watermark("photo.jpg", "© MyBrand 2024", "watermarked.jpg",
+              font_size=40, opacity=120, position="bottom-right")
+# Output: JPEG with semi-transparent white watermark text in bottom-right corner
+#         with a very subtle drop shadow — readable but not overpowering
+```
+
+---
+
+## Thumbnail with Text Overlay — Complete Example
+
+This complete example generates a social media preview card from a photo:
+
+```python
+from PIL import Image, ImageDraw, ImageFont
+
+def make_preview_card(
+    photo_path: str,
+    title: str,
+    subtitle: str,
+    output_path: str,
+    card_size: tuple = (1200, 630),
+) -> None:
+    """
+    Generate a social media Open Graph preview card.
+    Composite: darkened photo background + white text overlay.
+    """
+    # 1. Open and resize photo to fill the card
+    with Image.open(photo_path) as photo:
+        photo = photo.convert("RGB")
+
+    # Resize to cover (may crop)
+    card_w, card_h = card_size
+    scale = max(card_w / photo.width, card_h / photo.height)
+    new_w = int(photo.width  * scale)
+    new_h = int(photo.height * scale)
+    photo = photo.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+    # Center-crop to exact card size
+    left = (new_w - card_w) // 2
+    top  = (new_h - card_h) // 2
+    photo = photo.crop((left, top, left + card_w, top + card_h))
+
+    # 2. Create a gradient darkening overlay (bottom dark, top lighter)
+    import numpy as np
+    gradient = np.zeros((card_h, card_w, 4), dtype=np.uint8)
+    for y in range(card_h):
+        alpha = int(80 + 160 * (y / card_h))   # alpha increases toward bottom
+        gradient[y, :, 3] = alpha               # only alpha channel varies
+    dark_overlay = Image.fromarray(gradient, mode="RGBA")
+
+    base = photo.convert("RGBA")
+    base = Image.alpha_composite(base, dark_overlay)
+
+    # 3. Draw text
+    draw = ImageDraw.Draw(base)
+    title_font    = ImageFont.load_default(size=72)
+    subtitle_font = ImageFont.load_default(size=36)
+    badge_font    = ImageFont.load_default(size=24)
+
+    margin = 60
+
+    # Title — positioned in the lower portion of the card
+    title_bbox = draw.textbbox((0, 0), title, font=title_font)
+    title_h = title_bbox[3] - title_bbox[1]
+    draw.text((margin, card_h - 200), title, font=title_font,
+              fill=(255, 255, 255, 255))
+
+    # Subtitle — below the title
+    draw.text((margin, card_h - 200 + title_h + 12), subtitle,
+              font=subtitle_font, fill=(220, 220, 220, 230))
+
+    # Top-left badge
+    draw.rounded_rectangle([margin, margin, margin + 180, margin + 50],
+                           radius=8, fill=(255, 100, 50, 200))
+    draw.text((margin + 12, margin + 12), "TUTORIAL",
+              font=badge_font, fill=(255, 255, 255, 255))
+
+    # 4. Save
+    base.convert("RGB").save(output_path, quality=92, optimize=True)
+    print(f"Preview card saved: {output_path}")
+    # Output: 1200×630 JPEG — photo background with dark gradient overlay,
+    #         large white title near the bottom, gray subtitle below,
+    #         and a small orange "TUTORIAL" badge in the top-left corner
+
+make_preview_card(
+    photo_path="hero.jpg",
+    title="Getting Started with Pillow",
+    subtitle="Python Image Processing in 5 Minutes",
+    output_path="preview_card.jpg",
+)
+```
+
+:::tip[Font Path Tip]
+For production use, bundle your fonts with your project and load them with absolute paths:
+
+```python
+import pathlib
+FONTS_DIR = pathlib.Path(__file__).parent / "assets" / "fonts"
+font = ImageFont.truetype(str(FONTS_DIR / "Inter-Bold.ttf"), size=48)
+```
+
+This ensures consistent rendering across operating systems and CI environments where system fonts differ.
+:::

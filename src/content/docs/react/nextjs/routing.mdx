@@ -1,0 +1,481 @@
+---
+title: Routing
+description: Next.js file-based routing mechanics — dynamic segments, the Link component, useRouter, usePathname, middleware, redirects, and internationalization patterns.
+sidebar:
+  order: 4
+tags: [react, javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Next.js uses the file system as the router. Every `page.tsx` inside `app/` automatically becomes a publicly accessible URL.
+
+## File-Based Routing
+
+| File | URL |
+|---|---|
+| `app/page.tsx` | `/` |
+| `app/about/page.tsx` | `/about` |
+| `app/blog/page.tsx` | `/blog` |
+| `app/blog/[slug]/page.tsx` | `/blog/my-post` |
+| `app/shop/[...slug]/page.tsx` | `/shop/a/b/c` |
+| `app/docs/[[...slug]]/page.tsx` | `/docs` and `/docs/a/b` |
+| `app/(marketing)/page.tsx` | `/` (route group) |
+| `app/api/users/route.ts` | `/api/users` (API) |
+
+## Dynamic Segments
+
+<Tabs>
+<TabItem label="[slug]">
+```tsx
+// app/blog/[slug]/page.tsx
+// Matches: /blog/hello-world
+
+interface Props {
+  params: Promise<{ slug: string }>;
+}
+
+export default async function BlogPost({ params }: Props) {
+  const { slug } = await params;
+  const post = await fetchPost(slug);
+  return <article>{post.title}</article>;
+}
+```
+</TabItem>
+<TabItem label="[...slug] Catch-all">
+```tsx
+// app/shop/[...slug]/page.tsx
+// Matches: /shop/clothes, /shop/clothes/tops
+// Does NOT match: /shop
+
+interface Props {
+  params: Promise<{ slug: string[] }>;
+}
+
+export default async function ShopPage({ params }: Props) {
+  const { slug } = await params;
+  // slug = ['clothes', 'tops', 'shirts']
+  return <div>Category: {slug.join(' > ')}</div>;
+}
+```
+</TabItem>
+<TabItem label="[[...slug]] Optional">
+```tsx
+// app/docs/[[...slug]]/page.tsx
+// Matches: /docs AND /docs/guide AND /docs/api/ref
+
+interface Props {
+  params: Promise<{ slug?: string[] }>;
+}
+
+export default async function DocsPage({ params }: Props) {
+  const { slug } = await params;
+  if (!slug) return <DocsHome />;
+  const doc = await fetchDoc(slug.join('/'));
+  return <DocContent doc={doc} />;
+}
+```
+</TabItem>
+</Tabs>
+
+## Link Component
+
+`<Link>` provides client-side navigation with automatic prefetching.
+
+```tsx
+import Link from 'next/link';
+
+// Basic navigation
+<Link href="/about">About</Link>
+
+// Dynamic route
+<Link href={`/blog/${post.slug}`}>{post.title}</Link>
+
+// Object syntax
+<Link href={{ pathname: '/blog/[slug]', query: { slug: post.slug } }}>
+  {post.title}
+</Link>
+
+// With query string
+<Link href="/search?q=nextjs&page=2">Results</Link>
+
+// Replace history entry (no back button to previous)
+<Link href="/login" replace>Sign In</Link>
+
+// Disable scroll reset
+<Link href="/products#section" scroll={false}>Products</Link>
+
+// Disable prefetching for heavy or auth-protected routes
+<Link href="/admin" prefetch={false}>Admin</Link>
+```
+
+### Active Link Pattern
+
+```tsx
+'use client';
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
+
+function NavLink({ href, children }: { href: string; children: React.ReactNode }) {
+  const pathname = usePathname();
+  const isActive = pathname === href || pathname.startsWith(href + '/');
+
+  return (
+    <Link
+      href={href}
+      className={
+        isActive
+          ? 'font-semibold text-blue-600'
+          : 'text-gray-600 hover:text-gray-900'
+      }
+      aria-current={isActive ? 'page' : undefined}
+    >
+      {children}
+    </Link>
+  );
+}
+```
+
+## useRouter
+
+```tsx
+'use client';
+
+import { useRouter } from 'next/navigation';
+
+function NavigationExample() {
+  const router = useRouter();
+
+  const handleSubmit = async (formData: FormData) => {
+    const result = await submitForm(formData);
+    if (result.success) {
+      router.push('/dashboard');           // Add to history
+      // router.replace('/dashboard');     // No history entry
+    }
+  };
+
+  return (
+    <div>
+      {/* Prefetch on hover for instant navigation */}
+      <button
+        onMouseEnter={() => router.prefetch('/dashboard')}
+        onClick={() => router.push('/dashboard')}
+      >
+        Dashboard
+      </button>
+
+      {/* Go back */}
+      <button onClick={() => router.back()}>Back</button>
+
+      {/* Refresh Server Components without full page reload */}
+      <button onClick={() => router.refresh()}>Refresh</button>
+    </div>
+  );
+}
+```
+
+## usePathname and useSearchParams
+
+```tsx
+'use client';
+
+import { usePathname, useSearchParams, useRouter } from 'next/navigation';
+import { useCallback } from 'react';
+
+function Breadcrumbs() {
+  const pathname = usePathname();
+  const segments = pathname.split('/').filter(Boolean);
+
+  return (
+    <nav aria-label="Breadcrumb">
+      <ol className="flex items-center gap-2 text-sm">
+        <li><Link href="/">Home</Link></li>
+        {segments.map((segment, i) => {
+          const href = '/' + segments.slice(0, i + 1).join('/');
+          const isLast = i === segments.length - 1;
+          return (
+            <li key={href} className="flex items-center gap-2">
+              <span className="text-gray-400">/</span>
+              {isLast ? (
+                <span className="font-semibold capitalize">{segment}</span>
+              ) : (
+                <Link href={href} className="capitalize hover:underline">{segment}</Link>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </nav>
+  );
+}
+
+function FilterPanel() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
+
+  const currentCategory = searchParams.get('category') ?? 'all';
+
+  const updateFilter = useCallback(
+    (key: string, value: string) => {
+      const params = new URLSearchParams(searchParams.toString());
+      params.set(key, value);
+      params.set('page', '1');
+      router.push(`${pathname}?${params.toString()}`);
+    },
+    [pathname, router, searchParams]
+  );
+
+  return (
+    <select
+      value={currentCategory}
+      onChange={e => updateFilter('category', e.target.value)}
+    >
+      <option value="all">All</option>
+      <option value="react">React</option>
+      <option value="nextjs">Next.js</option>
+    </select>
+  );
+}
+```
+
+## redirect() and permanentRedirect()
+
+```typescript
+// app/old-blog/[slug]/page.tsx
+import { redirect, permanentRedirect } from 'next/navigation';
+
+export default async function OldBlogPost({ params }: { params: Promise<{ slug: string }> }) {
+  const { slug } = await params;
+
+  // Temporary redirect (307)
+  redirect(`/blog/${slug}`);
+
+  // Permanent redirect (308) — updates search engine indexes
+  permanentRedirect(`/blog/${slug}`);
+}
+```
+
+```typescript
+// In Server Actions — redirect must be outside try/catch
+'use server';
+import { redirect } from 'next/navigation';
+
+export async function loginAction(formData: FormData) {
+  const result = await authenticate(formData);
+  if (!result.success) return { error: 'Invalid credentials' };
+  redirect('/dashboard'); // throws internally — do not catch
+}
+```
+
+:::caution[redirect() Throws]
+`redirect()` and `notFound()` work by throwing special errors internally. Never call them inside a `try/catch` block or the redirect won't work. Call them at the top level of async functions.
+:::
+
+## Middleware
+
+Middleware runs at the Edge before every matched request.
+
+```typescript
+// middleware.ts (project root, not inside app/ or src/)
+import { NextResponse, type NextRequest } from 'next/server';
+
+export function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+  const token = request.cookies.get('auth-token')?.value;
+  const isAuthenticated = !!token;
+
+  // Protect dashboard routes
+  if (pathname.startsWith('/dashboard') && !isAuthenticated) {
+    const loginUrl = new URL('/login', request.url);
+    loginUrl.searchParams.set('callbackUrl', pathname);
+    return NextResponse.redirect(loginUrl);
+  }
+
+  // Redirect authenticated users away from auth pages
+  const isAuthPage = pathname.startsWith('/login') || pathname.startsWith('/register');
+  if (isAuthPage && isAuthenticated) {
+    return NextResponse.redirect(new URL('/dashboard', request.url));
+  }
+
+  // Add request ID header for tracing
+  const response = NextResponse.next();
+  response.headers.set('x-request-id', crypto.randomUUID());
+  response.headers.set('x-pathname', pathname);
+  return response;
+}
+
+export const config = {
+  matcher: [
+    // Match all except Next.js internals and static files
+    '/((?!_next/static|_next/image|favicon.ico|api/public).*)',
+  ],
+};
+```
+
+### Middleware Recipes
+
+```typescript
+// A/B testing
+export function middleware(req: NextRequest) {
+  const bucket = req.cookies.get('ab-bucket')?.value ?? (Math.random() > 0.5 ? 'a' : 'b');
+  const response = NextResponse.rewrite(new URL(`/${bucket}${req.nextUrl.pathname}`, req.url));
+  response.cookies.set('ab-bucket', bucket, { maxAge: 60 * 60 * 24 * 30 });
+  return response;
+}
+
+// Geolocation-based redirect
+export function middleware(req: NextRequest) {
+  const country = req.geo?.country ?? 'US';
+  if (country === 'GB') {
+    return NextResponse.redirect(new URL('/uk' + req.nextUrl.pathname, req.url));
+  }
+  return NextResponse.next();
+}
+
+// Rate limiting (simple, in-memory — use Upstash for production)
+const requestCounts = new Map<string, { count: number; resetAt: number }>();
+
+export function middleware(req: NextRequest) {
+  if (!req.nextUrl.pathname.startsWith('/api/')) return NextResponse.next();
+
+  const ip = req.headers.get('x-forwarded-for') ?? 'unknown';
+  const now = Date.now();
+  const record = requestCounts.get(ip);
+
+  if (!record || now > record.resetAt) {
+    requestCounts.set(ip, { count: 1, resetAt: now + 60_000 });
+    return NextResponse.next();
+  }
+
+  if (record.count >= 100) {
+    return NextResponse.json({ error: 'Too many requests' }, { status: 429 });
+  }
+
+  record.count++;
+  return NextResponse.next();
+}
+```
+
+## next.config.ts Redirects and Rewrites
+
+```typescript
+const nextConfig = {
+  async redirects() {
+    return [
+      { source: '/about-us', destination: '/about', permanent: true },
+      { source: '/blog/:slug', destination: '/posts/:slug', permanent: true },
+      // Conditional redirect based on cookie
+      {
+        source: '/dashboard',
+        has: [{ type: 'cookie', key: 'isAdmin', value: 'true' }],
+        destination: '/admin',
+        permanent: false,
+      },
+    ];
+  },
+
+  async rewrites() {
+    return [
+      // Proxy legacy API calls
+      {
+        source: '/api/v1/:path*',
+        destination: 'https://legacy.myapp.com/api/:path*',
+      },
+    ];
+  },
+};
+```
+
+## Internationalization with next-intl
+
+```bash
+npm install next-intl
+```
+
+```typescript
+// middleware.ts
+import createMiddleware from 'next-intl/middleware';
+
+export default createMiddleware({
+  locales: ['en', 'fr', 'de', 'es'],
+  defaultLocale: 'en',
+  localePrefix: 'always',
+});
+
+export const config = {
+  matcher: ['/((?!api|_next|.*\\..*).*)'],
+};
+```
+
+```
+app/
+└── [locale]/
+    ├── layout.tsx     # Locale-aware root layout
+    ├── page.tsx       # /en/, /fr/, etc.
+    └── about/
+        └── page.tsx   # /en/about, /fr/about
+```
+
+```tsx
+// app/[locale]/layout.tsx
+import { NextIntlClientProvider } from 'next-intl';
+import { getMessages } from 'next-intl/server';
+
+export default async function LocaleLayout({
+  children,
+  params,
+}: {
+  children: React.ReactNode;
+  params: Promise<{ locale: string }>;
+}) {
+  const { locale } = await params;
+  const messages = await getMessages();
+
+  return (
+    <html lang={locale}>
+      <body>
+        <NextIntlClientProvider messages={messages}>
+          {children}
+        </NextIntlClientProvider>
+      </body>
+    </html>
+  );
+}
+```
+
+```tsx
+// In Server Components
+import { getTranslations } from 'next-intl/server';
+
+async function HeroSection() {
+  const t = await getTranslations('HomePage');
+  return (
+    <section>
+      <h1>{t('title')}</h1>
+      <p>{t('description')}</p>
+    </section>
+  );
+}
+
+// In Client Components
+'use client';
+import { useTranslations } from 'next-intl';
+
+function ContactForm() {
+  const t = useTranslations('ContactForm');
+  return <button>{t('submit')}</button>;
+}
+```
+
+:::tip[Typed Routes]
+Enable `typedRoutes: true` in `next.config.ts` to get TypeScript autocomplete and type-checking for all `href` props in `<Link>` and `router.push()` calls.
+
+```typescript
+// next.config.ts
+experimental: { typedRoutes: true }
+
+// Now this is a type error:
+<Link href="/missspelled-route" />  // Error: not a valid route
+```
+:::

@@ -1,0 +1,499 @@
+---
+title: Main Process
+description: Master Electron's main process — app lifecycle, BrowserWindow, dialogs, notifications, and OS integration APIs.
+sidebar:
+  order: 3
+tags: [javascript, desktop]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+The **main process** is the Node.js environment that acts as the backbone of every Electron application. It controls the app lifecycle, creates and manages windows, and serves as the gateway to all native operating system APIs. There is exactly one main process per application instance.
+
+## Role of the Main Process
+
+- Runs Node.js — full access to `fs`, `path`, `child_process`, `http`, etc.
+- Creates and manages `BrowserWindow` instances (each spawns a renderer process)
+- Handles all native OS integration: menus, tray, dialogs, notifications
+- Manages the application lifecycle from launch to quit
+- Is the **only** place Electron's privileged APIs like `dialog`, `shell`, `globalShortcut`, and `Menu` are available
+- Communicates with renderer processes exclusively via IPC
+
+## App Lifecycle Events
+
+The `app` module exposes the application lifecycle. Always wait for `app.whenReady()` or the `ready` event before creating windows:
+
+```typescript
+import { app, BrowserWindow } from 'electron';
+
+// app.whenReady() is the modern promise-based API
+app.whenReady().then(() => {
+  createWindow();
+});
+
+// Equivalent event-based approach
+app.on('ready', () => {
+  createWindow();
+});
+```
+
+### Full Lifecycle Handler
+
+```typescript
+import { app } from 'electron';
+
+// Emitted when Electron has finished initialization
+app.on('ready', () => {
+  console.log('App is ready');
+});
+
+// All windows have been closed
+app.on('window-all-closed', () => {
+  // On macOS, apps stay active until Cmd+Q — only quit on other platforms
+  if (process.platform !== 'darwin') {
+    app.quit();
+  }
+});
+
+// macOS: clicking the dock icon when no windows are open
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow();
+  }
+});
+
+// Emitted before the app starts closing its windows
+app.on('before-quit', (event) => {
+  // Optionally prevent quit for cleanup
+  // event.preventDefault();
+  console.log('App is about to quit');
+});
+
+// Emitted when all windows have been closed and the app will quit
+app.on('will-quit', (event) => {
+  // Last chance to prevent quit
+  console.log('App will quit');
+});
+
+// Emitted after the app has quit
+app.on('quit', (_event, exitCode) => {
+  console.log(`App quit with exit code: ${exitCode}`);
+});
+
+// Second instance launched (single-instance lock)
+app.on('second-instance', (_event, commandLine, _workingDirectory) => {
+  const win = BrowserWindow.getAllWindows()[0];
+  if (win) {
+    if (win.isMinimized()) win.restore();
+    win.focus();
+  }
+});
+```
+
+### Single Instance Lock
+
+```typescript
+const gotTheLock = app.requestSingleInstanceLock();
+
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (win) {
+      if (win.isMinimized()) win.restore();
+      win.focus();
+    }
+  });
+
+  app.whenReady().then(createWindow);
+}
+```
+
+## BrowserWindow Options
+
+`BrowserWindow` is the primary API for creating application windows. It supports an extensive set of options:
+
+```typescript
+import { BrowserWindow } from 'electron';
+import path from 'node:path';
+
+const win = new BrowserWindow({
+  // === Dimensions ===
+  width: 1200,
+  height: 800,
+  minWidth: 800,
+  minHeight: 600,
+  maxWidth: 2560,
+  maxHeight: 1440,
+
+  // === Position ===
+  x: 100,
+  y: 100,
+  center: true,             // Overrides x/y — centers on screen
+
+  // === Appearance ===
+  title: 'My Application',
+  icon: path.join(__dirname, 'assets/icon.png'),
+  show: false,              // Don't show until ready-to-show (avoids flash)
+  frame: true,              // Set false for frameless window
+  transparent: false,       // Set true for transparent background (requires frame:false)
+  resizable: true,
+  movable: true,
+  minimizable: true,
+  maximizable: true,
+  closable: true,
+  fullscreenable: true,
+  skipTaskbar: false,       // Hide from taskbar/dock
+  alwaysOnTop: false,
+
+  // === macOS-specific ===
+  titleBarStyle: 'hiddenInset',         // 'default' | 'hidden' | 'hiddenInset' | 'customButtonsOnHover'
+  titleBarOverlay: {                    // Windows/Linux custom title bar overlay
+    color: '#1e1e1e',
+    symbolColor: '#ffffff',
+    height: 40,
+  },
+  vibrancy: 'under-window',            // macOS frosted glass: 'sidebar' | 'menu' | 'popover' | etc.
+  backgroundMaterial: 'acrylic',        // Windows 11 Mica/Acrylic effect
+
+  // === SECURITY-CRITICAL ===
+  webPreferences: {
+    preload: path.join(__dirname, 'preload.js'),
+    contextIsolation: true,
+    sandbox: true,
+    nodeIntegration: false,
+    nodeIntegrationInWorker: false,
+    webSecurity: true,
+    allowRunningInsecureContent: false,
+    experimentalFeatures: false,
+    devTools: !app.isPackaged,         // Disable DevTools in production
+  },
+});
+
+// Show window cleanly after content loads
+win.once('ready-to-show', () => {
+  win.show();
+  win.focus();
+});
+```
+
+:::tip[Preventing the White Flash]
+Always set `show: false` and listen for `ready-to-show` before calling `win.show()`. This prevents the white flash that occurs when the window renders before content is loaded.
+:::
+
+## Multiple Windows
+
+```typescript
+import { BrowserWindow } from 'electron';
+
+const windows = new Map<string, BrowserWindow>();
+
+function createMainWindow(): BrowserWindow {
+  const win = new BrowserWindow({ width: 1200, height: 800 });
+
+  win.on('closed', () => {
+    windows.delete('main');
+  });
+
+  windows.set('main', win);
+  return win;
+}
+
+function createSettingsWindow(): BrowserWindow {
+  const parent = windows.get('main');
+
+  const win = new BrowserWindow({
+    width: 600,
+    height: 400,
+    parent,          // Makes this a child of the main window
+    modal: true,     // Blocks interaction with parent while open
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      sandbox: true,
+    },
+  });
+
+  win.once('ready-to-show', () => win.show());
+
+  win.on('closed', () => {
+    windows.delete('settings');
+  });
+
+  windows.set('settings', win);
+  return win;
+}
+
+// Get a window from webContents (e.g., inside an ipcMain handler)
+import { ipcMain, BrowserWindow as BW } from 'electron';
+
+ipcMain.handle('get-window-id', (event) => {
+  const win = BW.fromWebContents(event.sender);
+  return win?.id;
+});
+```
+
+## WebContents Events
+
+`webContents` exposes browser-level events for the page lifecycle:
+
+```typescript
+const win = new BrowserWindow({ /* ... */ });
+
+win.webContents.on('did-finish-load', () => {
+  console.log('Page loaded successfully');
+  // Safe to send IPC messages to renderer here
+  win.webContents.send('page-ready', { timestamp: Date.now() });
+});
+
+win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, url) => {
+  console.error(`Failed to load ${url}: ${errorDescription} (${errorCode})`);
+});
+
+win.webContents.on('will-navigate', (event, url) => {
+  // Prevent navigation to external URLs
+  if (!url.startsWith('file://') && !url.startsWith('http://localhost')) {
+    event.preventDefault();
+    shell.openExternal(url); // Open in system browser instead
+  }
+});
+
+win.webContents.on('new-window', (event, url) => {
+  // Prevent pop-ups — open in system browser
+  event.preventDefault();
+  shell.openExternal(url);
+});
+
+win.webContents.on('render-process-gone', (_event, details) => {
+  console.error('Renderer crashed:', details.reason);
+  // Optionally reload
+  win.webContents.reload();
+});
+
+win.webContents.on('unresponsive', () => {
+  console.warn('Renderer is unresponsive');
+});
+
+win.webContents.on('responsive', () => {
+  console.log('Renderer is responsive again');
+});
+```
+
+## Shell — Opening External Resources
+
+```typescript
+import { shell } from 'electron';
+
+// Open a URL in the system's default browser
+await shell.openExternal('https://example.com');
+
+// Open a file or folder in the system file manager / default app
+await shell.openPath('/home/user/Documents');
+
+// Move a file to the trash
+const result = await shell.trashItem('/path/to/file.txt');
+console.log('Trashed:', result);
+
+// Show an item in its parent folder (Finder/Explorer)
+shell.showItemInFolder('/path/to/file.txt');
+```
+
+:::caution[Validate URLs Before openExternal]
+Always validate the URL before passing it to `shell.openExternal`. A malicious IPC payload could inject a `javascript:` URL or a custom protocol handler. Use a URL allowlist or check the protocol:
+
+```typescript
+const ALLOWED_PROTOCOLS = ['https:', 'http:'];
+
+function safeOpenExternal(url: string): void {
+  try {
+    const parsed = new URL(url);
+    if (ALLOWED_PROTOCOLS.includes(parsed.protocol)) {
+      shell.openExternal(url);
+    }
+  } catch {
+    console.error('Invalid URL:', url);
+  }
+}
+```
+:::
+
+## Dialog
+
+```typescript
+import { dialog, BrowserWindow } from 'electron';
+
+// Open file picker
+async function pickFile(win: BrowserWindow): Promise<string | null> {
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Open File',
+    defaultPath: app.getPath('documents'),
+    filters: [
+      { name: 'Text Files', extensions: ['txt', 'md', 'json'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+    properties: ['openFile', 'multiSelections'],
+  });
+
+  if (result.canceled || result.filePaths.length === 0) return null;
+  return result.filePaths[0];
+}
+
+// Save file picker
+async function saveFile(win: BrowserWindow): Promise<string | null> {
+  const result = await dialog.showSaveDialog(win, {
+    title: 'Save File',
+    defaultPath: path.join(app.getPath('documents'), 'untitled.txt'),
+    filters: [{ name: 'Text Files', extensions: ['txt'] }],
+  });
+
+  if (result.canceled) return null;
+  return result.filePath ?? null;
+}
+
+// Message box (alert/confirm)
+async function confirmAction(win: BrowserWindow): Promise<boolean> {
+  const result = await dialog.showMessageBox(win, {
+    type: 'question',
+    buttons: ['Cancel', 'Delete'],
+    defaultId: 0,
+    cancelId: 0,
+    title: 'Confirm Deletion',
+    message: 'Are you sure you want to delete this item?',
+    detail: 'This action cannot be undone.',
+  });
+
+  return result.response === 1; // true if 'Delete' was clicked
+}
+
+// Error dialog
+dialog.showErrorBox('Error', 'Something went wrong.\nPlease try again.');
+```
+
+## Notifications
+
+```typescript
+import { Notification, nativeImage } from 'electron';
+
+function sendNotification(title: string, body: string): void {
+  if (!Notification.isSupported()) return;
+
+  const notification = new Notification({
+    title,
+    body,
+    icon: nativeImage.createFromPath(path.join(__dirname, 'assets/icon.png')),
+    silent: false,
+    urgency: 'normal', // Linux: 'low' | 'normal' | 'critical'
+  });
+
+  notification.on('click', () => {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (win) {
+      win.show();
+      win.focus();
+    }
+  });
+
+  notification.show();
+}
+```
+
+## Power Monitor
+
+```typescript
+import { powerMonitor } from 'electron';
+
+powerMonitor.on('suspend', () => {
+  console.log('System is going to sleep — save state');
+});
+
+powerMonitor.on('resume', () => {
+  console.log('System woke up — reconnect services');
+});
+
+powerMonitor.on('on-ac', () => {
+  console.log('On AC power');
+});
+
+powerMonitor.on('on-battery', () => {
+  console.log('On battery power');
+});
+
+// Get system idle time in seconds
+const idleSeconds = powerMonitor.getSystemIdleTime();
+console.log(`System idle for ${idleSeconds}s`);
+```
+
+## Screen — Display Information
+
+```typescript
+import { screen } from 'electron';
+
+// Get all connected displays
+const displays = screen.getAllDisplays();
+displays.forEach((display) => {
+  console.log('Display:', display.id, display.bounds, display.scaleFactor);
+});
+
+// Get the primary display
+const primaryDisplay = screen.getPrimaryDisplay();
+const { width, height } = primaryDisplay.workAreaSize;
+console.log(`Work area: ${width}x${height}`);
+
+// Get display at mouse cursor position
+const point = screen.getCursorScreenPoint();
+const currentDisplay = screen.getDisplayNearestPoint(point);
+console.log('Cursor on display:', currentDisplay.id);
+
+// Center a window on the primary display
+function centerWindow(win: BrowserWindow): void {
+  const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
+  const [ww, wh] = win.getSize();
+  win.setPosition(
+    Math.floor((sw - ww) / 2),
+    Math.floor((sh - wh) / 2)
+  );
+}
+```
+
+## nativeTheme — Dark Mode Detection
+
+```typescript
+import { nativeTheme } from 'electron';
+
+// Check current theme
+console.log('Dark mode:', nativeTheme.shouldUseDarkColors);
+
+// Listen for theme changes
+nativeTheme.on('updated', () => {
+  const win = BrowserWindow.getAllWindows()[0];
+  win?.webContents.send('theme-changed', {
+    dark: nativeTheme.shouldUseDarkColors,
+    highContrast: nativeTheme.shouldUseHighContrastColors,
+    invertedColors: nativeTheme.shouldUseInvertedColorScheme,
+  });
+});
+
+// Override system theme (for app-level preference)
+// nativeTheme.themeSource = 'dark';   // 'dark' | 'light' | 'system'
+```
+
+## systemPreferences — macOS-specific
+
+```typescript
+import { systemPreferences } from 'electron';
+
+// Check macOS Dark Mode (pre-Mojave compatibility)
+if (process.platform === 'darwin') {
+  const isDark = systemPreferences.isDarkMode();
+
+  // Request permission for macOS protected resources
+  const micStatus = await systemPreferences.askForMediaAccess('microphone');
+  console.log('Microphone access:', micStatus);
+
+  // Get macOS accent color
+  const accentColor = systemPreferences.getAccentColor();
+  console.log('Accent color:', `#${accentColor}`);
+}
+```

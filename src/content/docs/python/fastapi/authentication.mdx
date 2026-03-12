@@ -1,0 +1,511 @@
+---
+title: Authentication
+description: Complete JWT authentication with FastAPI — password hashing, OAuth2 password flow, access and refresh tokens, get_current_user dependency, and role-based access control.
+sidebar:
+  order: 7
+tags: [python, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+This guide implements a complete authentication system: password hashing with bcrypt, JWT access + refresh tokens, OAuth2 password flow, a `get_current_user` dependency, and role-based access control. The implementation follows security best practices throughout.
+
+## Installation
+
+```bash
+pip install "python-jose[cryptography]" "passlib[bcrypt]"
+```
+
+## User Model and Database Setup
+
+```python
+# app/db/models/user.py
+from enum import Enum as PyEnum
+from sqlalchemy import String, Boolean, Enum
+from sqlalchemy.orm import Mapped, mapped_column
+from app.db.base import Base, TimestampMixin
+
+
+class UserRole(str, PyEnum):
+    USER = "user"
+    ADMIN = "admin"
+    MODERATOR = "moderator"
+
+
+class User(Base, TimestampMixin):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(50), unique=True, index=True, nullable=False)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.USER)
+```
+
+## Pydantic Schemas
+
+```python
+# app/schemas/user.py
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
+from app.db.models.user import UserRole
+
+
+class UserCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=50, pattern=r"^[a-zA-Z0-9_]+$")
+    email: EmailStr
+    password: str = Field(
+        min_length=8,
+        description="Minimum 8 characters",
+    )
+
+
+class UserRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    username: str
+    email: str
+    is_active: bool
+    role: UserRole
+
+
+class Token(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+
+
+class TokenPayload(BaseModel):
+    sub: str               # Subject — user ID as string
+    type: str              # "access" or "refresh"
+    exp: int | None = None
+```
+
+## Password Hashing
+
+```python
+# app/core/security.py
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+from jose import jwt, JWTError
+from passlib.context import CryptContext
+from fastapi import HTTPException, status
+
+from app.core.config import settings
+
+# Bcrypt context — auto-upgrade weak hashes on verify
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def hash_password(plain_password: str) -> str:
+    """Hash a plain-text password using bcrypt."""
+    return pwd_context.hash(plain_password)
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """
+    Verify a plain-text password against its bcrypt hash.
+    Returns False on mismatch — never raises.
+    """
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def create_access_token(subject: str | int, extra_claims: dict[str, Any] | None = None) -> str:
+    """Create a short-lived JWT access token."""
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload: dict[str, Any] = {
+        "sub": str(subject),
+        "type": "access",
+        "iat": now,
+        "exp": expires,
+    }
+    if extra_claims:
+        payload.update(extra_claims)
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def create_refresh_token(subject: str | int) -> str:
+    """Create a long-lived JWT refresh token."""
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    payload: dict[str, Any] = {
+        "sub": str(subject),
+        "type": "refresh",
+        "iat": now,
+        "exp": expires,
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def decode_token(token: str, expected_type: str = "access") -> dict[str, Any]:
+    """
+    Decode and validate a JWT token.
+    Raises HTTP 401 on any failure.
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+    except JWTError:
+        raise credentials_exception
+
+    if payload.get("type") != expected_type:
+        raise credentials_exception
+    if not payload.get("sub"):
+        raise credentials_exception
+
+    return payload
+```
+
+## Authentication Dependencies
+
+```python
+# app/dependencies/auth.py
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.security import decode_token
+from app.db.models.user import User, UserRole
+from app.dependencies.db import get_db
+
+# Points Swagger UI to the token endpoint for the "Authorize" button
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
+
+
+async def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """Decode JWT and load the User from the database."""
+    payload = decode_token(token, expected_type="access")
+    user_id = int(payload["sub"])
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User no longer exists",
+        )
+    return user
+
+
+async def get_current_active_user(
+    user: User = Depends(get_current_user),
+) -> User:
+    """Ensure the user account is active."""
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is deactivated",
+        )
+    return user
+
+
+def require_role(*roles: UserRole):
+    """
+    Factory that returns a dependency requiring the current user to have one of the specified roles.
+
+    Usage:
+        @router.get("/admin", dependencies=[Depends(require_role(UserRole.ADMIN))])
+    """
+    async def _check_role(user: User = Depends(get_current_active_user)) -> User:
+        if user.role not in roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Required role(s): {[r.value for r in roles]}. Your role: {user.role.value}",
+            )
+        return user
+    return _check_role
+```
+
+## Auth Router — Register, Login, Refresh, Logout
+
+```python
+# app/routers/auth.py
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.security import (
+    hash_password,
+    verify_password,
+    create_access_token,
+    create_refresh_token,
+    decode_token,
+)
+from app.db.models.user import User
+from app.dependencies.db import get_db
+from app.dependencies.auth import get_current_active_user
+from app.schemas.user import UserCreate, UserRead, Token
+
+router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+@router.post("/register", response_model=UserRead, status_code=201)
+async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
+    """Create a new user account."""
+    # Check for existing username or email
+    existing = await db.execute(
+        select(User).where(
+            (User.username == data.username) | (User.email == data.email)
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Username or email already registered",
+        )
+
+    user = User(
+        username=data.username,
+        email=data.email,
+        hashed_password=hash_password(data.password),
+    )
+    db.add(user)
+    await db.flush()
+    await db.refresh(user)
+    return UserRead.model_validate(user)
+
+
+@router.post("/token", response_model=Token)
+async def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    OAuth2 password flow token endpoint.
+    Accepts application/x-www-form-urlencoded with username + password fields.
+    """
+    result = await db.execute(select(User).where(User.username == form_data.username))
+    user = result.scalar_one_or_none()
+
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is deactivated",
+        )
+
+    access_token = create_access_token(
+        subject=user.id,
+        extra_claims={"role": user.role.value, "username": user.username},
+    )
+    refresh_token = create_refresh_token(subject=user.id)
+
+    return Token(access_token=access_token, refresh_token=refresh_token)
+
+
+@router.post("/refresh", response_model=Token)
+async def refresh_tokens(refresh_token: str, db: AsyncSession = Depends(get_db)):
+    """Exchange a valid refresh token for a new access + refresh token pair."""
+    payload = decode_token(refresh_token, expected_type="refresh")
+    user_id = int(payload["sub"])
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or account deactivated",
+        )
+
+    new_access = create_access_token(
+        subject=user.id,
+        extra_claims={"role": user.role.value, "username": user.username},
+    )
+    new_refresh = create_refresh_token(subject=user.id)
+
+    return Token(access_token=new_access, refresh_token=new_refresh)
+
+
+@router.get("/me", response_model=UserRead)
+async def get_me(user: User = Depends(get_current_active_user)):
+    """Return the currently authenticated user's profile."""
+    return UserRead.model_validate(user)
+```
+
+## End-to-End Flow
+
+<Steps>
+1. **Register a new user**
+
+   ```bash
+   curl -X POST http://localhost:8000/auth/register \
+     -H "Content-Type: application/json" \
+     -d '{"username": "alice", "email": "alice@example.com", "password": "Secure@123"}'
+   ```
+
+   ```json
+   {"id": 1, "username": "alice", "email": "alice@example.com", "is_active": true, "role": "user"}
+   ```
+
+2. **Log in to get tokens**
+
+   ```bash
+   curl -X POST http://localhost:8000/auth/token \
+     -d "username=alice&password=Secure@123"
+   ```
+
+   ```json
+   {
+     "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+     "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+     "token_type": "bearer"
+   }
+   ```
+
+3. **Access a protected route**
+
+   ```bash
+   curl http://localhost:8000/auth/me \
+     -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+   ```
+
+   ```json
+   {"id": 1, "username": "alice", "email": "alice@example.com", "is_active": true, "role": "user"}
+   ```
+
+4. **Refresh tokens when access token expires**
+
+   ```bash
+   curl -X POST "http://localhost:8000/auth/refresh?refresh_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+   ```
+
+   ```json
+   {
+     "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...(new token)",
+     "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...(new refresh)",
+     "token_type": "bearer"
+   }
+   ```
+
+</Steps>
+
+## Role-Based Access Control
+
+Protect routes using the `require_role()` dependency factory:
+
+```python
+# app/routers/admin.py
+from fastapi import APIRouter, Depends
+from app.db.models.user import User, UserRole
+from app.dependencies.auth import require_role, get_current_active_user
+
+router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+@router.get(
+    "/dashboard",
+    dependencies=[Depends(require_role(UserRole.ADMIN))],
+)
+async def admin_dashboard():
+    return {"status": "admin panel", "users": 1234}
+
+
+@router.get(
+    "/moderate",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.MODERATOR))],
+)
+async def moderation_queue():
+    return {"pending_reports": 42}
+
+
+# Access the user object inside the handler
+@router.delete("/users/{user_id}")
+async def admin_delete_user(
+    user_id: int,
+    admin: User = Depends(require_role(UserRole.ADMIN)),
+):
+    return {"deleted_by": admin.username, "deleted_user_id": user_id}
+```
+
+```bash
+# Access with regular user token
+curl http://localhost:8000/admin/dashboard \
+  -H "Authorization: Bearer <user-token>"
+```
+
+```json
+{
+  "detail": "Required role(s): ['admin']. Your role: user"
+}
+```
+
+## API Key Authentication (Alternative)
+
+<Tabs>
+  <TabItem label="Header-Based">
+
+```python
+from fastapi import Security, HTTPException
+from fastapi.security import APIKeyHeader
+from sqlalchemy import select
+from app.db.models.api_key import APIKey
+
+api_key_header = APIKeyHeader(name="X-API-Key")
+
+
+async def get_api_key_client(
+    api_key: str = Security(api_key_header),
+    db: AsyncSession = Depends(get_db),
+) -> APIKey:
+    result = await db.execute(
+        select(APIKey).where(APIKey.key == api_key, APIKey.is_active == True)
+    )
+    key_record = result.scalar_one_or_none()
+    if not key_record:
+        raise HTTPException(status_code=403, detail="Invalid or revoked API key")
+    return key_record
+```
+
+  </TabItem>
+  <TabItem label="Query Parameter">
+
+```python
+from fastapi import Security
+from fastapi.security import APIKeyQuery
+
+api_key_query = APIKeyQuery(name="api_key", auto_error=False)
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def get_api_key(
+    key_from_query: str | None = Security(api_key_query),
+    key_from_header: str | None = Security(api_key_header),
+) -> str:
+    """Accept API key from either query param or header."""
+    api_key = key_from_header or key_from_query
+    if not api_key or api_key not in VALID_KEYS:
+        raise HTTPException(status_code=403, detail="Invalid API key")
+    return api_key
+```
+
+  </TabItem>
+</Tabs>
+
+:::caution[Security Best Practices]
+- **Never log** tokens, passwords, or API keys — even in debug mode
+- **Always use HTTPS** in production — JWTs are base64-encoded, not encrypted
+- **Short access token lifetimes** (15–30 min) combined with refresh tokens reduce the blast radius of token theft
+- **Rotate your `SECRET_KEY`** regularly and on suspected compromise — all existing tokens are immediately invalidated
+- **Hash API keys** before storing — treat them like passwords: `hashlib.sha256(key.encode()).hexdigest()`
+:::

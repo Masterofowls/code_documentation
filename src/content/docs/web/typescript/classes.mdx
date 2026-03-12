@@ -1,0 +1,523 @@
+---
+title: Classes in TypeScript
+description: TypeScript classes — access modifiers, abstract classes, mixins, static blocks, private fields, parameter properties, and class expressions.
+sidebar:
+  order: 6
+tags: [typescript, javascript]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+TypeScript's class system builds on JavaScript's ES2022 class syntax and adds **compile-time access control**, **abstract classes**, **interface implementations**, and rich type inference for class hierarchies.
+
+## Class Basics
+
+```ts
+class Point {
+  x: number;
+  y: number;
+
+  constructor(x: number, y: number) {
+    this.x = x;
+    this.y = y;
+  }
+
+  distanceTo(other: Point): number {
+    const dx = this.x - other.x;
+    const dy = this.y - other.y;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  toString(): string {
+    return `Point(${this.x}, ${this.y})`;
+  }
+}
+
+const origin = new Point(0, 0);
+const target = new Point(3, 4);
+console.log(target.distanceTo(origin)); // 5
+console.log(target.toString());         // Point(3, 4)
+```
+
+---
+
+## Access Modifiers
+
+TypeScript adds three access modifiers. They are **compile-time only** — the compiled JavaScript has no enforcement.
+
+| Modifier | Accessible from | Notes |
+|---|---|---|
+| `public` (default) | Anywhere | No restriction |
+| `protected` | Class and subclasses | Not accessible from outside the hierarchy |
+| `private` (TS) | Class only | Compile-time only; accessible via reflection at runtime |
+| `#name` (JS) | Class only | **Runtime** private field — truly inaccessible outside the class |
+| `readonly` | Read anywhere | Can only be set in constructor or declaration |
+
+```ts
+class BankAccount {
+  public readonly id: string;
+  public owner: string;
+  protected balance: number;
+  private _transactionLog: string[] = [];
+
+  constructor(owner: string, initialBalance: number) {
+    this.id = crypto.randomUUID();
+    this.owner = owner;
+    this.balance = initialBalance;
+  }
+
+  // Public method — accessible anywhere
+  public getBalance(): number {
+    return this.balance;
+  }
+
+  // Protected method — accessible in this class and subclasses
+  protected recordTransaction(desc: string): void {
+    this._transactionLog.push(`${new Date().toISOString()} — ${desc}`);
+  }
+
+  // Private method — accessible only in this class
+  private validate(amount: number): void {
+    if (amount <= 0) throw new RangeError('Amount must be positive');
+  }
+
+  public deposit(amount: number): void {
+    this.validate(amount);
+    this.balance += amount;
+    this.recordTransaction(`Deposit: +${amount}`);
+  }
+}
+
+class SavingsAccount extends BankAccount {
+  private interestRate: number;
+
+  constructor(owner: string, balance: number, rate: number) {
+    super(owner, balance);
+    this.interestRate = rate;
+  }
+
+  applyInterest(): void {
+    const interest = this.balance * this.interestRate; // OK — protected
+    this.balance += interest;
+    this.recordTransaction(`Interest: +${interest}`); // OK — protected
+  }
+
+  // this._transactionLog  // Error: private — not accessible in subclass
+}
+
+const acct = new BankAccount('Alice', 1000);
+acct.deposit(500);
+console.log(acct.getBalance()); // 1500
+// acct.balance;                // Error: Property 'balance' is protected
+// acct._transactionLog;        // Error: Property '_transactionLog' is private
+```
+
+---
+
+## Parameter Properties (Shorthand Constructor)
+
+TypeScript lets you declare and initialise class properties directly in the constructor signature:
+
+```ts
+// Verbose — declare then assign
+class User {
+  public name: string;
+  private email: string;
+  readonly id: number;
+
+  constructor(name: string, email: string, id: number) {
+    this.name = name;
+    this.email = email;
+    this.id = id;
+  }
+}
+
+// Shorthand — declare AND initialise in constructor params
+class User2 {
+  constructor(
+    public name: string,
+    private email: string,
+    readonly id: number,
+    protected role: string = 'user'
+  ) {}
+
+  getEmail(): string {
+    return this.email;
+  }
+}
+
+const u = new User2('Alice', 'alice@example.com', 1);
+console.log(u.name);      // Alice
+console.log(u.id);        // 1
+console.log(u.getEmail()); // alice@example.com
+// u.email;               // Error: Property 'email' is private
+```
+
+---
+
+## Readonly and Strictness
+
+```ts
+class Config {
+  readonly host: string;
+  readonly port: number;
+  // strictPropertyInitialization requires initialisation in constructor
+  readonly timeout: number; // must be set in constructor
+
+  constructor(host: string, port: number) {
+    this.host = host;
+    this.port = port;
+    this.timeout = 5000; // must assign all readonly props
+  }
+}
+
+const cfg = new Config('localhost', 8080);
+cfg.host = 'other'; // Error: Cannot assign to 'host' because it is read-only.
+```
+
+---
+
+## Abstract Classes and Methods
+
+An **abstract class** cannot be instantiated directly. It serves as a base class that defines a contract for subclasses:
+
+```ts
+abstract class Shape {
+  abstract readonly kind: string;
+  abstract area(): number;
+  abstract perimeter(): number;
+
+  // Concrete method shared by all shapes
+  describe(): string {
+    return `${this.kind} with area ${this.area().toFixed(2)} and perimeter ${this.perimeter().toFixed(2)}`;
+  }
+}
+
+// Subclass must implement all abstract members
+class Circle extends Shape {
+  readonly kind = 'Circle';
+
+  constructor(public readonly radius: number) {
+    super();
+  }
+
+  area(): number {
+    return Math.PI * this.radius ** 2;
+  }
+
+  perimeter(): number {
+    return 2 * Math.PI * this.radius;
+  }
+}
+
+class Rectangle extends Shape {
+  readonly kind = 'Rectangle';
+
+  constructor(
+    public readonly width: number,
+    public readonly height: number
+  ) {
+    super();
+  }
+
+  area(): number {
+    return this.width * this.height;
+  }
+
+  perimeter(): number {
+    return 2 * (this.width + this.height);
+  }
+}
+
+// const s = new Shape(); // Error: Cannot create an instance of an abstract class.
+
+const c = new Circle(5);
+const r = new Rectangle(4, 6);
+console.log(c.describe()); // Circle with area 78.54 and perimeter 31.42
+console.log(r.describe()); // Rectangle with area 24.00 and perimeter 20.00
+
+// Abstract constructor type — accepts any Shape subclass
+function printShape(ShapeClass: new (...args: unknown[]) => Shape): void {
+  // Can't call new ShapeClass() without knowing args — use instances directly
+}
+```
+
+---
+
+## `implements` Keyword
+
+Classes can **implement** one or more interfaces, ensuring they satisfy the contract:
+
+```ts
+interface Serializable {
+  serialize(): string;
+  deserialize(data: string): void;
+}
+
+interface Loggable {
+  log(level: 'info' | 'warn' | 'error', message: string): void;
+}
+
+class AppConfig implements Serializable, Loggable {
+  private data: Record<string, unknown> = {};
+
+  serialize(): string {
+    return JSON.stringify(this.data);
+  }
+
+  deserialize(raw: string): void {
+    this.data = JSON.parse(raw) as Record<string, unknown>;
+  }
+
+  log(level: 'info' | 'warn' | 'error', message: string): void {
+    console[level](`[AppConfig] ${message}`);
+  }
+
+  set(key: string, value: unknown): void {
+    this.data[key] = value;
+  }
+
+  get(key: string): unknown {
+    return this.data[key];
+  }
+}
+
+// Missing serialize() would produce:
+// Error: Class 'AppConfig' incorrectly implements interface 'Serializable'.
+//        Property 'serialize' is missing in type 'AppConfig' but required in 'Serializable'.
+```
+
+---
+
+## The `override` Keyword
+
+The `override` keyword (TypeScript 4.3+) makes it explicit that a method overrides a base class method. With `noImplicitOverride: true` in tsconfig, every override must be marked:
+
+```ts
+class Base {
+  greet(): string {
+    return 'Hello from Base';
+  }
+
+  display(): void {
+    console.log(this.greet());
+  }
+}
+
+class Derived extends Base {
+  override greet(): string {         // explicit override
+    return 'Hello from Derived';
+  }
+
+  // greet2(): string { return ''; } // Error (noImplicitOverride):
+  //                                 // This member must have an 'override' modifier
+  //                                 // because it overrides a member in the base class 'Base'.
+
+  // override nonExistent(): void {} // Error: 'nonExistent' is not a member of 'Base'.
+}
+```
+
+---
+
+## Static Members and Static Blocks
+
+```ts
+class Counter {
+  private static _instances = 0;
+  private static readonly MAX_INSTANCES = 100;
+  private static registry = new Map<string, Counter>();
+
+  // Static initialisation block (ES2022 / TS 4.4)
+  static {
+    console.log('Counter class initialised');
+    // Can run any initialisation logic here, including async-less setup
+  }
+
+  readonly instanceId: number;
+
+  constructor(public readonly name: string) {
+    if (Counter._instances >= Counter.MAX_INSTANCES) {
+      throw new Error('Max Counter instances reached');
+    }
+    Counter._instances++;
+    this.instanceId = Counter._instances;
+    Counter.registry.set(name, this);
+  }
+
+  static getCount(): number {
+    return Counter._instances;
+  }
+
+  static find(name: string): Counter | undefined {
+    return Counter.registry.get(name);
+  }
+}
+
+const a = new Counter('alpha');
+const b = new Counter('beta');
+console.log(Counter.getCount()); // 2
+console.log(Counter.find('alpha')?.instanceId); // 1
+```
+
+---
+
+## Private Class Fields (`#`)
+
+The `#` prefix creates **truly private** fields — a JavaScript language feature (not just TypeScript). These fields cannot be accessed outside the class at runtime, even through reflection or `as any`:
+
+```ts
+class SecureToken {
+  // JavaScript private field — runtime enforced
+  #secret: string;
+  #createdAt: Date;
+
+  constructor(secret: string) {
+    this.#secret = secret;
+    this.#createdAt = new Date();
+  }
+
+  verify(input: string): boolean {
+    return input === this.#secret;
+  }
+
+  get age(): number {
+    return Date.now() - this.#createdAt.getTime();
+  }
+
+  // Cannot access #secret outside this class:
+  static compare(a: SecureToken, b: SecureToken): boolean {
+    return a.#secret === b.#secret; // OK — same class
+  }
+}
+
+const token = new SecureToken('s3cr3t');
+console.log(token.verify('s3cr3t')); // true
+// console.log(token.#secret);       // SyntaxError at runtime AND compile time
+// console.log((token as any).#secret); // SyntaxError — truly private!
+
+// TypeScript private vs JS private:
+class TSPrivate {
+  private name: string = 'TS private';
+}
+const obj = new TSPrivate();
+// obj.name           // Error: compile time only
+(obj as any).name;   // 'TS private' — accessible at runtime via cast!
+
+class JSPrivate {
+  #name = 'JS private';
+}
+const obj2 = new JSPrivate();
+(obj2 as any).['#name']; // undefined — truly private at runtime
+```
+
+---
+
+## Class Expressions
+
+Classes can be used as expressions — assigned to variables, returned from functions, or used inline:
+
+```ts
+// Class expression
+const Animal = class<T extends string> {
+  constructor(public name: string, public sound: T) {}
+  speak(): string { return `${this.name} says ${this.sound}`; }
+};
+
+const cat = new Animal('Whiskers', 'meow');
+console.log(cat.speak()); // Whiskers says meow
+
+// Factory pattern using class expression
+function createEntity<T>(
+  fields: string[],
+  methods: Record<string, (...args: unknown[]) => unknown>
+) {
+  return class {
+    constructor(data: Record<string, unknown>) {
+      Object.assign(this, data);
+    }
+    // ... dynamic members
+  };
+}
+```
+
+---
+
+## Mixins Pattern
+
+Mixins compose behaviour from multiple sources — TypeScript's answer to multiple inheritance:
+
+```ts
+// Mixin constructor constraint
+type Constructor<T = {}> = new (...args: unknown[]) => T;
+
+// Timestamped mixin
+function Timestamped<TBase extends Constructor>(Base: TBase) {
+  return class extends Base {
+    createdAt: Date = new Date();
+    updatedAt: Date = new Date();
+
+    touch(): void {
+      this.updatedAt = new Date();
+    }
+  };
+}
+
+// Activatable mixin
+function Activatable<TBase extends Constructor>(Base: TBase) {
+  return class extends Base {
+    isActive: boolean = false;
+
+    activate(): void {
+      this.isActive = true;
+    }
+
+    deactivate(): void {
+      this.isActive = false;
+    }
+  };
+}
+
+// Tagged mixin
+function Tagged<TBase extends Constructor>(Base: TBase) {
+  return class extends Base {
+    tags: string[] = [];
+
+    addTag(tag: string): void {
+      if (!this.tags.includes(tag)) this.tags.push(tag);
+    }
+
+    removeTag(tag: string): void {
+      this.tags = this.tags.filter(t => t !== tag);
+    }
+  };
+}
+
+// Base class
+class BaseEntity {
+  constructor(public id: string) {}
+}
+
+// Compose mixins
+const TimestampedActivatableEntity = Activatable(Timestamped(BaseEntity));
+const FullEntity = Tagged(Activatable(Timestamped(BaseEntity)));
+
+class User extends FullEntity {
+  constructor(id: string, public name: string) {
+    super(id);
+  }
+}
+
+const user = new User('1', 'Alice');
+user.activate();
+user.addTag('admin');
+user.addTag('beta-tester');
+user.touch();
+
+console.log(user.isActive);  // true
+console.log(user.tags);      // ['admin', 'beta-tester']
+console.log(user.createdAt); // Date
+```
+
+:::tip[Mixin Limitations]
+Mixins cannot implement abstract classes or use `super` for the mixin's own methods. For complex hierarchies, consider composition over mixins — store collaborators as properties rather than mixing behaviour through inheritance chains.
+:::

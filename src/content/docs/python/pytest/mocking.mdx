@@ -1,0 +1,583 @@
+---
+title: Mocking with pytest-mock
+description: Isolate dependencies using pytest-mock, the mocker fixture, MagicMock, side_effect, and monkeypatch.
+sidebar:
+  order: 6
+tags:
+  - python
+  - testing
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Mocking replaces real dependencies — external APIs, databases, file systems, clocks — with controlled substitutes so your tests are fast, deterministic, and focused on the unit under test.
+
+## Installation
+
+```bash
+pip install pytest-mock
+```
+
+`pytest-mock` wraps Python's standard `unittest.mock` library and provides a `mocker` fixture that integrates cleanly with pytest's lifecycle — all patches are automatically reversed after each test, with no cleanup code needed.
+
+## The `mocker` Fixture
+
+`pytest-mock` provides the `mocker` fixture in every test automatically:
+
+```python
+def test_something(mocker):
+    # mocker.patch automatically undoes this patch after the test
+    mock_fn = mocker.patch("myapp.module.expensive_function")
+    mock_fn.return_value = {"status": "ok", "data": [1, 2, 3]}
+
+    result = code_that_calls_expensive_function()
+
+    assert result["status"] == "ok"
+    mock_fn.assert_called_once()
+```
+
+Contrast with raw `unittest.mock`, where you must manage cleanup manually:
+
+```python
+# ❌ Raw unittest.mock — easy to forget cleanup
+from unittest.mock import patch
+
+def test_something():
+    with patch("myapp.module.expensive_function") as mock_fn:
+        mock_fn.return_value = {"status": "ok"}
+        result = code_that_calls_expensive_function()
+        assert result["status"] == "ok"
+    # patch is undone only when the with block exits
+```
+
+## `mocker.patch`
+
+`mocker.patch` replaces a named object with a `MagicMock` and returns the mock for configuration and assertion:
+
+```python
+# src/myapp/weather.py
+import requests
+
+
+def get_temperature(city: str) -> float:
+    response = requests.get(f"https://api.weather.com/temp?city={city}")
+    response.raise_for_status()
+    return response.json()["temperature"]
+```
+
+```python
+# tests/test_weather.py
+from myapp.weather import get_temperature
+
+
+def test_get_temperature(mocker):
+    mock_get = mocker.patch("myapp.weather.requests.get")
+    mock_get.return_value.json.return_value = {"temperature": 22.5}
+    mock_get.return_value.raise_for_status.return_value = None
+
+    result = get_temperature("London")
+
+    assert result == 22.5
+    mock_get.assert_called_once_with(
+        "https://api.weather.com/temp?city=London"
+    )
+```
+
+:::tip[Patch where it is used, not where it is defined]
+Always patch the name as it is **referenced in the module under test**, not where it was originally defined. If `myapp.weather` does `import requests`, you must patch `myapp.weather.requests.get` — not `requests.get`.
+
+```python
+# myapp/weather.py
+import requests                      # <-- imported here
+
+# tests/test_weather.py
+mocker.patch("myapp.weather.requests.get")   # ✅ patch it here
+mocker.patch("requests.get")                  # ❌ too late — already bound
+```
+:::
+
+### Patching a Return Value Chain
+
+When your code chains attribute access (e.g., `response.json()["key"]`), configure the chain on the mock:
+
+```python
+def test_chained_attributes(mocker):
+    mock_client = mocker.patch("myapp.service.http_client")
+
+    # client.session.get(url).json() returns a dict
+    mock_client.session.get.return_value.json.return_value = {
+        "users": [{"id": 1, "name": "Alice"}]
+    }
+
+    users = fetch_users()
+    assert users[0]["name"] == "Alice"
+```
+
+## `mocker.patch.object`
+
+Patch a specific attribute on an **object** or **class** rather than a dotted string path:
+
+```python
+from myapp.database import UserRepository
+
+
+def test_save_user(mocker):
+    repo = UserRepository()
+    mock_save = mocker.patch.object(repo, "save")
+    mock_save.return_value = {"id": 42, "status": "saved"}
+
+    result = create_user_with_repo(repo, name="Alice")
+
+    mock_save.assert_called_once()
+    assert result["id"] == 42
+```
+
+Patch a method on the **class** (affects all instances created during the test):
+
+```python
+def test_email_notification(mocker):
+    mock_send = mocker.patch.object(EmailService, "send_email")
+
+    register_user(email="alice@example.com")
+
+    mock_send.assert_called_once_with(
+        to="alice@example.com",
+        subject="Welcome to MyApp!",
+        template="welcome",
+    )
+```
+
+## `MagicMock` — Understanding the Default Mock
+
+All patches return `MagicMock` objects. A `MagicMock` accepts any attribute access or method call without raising `AttributeError`:
+
+```python
+from unittest.mock import MagicMock
+
+
+def test_magic_mock_basics():
+    mock = MagicMock()
+
+    # Any attribute access returns another MagicMock
+    assert isinstance(mock.anything, MagicMock)
+
+    # Any method call returns a MagicMock
+    result = mock.any_method(1, 2, key="value")
+    assert isinstance(result, MagicMock)
+
+    # Magic methods are supported
+    mock.__len__.return_value = 7
+    assert len(mock) == 7
+
+    mock.__str__.return_value = "mocked string"
+    assert str(mock) == "mocked string"
+
+    # Iteration
+    mock.__iter__.return_value = iter([1, 2, 3])
+    assert list(mock) == [1, 2, 3]
+```
+
+### Configuring a Mock at Construction
+
+```python
+def test_preconfigured_mock(mocker):
+    mock_response = MagicMock(
+        status_code=200,
+        headers={"Content-Type": "application/json"},
+    )
+    mock_response.json.return_value = {"id": 1, "name": "Alice"}
+
+    mocker.patch("myapp.client.requests.get", return_value=mock_response)
+
+    result = fetch_user(user_id=1)
+    assert result["name"] == "Alice"
+```
+
+## The `spec=` Parameter
+
+By default, `MagicMock` allows access to any attribute — even ones that do not exist on the real object. Use `spec=` to restrict the mock to the real object's interface:
+
+```python
+from myapp.services import PaymentService
+
+
+def test_with_spec(mocker):
+    mock_payment = mocker.MagicMock(spec=PaymentService)
+
+    # ✅ Allowed — charge() exists on PaymentService
+    mock_payment.charge.return_value = {"transaction_id": "txn_123"}
+
+    # ❌ Raises AttributeError — typo caught immediately
+    # mock_payment.chrage(amount=100)
+```
+
+:::tip[Use spec= in production tests]
+`spec=` catches typos and API drift early. If the real class later renames or removes a method, tests using `spec=` will fail immediately, alerting you that your mock is stale.
+:::
+
+```python
+def test_payment_flow(mocker):
+    mock_service = mocker.patch(
+        "myapp.checkout.payment_service",
+        spec=PaymentService,
+    )
+    mock_service.charge.return_value = {"status": "success", "amount": 9999}
+
+    result = process_checkout(cart=sample_cart, payment_token="tok_test")
+
+    assert result.success
+    mock_service.charge.assert_called_once_with(
+        amount=9999,
+        currency="usd",
+        token="tok_test",
+    )
+```
+
+## `side_effect` — Dynamic Behavior
+
+Use `side_effect` to make a mock raise an exception, return different values on each call, or delegate to a custom function.
+
+### Raising an Exception
+
+```python
+import requests
+
+
+def test_handles_network_error(mocker):
+    mock_get = mocker.patch("myapp.client.requests.get")
+    mock_get.side_effect = requests.exceptions.ConnectionError("Network unreachable")
+
+    result = fetch_with_retry("https://api.example.com/data", retries=3)
+
+    assert result is None
+    assert mock_get.call_count == 3   # verify retry logic ran
+```
+
+### Different Return Values Per Call
+
+Pass an iterable — each element is returned (or raised) on consecutive calls:
+
+```python
+from unittest.mock import MagicMock
+
+
+def test_retry_eventually_succeeds(mocker):
+    mock_get = mocker.patch("myapp.client.requests.get")
+    mock_get.side_effect = [
+        requests.exceptions.Timeout("timed out"),         # call 1: fail
+        requests.exceptions.Timeout("timed out"),         # call 2: fail
+        MagicMock(json=lambda: {"data": "success"}),      # call 3: succeed
+    ]
+
+    result = fetch_with_retry("https://api.example.com/data", max_retries=3)
+
+    assert result == {"data": "success"}
+    assert mock_get.call_count == 3
+```
+
+### Side Effect as a Callable
+
+Provide a function — it is called with the same arguments as the mock:
+
+```python
+def test_side_effect_function(mocker):
+    def fake_get(url, **kwargs):
+        if "/users" in url:
+            return MagicMock(json=lambda: [{"id": 1, "name": "Alice"}])
+        if "/products" in url:
+            return MagicMock(json=lambda: [{"id": 101, "title": "Widget"}])
+        return MagicMock(json=lambda: [])
+
+    mock_get = mocker.patch("myapp.client.requests.get")
+    mock_get.side_effect = fake_get
+
+    users = fetch_users()
+    products = fetch_products()
+    other = fetch_unknown_resource()
+
+    assert len(users) == 1
+    assert users[0]["name"] == "Alice"
+    assert len(products) == 1
+    assert len(other) == 0
+```
+
+## Asserting Call Behavior
+
+### Core Assertion Methods
+
+```python
+def test_notification_sent(mocker):
+    mock_notify = mocker.patch("myapp.notifications.send_push_notification")
+
+    process_order(order_id=42, user_id=7)
+
+    # Verify the mock was called exactly once with specific args
+    mock_notify.assert_called_once_with(
+        user_id=7,
+        title="Order Confirmed",
+        body="Your order #42 has been confirmed.",
+    )
+```
+
+| Assertion | Meaning |
+| --- | --- |
+| `mock.assert_called()` | Called at least once |
+| `mock.assert_called_once()` | Called exactly once |
+| `mock.assert_called_with(...)` | Last call used these exact args |
+| `mock.assert_called_once_with(...)` | Called exactly once with these args |
+| `mock.assert_any_call(...)` | At least one call used these args |
+| `mock.assert_not_called()` | Never called |
+| `mock.call_count` | Total number of calls |
+| `mock.called` | `True` if called at least once |
+
+### Inspecting `call_args` and `call_args_list`
+
+```python
+from unittest.mock import call
+
+
+def test_multiple_notifications(mocker):
+    mock_notify = mocker.patch("myapp.notifications.send_notification")
+
+    process_events([login_event, purchase_event, logout_event])
+
+    assert mock_notify.call_count == 3
+
+    # Verify the complete sequence of calls in order
+    mock_notify.assert_has_calls([
+        call(event_type="login",    user_id=1),
+        call(event_type="purchase", user_id=1, amount=99.99),
+        call(event_type="logout",   user_id=1),
+    ])
+
+    # Inspect the arguments of a specific call
+    second_call = mock_notify.call_args_list[1]
+    assert second_call.kwargs["event_type"] == "purchase"
+    assert second_call.kwargs["amount"] == 99.99
+
+    # Inspect the most recent call
+    last_kwargs = mock_notify.call_args.kwargs
+    assert last_kwargs["event_type"] == "logout"
+```
+
+### Using `mocker.ANY`
+
+`mocker.ANY` matches any value in call assertions, useful when you do not care about a specific argument:
+
+```python
+def test_email_sent_to_correct_recipient(mocker):
+    mock_send = mocker.patch("myapp.email.send_email")
+
+    register_user(name="Alice", email="alice@example.com")
+
+    mock_send.assert_called_once_with(
+        to="alice@example.com",
+        subject=mocker.ANY,        # don't care about the exact subject
+        body=mocker.ANY,           # don't care about the exact body
+        from_addr=mocker.ANY,
+    )
+```
+
+## Patching Built-ins
+
+### Patching `open`
+
+```python
+from unittest.mock import mock_open
+import json
+
+
+def read_config(path: str) -> dict:
+    with open(path) as f:
+        return json.load(f)
+
+
+def test_read_config(mocker):
+    fake_content = '{"debug": true, "port": 8080, "log_level": "INFO"}'
+    mocker.patch("builtins.open", mock_open(read_data=fake_content))
+
+    config = read_config("/etc/myapp/config.json")
+
+    assert config["debug"] is True
+    assert config["port"] == 8080
+    assert config["log_level"] == "INFO"
+```
+
+### Patching `datetime`
+
+```python
+from datetime import datetime
+
+
+def get_greeting() -> str:
+    hour = datetime.now().hour
+    if hour < 12:
+        return "Good morning!"
+    elif hour < 18:
+        return "Good afternoon!"
+    return "Good evening!"
+
+
+def test_morning_greeting(mocker):
+    mock_dt = mocker.patch("myapp.greetings.datetime")
+    mock_dt.now.return_value = datetime(2024, 6, 15, 9, 30, 0)   # 9:30 AM
+    assert get_greeting() == "Good morning!"
+
+
+def test_afternoon_greeting(mocker):
+    mock_dt = mocker.patch("myapp.greetings.datetime")
+    mock_dt.now.return_value = datetime(2024, 6, 15, 14, 0, 0)   # 2:00 PM
+    assert get_greeting() == "Good afternoon!"
+
+
+def test_evening_greeting(mocker):
+    mock_dt = mocker.patch("myapp.greetings.datetime")
+    mock_dt.now.return_value = datetime(2024, 6, 15, 20, 0, 0)   # 8:00 PM
+    assert get_greeting() == "Good evening!"
+```
+
+## `mocker.spy` — Wrapping Real Implementations
+
+`mocker.spy` wraps an existing function so you can assert call behavior while the **real** implementation still executes:
+
+```python
+def test_spy_preserves_behavior(mocker):
+    spy = mocker.spy(myapp.utils, "calculate_tax")
+
+    order_total = process_order(subtotal=100.0, region="CA")
+
+    # Real calculate_tax() ran and affected the result
+    assert order_total > 100.0
+
+    # But we can also assert how it was called
+    spy.assert_called_once_with(100.0, region="CA")
+    assert spy.spy_return == pytest.approx(8.25)   # CA tax rate
+```
+
+## `AsyncMock` — Mocking Async Functions
+
+For `async def` functions, use `AsyncMock`:
+
+```python
+from unittest.mock import AsyncMock
+
+
+async def test_async_api_call(mocker):
+    mock_fetch = mocker.patch(
+        "myapp.service.fetch_user_async",
+        new_callable=AsyncMock,
+    )
+    mock_fetch.return_value = {"id": 1, "name": "Alice"}
+
+    result = await get_user_details(user_id=1)
+
+    assert result["name"] == "Alice"
+    mock_fetch.assert_awaited_once_with(user_id=1)
+```
+
+Or use `mocker.AsyncMock` directly:
+
+```python
+async def test_async_side_effect(mocker):
+    mock_send = mocker.AsyncMock(side_effect=ConnectionError("service down"))
+    mocker.patch("myapp.notifier.send_async", mock_send)
+
+    result = await notify_with_fallback(user_id=1)
+
+    assert result["used_fallback"] is True
+    mock_send.assert_awaited_once()
+```
+
+## `monkeypatch` vs `mocker`
+
+Both `monkeypatch` (built-in) and `mocker` (from pytest-mock) can replace objects in tests. Here is when to use each:
+
+| | `monkeypatch` | `mocker` |
+| --- | --- | --- |
+| Source | pytest built-in | `pip install pytest-mock` |
+| Best for | Simple value/attribute replacement | Complex behavior, call assertions |
+| Call history | ❌ None | ✅ Full history, args, return values |
+| `side_effect` | ❌ Not supported | ✅ Supported |
+| `spec=` | ❌ Not supported | ✅ Supported |
+| `spy` | ❌ Not supported | ✅ Supported |
+| Environment vars | ✅ `setenv` / `delenv` | ❌ Not idiomatic |
+| `sys.path` patching | ✅ `syspath_prepend` | ❌ Not idiomatic |
+
+```python
+# monkeypatch: environment variables and simple attribute overrides
+def test_with_monkeypatch(monkeypatch):
+    monkeypatch.setenv("API_KEY", "test-key-12345")
+    monkeypatch.setattr(config, "MAX_RETRIES", 1)
+
+    result = fetch_data()
+    assert result is not None
+
+
+# mocker: behavior control and call verification
+def test_with_mocker(mocker):
+    mock_call = mocker.patch("myapp.client.make_api_call")
+    mock_call.side_effect = [
+        requests.exceptions.Timeout(),
+        {"data": "success"},
+    ]
+
+    result = fetch_with_retry()
+
+    assert mock_call.call_count == 2
+    assert result == {"data": "success"}
+```
+
+:::tip[Combine them]
+Use `monkeypatch` for environment variables, config values, and simple attribute overrides. Use `mocker` when you need to control return values, simulate exceptions, or assert how a dependency was called.
+:::
+
+## Common Mocking Patterns
+
+### Mock a Context Manager
+
+```python
+def process_file(path: str) -> str:
+    with open(path, "r") as f:
+        return f.read().strip()
+
+
+def test_process_file(mocker):
+    mock_file = mocker.mock_open(read_data="hello pytest\n")
+    mocker.patch("builtins.open", mock_file)
+
+    result = process_file("/path/to/file.txt")
+
+    assert result == "hello pytest"
+    mock_file.assert_called_once_with("/path/to/file.txt", "r")
+```
+
+### Mock a Class Constructor
+
+```python
+def test_service_creation(mocker):
+    mock_instance = MagicMock()
+    mock_instance.connect.return_value = True
+    MockService = mocker.patch("myapp.module.ExternalService")
+    MockService.return_value = mock_instance
+
+    result = initialize_application()
+
+    MockService.assert_called_once_with(host="localhost", port=5432)
+    mock_instance.connect.assert_called_once()
+    assert result.ready
+```
+
+### Reset a Mock Between Assertions
+
+```python
+def test_reset_mock(mocker):
+    mock_fn = mocker.patch("myapp.service.notify")
+
+    workflow_step_one()
+    assert mock_fn.call_count == 1
+
+    mock_fn.reset_mock()   # clear call history
+
+    workflow_step_two()
+    assert mock_fn.call_count == 1   # only step two's call counts now
+```

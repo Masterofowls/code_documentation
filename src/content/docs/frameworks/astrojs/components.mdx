@@ -1,0 +1,501 @@
+---
+title: Astro Components
+description: Master .astro component syntax, props, slots, client directives, and integrating React/Vue/Svelte components in Astro.
+sidebar:
+  order: 3
+tags: [javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Astro Components
+
+Astro components are the building blocks of every Astro project. They use an HTML-superset syntax with
+a server-side frontmatter script, a declarative template, and optional scoped styles — all in one `.astro` file.
+
+## .astro Component Anatomy
+
+Every `.astro` component has three parts separated by `---` code fences:
+
+```astro
+---
+// 1. FRONTMATTER SCRIPT — runs on the server at build time (or per-request in SSR)
+// Import statements, data fetching, variable definitions
+import OtherComponent from './OtherComponent.astro';
+
+const greeting = 'Hello';
+const data = await fetch('https://api.example.com/data').then(r => r.json());
+---
+
+<!-- 2. HTML TEMPLATE — rendered to static HTML -->
+<div class="card">
+  <OtherComponent />
+  <p>{greeting}, {data.name}!</p>
+</div>
+
+<!-- 3. SCOPED STYLES — only affect elements in THIS component -->
+<style>
+  .card {
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 1rem;
+  }
+</style>
+```
+
+:::tip[Frontmatter is Server-Only]
+Code in the frontmatter (between `---`) runs exclusively on the server — either at build time for static
+sites or on each request for SSR. It has access to Node.js APIs, secrets, and filesystem. It never runs
+in the browser, so `window` and `document` are not available there.
+:::
+
+## Component Props
+
+Define props using TypeScript's `interface Props` for full type safety:
+
+```astro
+---
+// src/components/BlogCard.astro
+interface Props {
+  title: string;
+  description: string;
+  publishedAt: Date;
+  href: string;
+  tags?: string[];
+  featured?: boolean;
+}
+
+const {
+  title,
+  description,
+  publishedAt,
+  href,
+  tags = [],
+  featured = false,
+} = Astro.props;
+
+const formattedDate = publishedAt.toLocaleDateString('en-US', {
+  year: 'numeric',
+  month: 'long',
+  day: 'numeric',
+});
+---
+
+<article class:list={['card', { 'card--featured': featured }]}>
+  <time datetime={publishedAt.toISOString()}>{formattedDate}</time>
+  <h2>
+    <a href={href}>{title}</a>
+  </h2>
+  <p>{description}</p>
+  {tags.length > 0 && (
+    <ul class="tags">
+      {tags.map(tag => <li class="tag">{tag}</li>)}
+    </ul>
+  )}
+</article>
+```
+
+Usage:
+
+```astro
+---
+import BlogCard from '../components/BlogCard.astro';
+---
+
+<BlogCard
+  title="Getting Started with Astro"
+  description="Learn how to build fast websites with Astro."
+  publishedAt={new Date('2024-01-15')}
+  href="/blog/getting-started"
+  tags={['astro', 'web', 'tutorial']}
+  featured={true}
+/>
+```
+
+## Slots
+
+Slots let you pass HTML content into a component from the outside.
+
+### Default Slot
+
+```astro
+---
+// src/components/Card.astro
+interface Props {
+  title: string;
+}
+const { title } = Astro.props;
+---
+
+<div class="card">
+  <h2>{title}</h2>
+  <div class="card-body">
+    <slot />  <!-- Child content goes here -->
+  </div>
+</div>
+```
+
+```astro
+<Card title="My Card">
+  <p>This paragraph goes inside the card body via the slot.</p>
+  <button>Click me</button>
+</Card>
+```
+
+### Named Slots
+
+```astro
+---
+// src/layouts/TwoColumn.astro
+---
+
+<div class="layout">
+  <aside>
+    <slot name="sidebar" />
+  </aside>
+  <main>
+    <slot />  <!-- Default slot -->
+  </main>
+  <footer>
+    <slot name="footer" />
+  </footer>
+</div>
+```
+
+```astro
+<TwoColumn>
+  <nav slot="sidebar">
+    <a href="/">Home</a>
+    <a href="/about">About</a>
+  </nav>
+
+  <!-- Default slot content (no slot attribute) -->
+  <article>
+    <h1>Main Content</h1>
+    <p>This goes into the default slot.</p>
+  </article>
+
+  <p slot="footer">Copyright 2024</p>
+</TwoColumn>
+```
+
+### Slot Fallback Content
+
+```astro
+<div class="widget">
+  <slot>
+    <!-- This renders if no content is passed to the slot -->
+    <p class="empty-state">No content provided.</p>
+  </slot>
+</div>
+```
+
+## client:* Directives — Interactive Islands
+
+By default, Astro renders all components to static HTML with zero JavaScript. Use `client:*` directives
+to hydrate specific components in the browser:
+
+<Tabs>
+  <TabItem label="client:load">
+    ```astro
+    ---
+    import SearchBar from './SearchBar.tsx';
+    ---
+
+    <!-- Hydrated immediately on page load -->
+    <!-- Use for: above-the-fold interactive elements that must work right away -->
+    <SearchBar client:load />
+    ```
+
+    Best for: navigation search, hero CTAs, critical interactive elements.
+  </TabItem>
+  <TabItem label="client:idle">
+    ```astro
+    ---
+    import NewsletterForm from './NewsletterForm.tsx';
+    ---
+
+    <!-- Hydrated when the browser's main thread is idle (requestIdleCallback) -->
+    <!-- Use for: secondary interactivity that doesn't need to work immediately -->
+    <NewsletterForm client:idle />
+    ```
+
+    Best for: forms, social share buttons, secondary widgets below the fold.
+  </TabItem>
+  <TabItem label="client:visible">
+    ```astro
+    ---
+    import HeavyChart from './HeavyChart.tsx';
+    ---
+
+    <!-- Hydrated when the component enters the viewport (IntersectionObserver) -->
+    <!-- Use for: below-the-fold interactive content -->
+    <HeavyChart client:visible />
+
+    <!-- Custom rootMargin threshold -->
+    <HeavyChart client:visible={{ rootMargin: '200px' }} />
+    ```
+
+    Best for: data visualizations, carousels, comment sections at the bottom of the page.
+  </TabItem>
+  <TabItem label="client:media">
+    ```astro
+    ---
+    import MobileMenu from './MobileMenu.tsx';
+    ---
+
+    <!-- Hydrated only when the CSS media query matches -->
+    <!-- Use for: mobile-only or desktop-only interactive components -->
+    <MobileMenu client:media="(max-width: 768px)" />
+    ```
+
+    Best for: hamburger menus, responsive interactive elements.
+  </TabItem>
+  <TabItem label="client:only">
+    ```astro
+    ---
+    import BrowserOnlyMap from './Map.tsx';
+    ---
+
+    <!-- Skips server rendering entirely — renders ONLY in the browser -->
+    <!-- Use for: components that cannot be server-rendered (e.g., use window/document) -->
+    <BrowserOnlyMap client:only="react" />
+    ```
+
+    Must specify the framework: `"react"`, `"vue"`, `"svelte"`, `"solid-js"`, `"preact"`.
+
+    Best for: browser API-dependent components (maps, canvas, localStorage-based UI).
+  </TabItem>
+</Tabs>
+
+:::caution[client:only Caveats]
+`client:only` components produce no HTML during the build, meaning search engines cannot see their content
+and there is no server-side HTML to display during load. Avoid for SEO-critical content. Use `client:load`
+instead when server rendering is possible.
+:::
+
+## React / Vue / Svelte Components in Astro
+
+After installing the relevant integration, you can import framework components directly:
+
+```astro
+---
+import ReactCounter from './Counter.tsx';        // React
+import VueDropdown from './Dropdown.vue';        // Vue
+import SvelteModal from './Modal.svelte';         // Svelte
+---
+
+<!-- All three on the same page — each is its own island -->
+<ReactCounter client:load initialCount={0} />
+<VueDropdown client:idle options={['A', 'B', 'C']} />
+<SvelteModal client:visible title="Confirm Action" />
+```
+
+### Passing Props to Framework Components
+
+```astro
+---
+import ReactDataTable from './DataTable.tsx';
+
+const rows = await db.query('SELECT * FROM users LIMIT 50');
+const columns = ['id', 'name', 'email', 'createdAt'];
+---
+
+<ReactDataTable
+  client:visible
+  rows={rows}
+  columns={columns}
+  onRowClick={(row) => console.log(row)}
+  sortable={true}
+/>
+```
+
+Props are serialized to JSON and passed to the client-side component. Only JSON-serializable values
+(strings, numbers, booleans, arrays, plain objects) can be passed as props to hydrated framework components.
+
+## Astro.self — Recursive Components
+
+```astro
+---
+// src/components/TreeNode.astro
+import { Astro } from 'astro';
+
+interface Props {
+  node: { name: string; children?: Props['node'][] };
+  depth?: number;
+}
+
+const { node, depth = 0 } = Astro.props;
+---
+
+<li style={`padding-left: ${depth * 1.5}rem`}>
+  {node.name}
+  {node.children && node.children.length > 0 && (
+    <ul>
+      {node.children.map(child => (
+        <Astro.self node={child} depth={depth + 1} />
+      ))}
+    </ul>
+  )}
+</li>
+```
+
+## set:html Directive
+
+Render raw HTML strings safely when the content comes from a trusted source:
+
+```astro
+---
+import { marked } from 'marked';
+
+const markdown = '## Hello\nThis is **bold** text.';
+const html = marked(markdown);
+---
+
+<!-- Renders the HTML string directly into the DOM -->
+<div set:html={html} />
+
+<!-- Use Fragment to avoid the wrapping div -->
+<Fragment set:html={html} />
+```
+
+:::caution[XSS Warning]
+Only use `set:html` with trusted content. Never pass unsanitized user input — use a library like
+`DOMPurify` to sanitize HTML before rendering it.
+:::
+
+## define:vars — CSS Variables from Frontmatter
+
+```astro
+---
+const theme = {
+  primaryColor: '#4f46e5',
+  fontSize: '1.25rem',
+  borderRadius: '12px',
+};
+---
+
+<div class="themed-box">
+  <p>Themed content</p>
+</div>
+
+<style define:vars={theme}>
+  .themed-box {
+    color: var(--primaryColor);
+    font-size: var(--fontSize);
+    border-radius: var(--borderRadius);
+    border: 2px solid var(--primaryColor);
+    padding: 1rem;
+  }
+</style>
+```
+
+## Scoped Styles vs Global Styles
+
+```astro
+<!-- Scoped styles (default): only affect THIS component's elements -->
+<style>
+  h1 { color: red; }     /* Only h1 inside THIS component */
+</style>
+
+<!-- Global styles: affect the entire page -->
+<style is:global>
+  body { margin: 0; }    /* Applies globally — use sparingly! */
+</style>
+
+<!-- Import an external CSS file globally -->
+<style is:global>
+  @import '../styles/reset.css';
+</style>
+```
+
+## class:list Directive
+
+Conditionally combine CSS class names:
+
+```astro
+---
+const { variant = 'primary', size = 'md', disabled = false, loading = false } = Astro.props;
+---
+
+<button
+  class:list={[
+    'btn',
+    `btn--${variant}`,    // Always added
+    `btn--${size}`,
+    {
+      'btn--disabled': disabled,    // Only if truthy
+      'btn--loading': loading,
+    },
+    disabled && 'cursor-not-allowed',  // Short-circuit
+  ]}
+  disabled={disabled}
+>
+  <slot />
+</button>
+```
+
+## Fragment
+
+Use `Fragment` (or the `<>...</>` shorthand) to group elements without adding wrapper DOM nodes:
+
+```astro
+---
+const items = ['One', 'Two', 'Three'];
+---
+
+<!-- Fragment avoids the extra wrapping div -->
+{items.map(item => (
+  <>
+    <dt>{item}</dt>
+    <dd>Description of {item}</dd>
+  </>
+))}
+
+<!-- Equivalent using Fragment component -->
+{items.map(item => (
+  <Fragment>
+    <dt>{item}</dt>
+    <dd>Description of {item}</dd>
+  </Fragment>
+))}
+```
+
+## TypeScript in Components
+
+```astro
+---
+// Full TypeScript support in frontmatter
+type Status = 'active' | 'inactive' | 'pending';
+
+interface User {
+  id: number;
+  name: string;
+  status: Status;
+}
+
+interface Props {
+  users: User[];
+  onSelect?: (user: User) => void;
+}
+
+const { users, onSelect } = Astro.props;
+
+function getStatusColor(status: Status): string {
+  const colors: Record<Status, string> = {
+    active: 'green',
+    inactive: 'gray',
+    pending: 'orange',
+  };
+  return colors[status];
+}
+---
+
+<ul>
+  {users.map(user => (
+    <li style={`color: ${getStatusColor(user.status)}`}>
+      {user.name} ({user.status})
+    </li>
+  ))}
+</ul>
+```

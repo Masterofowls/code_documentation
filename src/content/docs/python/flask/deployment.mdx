@@ -1,0 +1,674 @@
+---
+title: Deploying Flask Applications
+description: Production checklist, Gunicorn, Docker, nginx, PostgreSQL, WhiteNoise, Heroku, Railway, HTTPS, logging, and Sentry error monitoring for Flask.
+sidebar:
+  order: 7
+tags: [python, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Deploying Flask to production requires more than running `flask run`. This guide covers the full production stack: hardening configuration, running with Gunicorn, containerizing with Docker, setting up nginx as a reverse proxy, deploying to cloud platforms, and wiring up observability.
+
+## Production Checklist
+
+Before deploying, verify every item:
+
+- [ ] `DEBUG = False` and `TESTING = False`
+- [ ] `SECRET_KEY` loaded from environment variable (not hardcoded)
+- [ ] `DATABASE_URL` set to a real database (not SQLite)
+- [ ] All dependencies pinned in `requirements.txt`
+- [ ] `SESSION_COOKIE_SECURE = True` (requires HTTPS)
+- [ ] Static files served by WhiteNoise or nginx (not Flask's dev server)
+- [ ] Gunicorn (not the built-in server) running the app
+- [ ] Logging configured to write to stdout/file (not just console)
+- [ ] Error monitoring (Sentry) configured
+- [ ] Database migrations run (`flask db upgrade`)
+- [ ] Health check endpoint available
+
+## Environment Hardening
+
+```python
+# config.py
+import os
+from datetime import timedelta
+
+
+class ProductionConfig:
+    # ── Core ──────────────────────────────────────────────────────────────────
+    DEBUG = False
+    TESTING = False
+    SECRET_KEY = os.environ['SECRET_KEY']           # Fail loud if missing
+
+    # ── Database ──────────────────────────────────────────────────────────────
+    _db_url = os.environ['DATABASE_URL']
+    # Heroku uses postgres:// — SQLAlchemy requires postgresql://
+    SQLALCHEMY_DATABASE_URI = _db_url.replace('postgres://', 'postgresql://', 1)
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    SQLALCHEMY_POOL_SIZE = 10
+    SQLALCHEMY_MAX_OVERFLOW = 20
+    SQLALCHEMY_POOL_TIMEOUT = 30
+    SQLALCHEMY_POOL_RECYCLE = 300                   # Recycle connections every 5 min
+
+    # ── Sessions ──────────────────────────────────────────────────────────────
+    SESSION_COOKIE_SECURE = True
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = 'Lax'
+    PERMANENT_SESSION_LIFETIME = timedelta(days=30)
+
+    # ── Security headers (set via after_request or Flask-Talisman) ───────────
+    WTF_CSRF_ENABLED = True
+    WTF_CSRF_TIME_LIMIT = 3600
+
+    # ── Static files ──────────────────────────────────────────────────────────
+    SEND_FILE_MAX_AGE_DEFAULT = timedelta(hours=12)
+```
+
+Generate a secure secret key:
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+# a3f8c2d1e4b7a0f9c2e5d8b3a6f1c4e7d0b9a2f5c8e1d4b7a0f3c6e9d2b5
+```
+
+## wsgi.py — Production Entry Point
+
+```python
+# wsgi.py
+import os
+from app import create_app
+
+app = create_app(os.environ.get('FLASK_ENV', 'production'))
+
+if __name__ == '__main__':
+    app.run()
+```
+
+## Gunicorn
+
+Gunicorn is a production-grade WSGI HTTP server. Never use Flask's built-in server in production.
+
+```bash
+pip install gunicorn
+```
+
+```bash
+# Basic run
+gunicorn wsgi:app
+
+# With workers (recommended: 2-4 × CPU cores + 1)
+gunicorn wsgi:app --workers 4
+
+# With gevent (async workers — better for I/O-bound apps)
+pip install gevent
+gunicorn wsgi:app --workers 4 --worker-class gevent --worker-connections 1000
+
+# Full production command
+gunicorn wsgi:app \
+  --workers 4 \
+  --worker-class sync \
+  --bind 0.0.0.0:8000 \
+  --timeout 120 \
+  --keep-alive 5 \
+  --max-requests 1000 \
+  --max-requests-jitter 100 \
+  --log-level info \
+  --access-logfile - \
+  --error-logfile -
+```
+
+```
+[2024-01-15 10:00:00 +0000] [12345] [INFO] Starting gunicorn 21.2.0
+[2024-01-15 10:00:00 +0000] [12345] [INFO] Listening at: http://0.0.0.0:8000 (12345)
+[2024-01-15 10:00:00 +0000] [12345] [INFO] Using worker: sync
+[2024-01-15 10:00:00 +0000] [12346] [INFO] Booting worker with pid: 12346
+[2024-01-15 10:00:00 +0000] [12347] [INFO] Booting worker with pid: 12347
+[2024-01-15 10:00:00 +0000] [12348] [INFO] Booting worker with pid: 12348
+[2024-01-15 10:00:00 +0000] [12349] [INFO] Booting worker with pid: 12349
+```
+
+Create a `gunicorn.conf.py` to keep config out of the command line:
+
+```python
+# gunicorn.conf.py
+import multiprocessing
+
+bind = '0.0.0.0:8000'
+workers = multiprocessing.cpu_count() * 2 + 1
+worker_class = 'sync'
+timeout = 120
+keepalive = 5
+max_requests = 1000
+max_requests_jitter = 100
+loglevel = 'info'
+accesslog = '-'   # stdout
+errorlog = '-'    # stderr
+capture_output = True
+```
+
+```bash
+gunicorn -c gunicorn.conf.py wsgi:app
+```
+
+## WhiteNoise — Static Files
+
+WhiteNoise serves static files efficiently from Python, with gzip compression and cache headers, without requiring nginx for static content:
+
+```bash
+pip install whitenoise
+```
+
+```python
+# wsgi.py
+import os
+from whitenoise import WhiteNoise
+from app import create_app
+
+flask_app = create_app(os.environ.get('FLASK_ENV', 'production'))
+
+# Wrap with WhiteNoise
+app = WhiteNoise(
+    flask_app,
+    root='app/static/',    # Path to static files
+    prefix='static',       # URL prefix
+    max_age=31536000,      # Cache for 1 year (use hashed filenames)
+)
+```
+
+Or integrate as WSGI middleware in the factory:
+
+```python
+# app/__init__.py
+from whitenoise import WhiteNoise
+
+def create_app(config_name='default'):
+    app = Flask(__name__)
+    # ...
+
+    if not app.debug:
+        app.wsgi_app = WhiteNoise(app.wsgi_app, root='app/static/', prefix='static')
+
+    return app
+```
+
+## Dockerfile
+
+```dockerfile
+# Dockerfile
+FROM python:3.12-slim
+
+# Security: run as non-root user
+RUN addgroup --system app && adduser --system --group app
+
+WORKDIR /app
+
+# Install dependencies first (layer caching)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY . .
+
+# Change ownership to app user
+RUN chown -R app:app /app
+
+USER app
+
+# Expose port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+
+# Production command
+CMD ["gunicorn", "-c", "gunicorn.conf.py", "wsgi:app"]
+```
+
+Build and run:
+
+```bash
+docker build -t my-flask-app .
+docker run -p 8000:8000 \
+  -e SECRET_KEY=your-secret-key \
+  -e DATABASE_URL=postgresql://user:pass@host/db \
+  my-flask-app
+```
+
+## docker-compose.yml
+
+```yaml
+# docker-compose.yml
+version: '3.9'
+
+services:
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - FLASK_ENV=production
+      - SECRET_KEY=${SECRET_KEY}
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-myapp}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      - web
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+```
+
+```bash
+# Start all services
+docker compose up -d
+
+# Run migrations inside the running container
+docker compose exec web flask db upgrade
+
+# View logs
+docker compose logs -f web
+
+# Rebuild after code changes
+docker compose up -d --build
+```
+
+## nginx Reverse Proxy
+
+```nginx
+# nginx.conf
+upstream flask_app {
+    server web:8000;
+    keepalive 32;
+}
+
+server {
+    listen 80;
+    server_name example.com www.example.com;
+
+    # Redirect all HTTP to HTTPS
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name example.com www.example.com;
+
+    # SSL certificates (use Let's Encrypt)
+    ssl_certificate     /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+    ssl_session_cache   shared:SSL:10m;
+
+    # Security headers
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options    nosniff always;
+    add_header X-Frame-Options           DENY always;
+    add_header X-XSS-Protection          "1; mode=block" always;
+    add_header Referrer-Policy           "strict-origin-when-cross-origin" always;
+
+    # Static files served by nginx directly
+    location /static/ {
+        alias /app/static/;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+    }
+
+    # Proxy to Gunicorn
+    location / {
+        proxy_pass         http://flask_app;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+        proxy_connect_timeout 10s;
+        proxy_buffering    on;
+        client_max_body_size 20M;
+    }
+
+    # Health check (no auth, no logging)
+    location /health {
+        proxy_pass http://flask_app;
+        access_log off;
+    }
+}
+```
+
+:::tip[Let's Encrypt with Certbot]
+Use Certbot with the nginx plugin for free automatic SSL certificates:
+```bash
+certbot --nginx -d example.com -d www.example.com
+```
+Certbot handles renewal automatically via a cron job.
+:::
+
+## Heroku Deployment
+
+<Steps>
+1. Create required files
+
+   ```bash
+   # Procfile (no extension)
+   echo "web: gunicorn wsgi:app" > Procfile
+
+   # runtime.txt
+   echo "python-3.12.3" > runtime.txt
+   ```
+
+2. Install and log in to Heroku CLI
+
+   ```bash
+   # Install Heroku CLI, then:
+   heroku login
+   ```
+
+3. Create app and add PostgreSQL
+
+   ```bash
+   heroku create my-flask-app
+   heroku addons:create heroku-postgresql:essential-0
+   ```
+
+4. Set environment variables
+
+   ```bash
+   heroku config:set SECRET_KEY=$(python -c "import secrets; print(secrets.token_hex(32))")
+   heroku config:set FLASK_ENV=production
+
+   # DATABASE_URL is set automatically by the Postgres addon
+   heroku config
+   ```
+
+5. Deploy
+
+   ```bash
+   git push heroku main
+   ```
+
+   ```
+   remote: -----> Python app detected
+   remote: -----> Installing python-3.12.3
+   remote: -----> Installing pip 24.0
+   remote: -----> Installing requirements with pip
+   remote: -----> Discovering process types
+   remote:        Procfile declares types -> web
+   remote: -----> Compressing...
+   remote: -----> Launching...
+   remote:        Released v5
+   remote:        https://my-flask-app.herokuapp.com/ deployed to Heroku
+   ```
+
+6. Run database migrations
+
+   ```bash
+   heroku run flask db upgrade
+   ```
+
+7. Open the app
+
+   ```bash
+   heroku open
+   heroku logs --tail
+   ```
+</Steps>
+
+## Railway Deployment
+
+Railway is a simpler alternative with a generous free tier:
+
+<Steps>
+1. Push code to GitHub
+
+2. Create a new project at [railway.app](https://railway.app)
+
+3. Add a PostgreSQL database service
+
+4. Set environment variables in the Railway dashboard:
+   - `SECRET_KEY` — generate with `secrets.token_hex(32)`
+   - `FLASK_ENV` = `production`
+   - `DATABASE_URL` — Railway sets this automatically from the PostgreSQL service
+
+5. Add a `railway.toml` for build configuration:
+
+   ```toml
+   # railway.toml
+   [build]
+   builder = "NIXPACKS"
+
+   [deploy]
+   startCommand = "flask db upgrade && gunicorn wsgi:app"
+   healthcheckPath = "/health"
+   healthcheckTimeout = 300
+   restartPolicyType = "ON_FAILURE"
+   restartPolicyMaxRetries = 3
+   ```
+
+6. Deploy by pushing to GitHub — Railway auto-deploys on every push to `main`
+</Steps>
+
+## Logging
+
+Flask uses Python's standard `logging` module. Configure it for production:
+
+```python
+# app/__init__.py
+import logging
+import os
+from logging.handlers import RotatingFileHandler
+
+
+def configure_logging(app):
+    """Set up production logging."""
+
+    # Log level
+    log_level = logging.DEBUG if app.debug else logging.INFO
+    app.logger.setLevel(log_level)
+
+    # Stdout handler (for Docker / Heroku / Railway)
+    if not app.debug:
+        stream_handler = logging.StreamHandler()
+        stream_handler.setLevel(log_level)
+        formatter = logging.Formatter(
+            '%(asctime)s %(levelname)s %(name)s %(threadName)s : %(message)s'
+        )
+        stream_handler.setFormatter(formatter)
+        app.logger.addHandler(stream_handler)
+
+    # Rotating file handler (for traditional servers)
+    if not os.path.exists('logs'):
+        os.makedirs('logs')
+
+    file_handler = RotatingFileHandler(
+        'logs/app.log',
+        maxBytes=10 * 1024 * 1024,  # 10 MB
+        backupCount=10,
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+    ))
+    app.logger.addHandler(file_handler)
+    app.logger.info('Flask application starting up')
+```
+
+Usage in view functions:
+
+```python
+from flask import current_app
+
+@app.route('/users', methods=['POST'])
+def create_user():
+    try:
+        # ...
+        current_app.logger.info(f'User created: {user.username}')
+    except Exception as e:
+        current_app.logger.error(f'Failed to create user: {e}', exc_info=True)
+        return {'error': 'Internal server error'}, 500
+```
+
+## Sentry Error Monitoring
+
+Sentry captures exceptions in production and sends alerts with full context:
+
+```bash
+pip install sentry-sdk[flask]
+```
+
+```python
+# app/__init__.py
+import sentry_sdk
+from sentry_sdk.integrations.flask import FlaskIntegration
+from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
+
+
+def init_sentry(app):
+    dsn = app.config.get('SENTRY_DSN')
+    if not dsn:
+        return
+
+    sentry_sdk.init(
+        dsn=dsn,
+        integrations=[
+            FlaskIntegration(),
+            SqlalchemyIntegration(),
+        ],
+        environment=app.config.get('FLASK_ENV', 'production'),
+        traces_sample_rate=0.2,          # 20% of requests for performance tracing
+        profiles_sample_rate=0.1,         # 10% for profiling
+        send_default_pii=False,           # GDPR: don't send IP/user data by default
+        before_send=filter_errors,        # Optional: filter out certain errors
+    )
+
+
+def filter_errors(event, hint):
+    """Don't send 404 errors to Sentry — they're too noisy."""
+    if 'exc_info' in hint:
+        exc_type, exc_value, tb = hint['exc_info']
+        from werkzeug.exceptions import NotFound
+        if isinstance(exc_value, NotFound):
+            return None
+    return event
+```
+
+```ini
+# .env
+SENTRY_DSN=https://abc123@o123456.ingest.sentry.io/789012
+```
+
+Test Sentry is working:
+
+```bash
+curl https://my-flask-app.com/debug-sentry
+```
+
+```python
+@app.route('/debug-sentry')
+def trigger_error():
+    division_by_zero = 1 / 0  # This will be captured by Sentry
+```
+
+## Health Check Endpoint
+
+Every deployment target (Railway, Kubernetes, ECS) needs a health endpoint:
+
+```python
+# app/main/routes.py
+from flask import jsonify
+from app.extensions import db
+
+@main.route('/health')
+def health():
+    """Lightweight health check for load balancers and deployment platforms."""
+    try:
+        # Verify DB connectivity
+        db.session.execute(db.text('SELECT 1'))
+        db_status = 'ok'
+    except Exception as e:
+        db_status = f'error: {e}'
+
+    status = 'ok' if db_status == 'ok' else 'degraded'
+    http_code = 200 if status == 'ok' else 503
+
+    return jsonify({
+        'status': status,
+        'database': db_status,
+        'version': '1.0.0',
+    }), http_code
+```
+
+```bash
+curl https://my-flask-app.com/health
+```
+
+```json
+{
+  "status": "ok",
+  "database": "ok",
+  "version": "1.0.0"
+}
+```
+
+:::caution[Keep Health Checks Fast]
+The health endpoint is called every 10–30 seconds by load balancers. Keep it lightweight — a simple `SELECT 1` is fine. Never run expensive queries or business logic in a health check.
+:::
+
+## Performance Tips for Production
+
+```python
+# config.py — Production performance settings
+class ProductionConfig:
+    # Use connection pooling
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        'pool_pre_ping': True,        # Test connections before using
+        'pool_recycle': 300,          # Recycle every 5 minutes
+        'pool_size': 10,
+        'max_overflow': 20,
+    }
+
+    # Cache static file hashes
+    SEND_FILE_MAX_AGE_DEFAULT = 31536000  # 1 year
+
+    # Disable expensive Jinja2 features in production
+    TEMPLATES_AUTO_RELOAD = False
+```
+
+```bash
+# Use multiple Gunicorn workers
+# Formula: (2 × CPU cores) + 1
+gunicorn wsgi:app --workers 5 --worker-class sync --timeout 120
+
+# For WebSocket / SSE apps, use eventlet or gevent workers
+pip install eventlet
+gunicorn wsgi:app --workers 4 --worker-class eventlet
+```

@@ -1,0 +1,474 @@
+---
+title: Error Handling in JavaScript
+description: Complete guide to JavaScript error handling — built-in error types, throw, try/catch/finally, custom error classes, async error handling, unhandledRejection, window.onerror, and structured logging.
+sidebar:
+  order: 9
+tags: [javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Robust error handling separates production-quality code from prototypes. JavaScript provides a rich error system with distinct error types, stack traces, and mechanisms to handle both synchronous and asynchronous failures.
+
+## Built-in Error Types
+
+| Error Type | When It Occurs | Example |
+|-----------|---------------|---------|
+| `Error` | Generic base class | `new Error('something went wrong')` |
+| `TypeError` | Wrong type used | `null.property`, calling a non-function |
+| `ReferenceError` | Undeclared variable | `console.log(undeclaredVar)` |
+| `SyntaxError` | Invalid JS syntax | `JSON.parse('invalid')`, `eval('?')` |
+| `RangeError` | Value outside allowed range | `new Array(-1)`, infinite recursion |
+| `URIError` | Invalid URI encoding | `decodeURIComponent('%')` |
+| `EvalError` | (Legacy) `eval()` errors | Rarely thrown in modern JS |
+| `AggregateError` | Multiple errors at once | `Promise.any([])` rejects with this |
+
+```js
+// TypeError
+try {
+  null.toString();
+} catch (err) {
+  console.log(err instanceof TypeError); // output: true
+  console.log(err.name);                 // output: TypeError
+  console.log(err.message);             // output: Cannot read properties of null (reading 'toString')
+}
+
+// ReferenceError
+try {
+  console.log(undeclaredVariable);
+} catch (err) {
+  console.log(err instanceof ReferenceError); // output: true
+  console.log(err.message); // output: undeclaredVariable is not defined
+}
+
+// RangeError
+try {
+  new Array(-1);
+} catch (err) {
+  console.log(err instanceof RangeError); // output: true
+  console.log(err.message); // output: Invalid array length
+}
+
+// SyntaxError (from JSON.parse)
+try {
+  JSON.parse('{invalid json}');
+} catch (err) {
+  console.log(err instanceof SyntaxError); // output: true
+  console.log(err.message); // output: Expected property name or '}' in JSON at position 1
+}
+```
+
+## The Error Object
+
+```js
+const err = new Error('Something went wrong');
+
+console.log(err.message);  // output: Something went wrong
+console.log(err.name);     // output: Error
+console.log(err.stack);
+// output: Error: Something went wrong
+//     at Object.<anonymous> (app.js:1:13)
+//     at Module._compile (node:internal/modules/cjs/loader:1376:14)
+//     ...
+
+// Error.cause (ES2022) — chain errors to preserve root cause
+async function fetchUserData(id) {
+  try {
+    const res = await fetch(`/api/users/${id}`);
+    return await res.json();
+  } catch (cause) {
+    throw new Error(`Failed to fetch user ${id}`, { cause });
+  }
+}
+
+// Inspecting cause chain
+try {
+  await fetchUserData(42);
+} catch (err) {
+  console.log(err.message);       // output: Failed to fetch user 42
+  console.log(err.cause.message); // output: network error / parse error / etc.
+}
+```
+
+## `throw` Statement
+
+You can throw any value, but throwing `Error` instances is strongly preferred because they capture stack traces.
+
+```js
+// Throw an Error object (always do this)
+function divide(a, b) {
+  if (b === 0) throw new Error('Division by zero');
+  if (typeof a !== 'number' || typeof b !== 'number') {
+    throw new TypeError(`Expected numbers, got ${typeof a} and ${typeof b}`);
+  }
+  return a / b;
+}
+
+// Rethrowing — handle what you can, rethrow what you can't
+function processFile(path) {
+  try {
+    return readAndParse(path);
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      throw new Error(`Config file not found: ${path}`, { cause: err });
+    }
+    throw err; // unknown error — rethrow unmodified
+  }
+}
+```
+
+## try / catch / finally
+
+```js
+function riskyOperation(input) {
+  try {
+    // Code that might throw
+    const parsed = JSON.parse(input);         // might throw SyntaxError
+    const value = parsed.data.value;          // might throw TypeError
+    return processValue(value);               // might throw custom errors
+  } catch (err) {
+    // Runs if ANY error is thrown in try
+    console.error('Operation failed:', err.message);
+    return null; // provide a fallback
+  } finally {
+    // ALWAYS runs — whether try succeeded, catch ran, or return was called
+    cleanup(); // close files, release locks, etc.
+  }
+}
+
+// Multiple error types with different handling
+function parseAndValidate(data) {
+  try {
+    const parsed = JSON.parse(data);
+    return validateSchema(parsed);
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      throw new Error('Invalid JSON format', { cause: err });
+    }
+    if (err instanceof ValidationError) {
+      throw err; // rethrow as-is
+    }
+    // Unexpected error — log and rethrow
+    console.error('Unexpected error during parsing:', err);
+    throw err;
+  }
+}
+```
+
+### finally with return
+
+```js
+function example() {
+  try {
+    return 'from try';
+  } finally {
+    // This runs BEFORE the return, but does NOT override it
+    console.log('finally runs'); // output: finally runs
+    // return 'from finally'; // would override try's return if uncommented
+  }
+}
+console.log(example()); // output: finally runs  then  from try
+```
+
+## Custom Error Classes
+
+```js
+// Base application error
+class AppError extends Error {
+  constructor(message, options = {}) {
+    super(message, { cause: options.cause });
+    this.name = this.constructor.name; // 'AppError', 'ValidationError', etc.
+    this.code = options.code ?? 'UNKNOWN_ERROR';
+    this.statusCode = options.statusCode ?? 500;
+    this.isOperational = options.isOperational ?? true; // vs programming errors
+
+    // Maintain proper prototype chain for instanceof checks
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, this.constructor); // V8/Node.js only
+    }
+  }
+
+  toJSON() {
+    return {
+      name: this.name,
+      message: this.message,
+      code: this.code,
+      statusCode: this.statusCode,
+    };
+  }
+}
+
+class ValidationError extends AppError {
+  constructor(message, fields = {}) {
+    super(message, { code: 'VALIDATION_ERROR', statusCode: 400 });
+    this.fields = fields; // per-field validation messages
+  }
+}
+
+class NotFoundError extends AppError {
+  constructor(resource, id) {
+    super(`${resource} with id '${id}' not found`, {
+      code: 'NOT_FOUND',
+      statusCode: 404,
+    });
+    this.resource = resource;
+    this.resourceId = id;
+  }
+}
+
+class AuthorizationError extends AppError {
+  constructor(action) {
+    super(`Not authorized to perform: ${action}`, {
+      code: 'FORBIDDEN',
+      statusCode: 403,
+    });
+  }
+}
+
+class NetworkError extends AppError {
+  constructor(message, cause) {
+    super(message, { code: 'NETWORK_ERROR', statusCode: 503, cause });
+    this.isOperational = false; // may indicate infrastructure issue
+  }
+}
+
+// Usage
+function getUser(id) {
+  const user = db.findUser(id);
+  if (!user) throw new NotFoundError('User', id);
+  return user;
+}
+
+function updateUser(requesterId, targetId, data) {
+  if (requesterId !== targetId && !isAdmin(requesterId)) {
+    throw new AuthorizationError(`update user ${targetId}`);
+  }
+
+  const errors = validateUserData(data);
+  if (Object.keys(errors).length > 0) {
+    throw new ValidationError('Invalid user data', errors);
+  }
+
+  return db.updateUser(targetId, data);
+}
+
+// Check in catch blocks
+try {
+  updateUser(1, 2, { name: '' });
+} catch (err) {
+  if (err instanceof ValidationError) {
+    console.log('Fields:', err.fields);
+    // output: { name: 'Name cannot be empty' }
+  } else if (err instanceof AuthorizationError) {
+    console.log('Status:', err.statusCode); // output: 403
+  } else {
+    throw err; // unknown error — escalate
+  }
+}
+```
+
+## Error Handling in Async Code
+
+```js
+// async/await with try/catch
+async function fetchUserProfile(userId) {
+  try {
+    const user = await getUser(userId);       // may throw NotFoundError
+    const posts = await getUserPosts(userId); // may throw NetworkError
+    return { user, posts };
+  } catch (err) {
+    if (err instanceof NotFoundError) {
+      return { user: null, posts: [] }; // graceful fallback
+    }
+    throw err; // propagate other errors
+  }
+}
+
+// Promise .catch chaining
+const result = fetchUserProfile(42)
+  .then(data => processData(data))
+  .catch(err => {
+    logger.error({ err, userId: 42 }, 'Failed to load profile');
+    return { user: null, posts: [], error: err.message };
+  });
+
+// Catch in parallel operations
+async function loadDashboard(userId) {
+  const results = await Promise.allSettled([
+    fetchUserProfile(userId),
+    fetchUserStats(userId),
+    fetchNotifications(userId),
+  ]);
+
+  return results.map((result, i) => {
+    if (result.status === 'fulfilled') return result.value;
+    console.error(`Dashboard section ${i} failed:`, result.reason.message);
+    return null; // gracefully handle per-section failures
+  });
+}
+```
+
+## Global Error Handlers
+
+### unhandledRejection (Node.js)
+
+```js
+// Node.js — catch unhandled Promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Promise Rejection:');
+  console.error('Promise:', promise);
+  console.error('Reason:', reason);
+
+  // Log to monitoring service
+  errorMonitor.capture(reason instanceof Error ? reason : new Error(String(reason)));
+
+  // In production, crash the process — a zombie process is worse than a clean restart
+  // process.exit(1);
+});
+
+// uncaughtException — catch synchronous errors that escape all catch blocks
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+  errorMonitor.capture(err);
+  process.exit(1); // always exit — state may be corrupted
+});
+```
+
+### window.onerror (Browser)
+
+```js
+// Browser — catch uncaught errors
+window.onerror = function(message, source, lineno, colno, error) {
+  console.error({ message, source, lineno, colno, stack: error?.stack });
+  sendToErrorTracking({ message, source, lineno, colno, error });
+  return true; // prevent default browser error handling
+};
+
+// Catch unhandled Promise rejections in browser
+window.addEventListener('unhandledrejection', (event) => {
+  console.error('Unhandled rejection:', event.reason);
+  sendToErrorTracking({ error: event.reason, type: 'unhandledRejection' });
+  event.preventDefault(); // suppress browser console error
+});
+
+// Catch network/resource errors (images, scripts, stylesheets)
+window.addEventListener('error', (event) => {
+  if (event.target !== window) {
+    // Resource load error
+    console.error('Resource failed to load:', event.target.src ?? event.target.href);
+  }
+}, true); // capture phase to catch resource errors
+```
+
+## Structured Error Logging
+
+```js
+// Consistent error logging structure
+function logError(err, context = {}) {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    level: 'error',
+    message: err.message,
+    name: err.name,
+    code: err.code,
+    statusCode: err.statusCode,
+    stack: err.stack,
+    context,
+    cause: err.cause
+      ? { message: err.cause.message, stack: err.cause.stack }
+      : undefined,
+  };
+
+  // Remove undefined fields
+  const clean = JSON.parse(JSON.stringify(entry));
+
+  if (process.env.NODE_ENV === 'production') {
+    process.stdout.write(JSON.stringify(clean) + '\n'); // structured JSON for log aggregators
+  } else {
+    console.error(entry);
+  }
+}
+
+// Express-style error handling middleware
+function errorMiddleware(err, req, res, next) {
+  logError(err, {
+    method: req.method,
+    url: req.url,
+    userId: req.user?.id,
+    requestId: req.headers['x-request-id'],
+  });
+
+  const statusCode = err.statusCode ?? 500;
+  const isOperational = err.isOperational ?? false;
+
+  res.status(statusCode).json({
+    error: {
+      code: err.code ?? 'INTERNAL_ERROR',
+      message: isOperational ? err.message : 'An unexpected error occurred',
+      // Never expose stack traces or internal details in production
+      ...(process.env.NODE_ENV !== 'production' && { stack: err.stack }),
+    },
+  });
+}
+```
+
+## Error Boundaries (Concept)
+
+While true Error Boundaries are a React feature, the pattern of catching and containing errors locally applies universally:
+
+```js
+// Function-level error boundary
+function withErrorBoundary(fn, fallback) {
+  return function(...args) {
+    try {
+      const result = fn.apply(this, args);
+      // Handle Promise-returning functions
+      if (result && typeof result.then === 'function') {
+        return result.catch(err => {
+          console.error(`Error in ${fn.name}:`, err);
+          return typeof fallback === 'function' ? fallback(err, ...args) : fallback;
+        });
+      }
+      return result;
+    } catch (err) {
+      console.error(`Error in ${fn.name}:`, err);
+      return typeof fallback === 'function' ? fallback(err, ...args) : fallback;
+    }
+  };
+}
+
+const safeParseJSON = withErrorBoundary(JSON.parse, null);
+console.log(safeParseJSON('{"valid": true}')); // output: { valid: true }
+console.log(safeParseJSON('invalid json'));      // output: null (no uncaught error)
+
+// Module-level error boundary with retry
+async function withRetry(fn, options = {}) {
+  const { retries = 3, delay = 1000, backoff = 2, shouldRetry = () => true } = options;
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const isLast = attempt === retries;
+      if (isLast || !shouldRetry(err)) throw err;
+
+      const waitTime = delay * backoff ** (attempt - 1);
+      console.warn(`Attempt ${attempt} failed, retrying in ${waitTime}ms...`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+  }
+}
+
+const data = await withRetry(
+  () => fetch('/api/data').then(r => r.json()),
+  {
+    retries: 3,
+    delay: 500,
+    shouldRetry: (err) => err.statusCode >= 500 || err.name === 'NetworkError',
+  }
+);
+```
+
+:::tip[Operational vs Programming Errors]
+**Operational errors** are expected runtime failures (network timeout, invalid user input, file not found) — handle them gracefully. **Programming errors** are bugs in the code (null dereference, type mismatch) — log them, alert on-call, and in Node.js, restart the process.
+:::

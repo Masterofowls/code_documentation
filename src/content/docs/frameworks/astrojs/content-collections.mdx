@@ -1,0 +1,449 @@
+---
+title: Content Collections
+description: Type-safe content management in Astro using Content Collections with Zod schema validation, querying, and the Content Layer API.
+sidebar:
+  order: 5
+tags: [javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Content Collections
+
+Content Collections are Astro's built-in solution for managing structured content (Markdown, MDX, YAML, JSON)
+with full TypeScript type safety. They validate your frontmatter at build time and provide typed query APIs.
+
+## Setting Up Collections
+
+All content collections live in `src/content/`. Each subdirectory is a collection:
+
+```
+src/content/
+├── config.ts          # Collection schemas (required)
+├── blog/
+│   ├── first-post.md
+│   ├── second-post.mdx
+│   └── draft-post.md
+├── authors/
+│   ├── alice.yaml
+│   └── bob.json
+└── docs/
+    └── getting-started.mdx
+```
+
+## defineCollection and Zod Schema
+
+Define your collection schemas in `src/content/config.ts`:
+
+```typescript
+// src/content/config.ts
+import { defineCollection, z, reference } from 'astro:content';
+
+const blogCollection = defineCollection({
+  type: 'content',  // Markdown / MDX files
+  schema: ({ image }) =>
+    z.object({
+      title: z.string().min(1).max(100),
+      description: z.string().min(10).max(300),
+      publishedAt: z.coerce.date(),
+      updatedAt: z.coerce.date().optional(),
+      author: reference('authors'),   // Reference to another collection
+      tags: z.array(z.string()).default([]),
+      draft: z.boolean().default(false),
+      featured: z.boolean().default(false),
+      // image() validates the path and returns optimized image metadata
+      cover: image().optional(),
+      readingTime: z.number().int().positive().optional(),
+    }),
+});
+
+const authorsCollection = defineCollection({
+  type: 'data',  // YAML / JSON files (no body)
+  schema: z.object({
+    name: z.string(),
+    email: z.string().email(),
+    bio: z.string().optional(),
+    avatar: z.string().url().optional(),
+    social: z
+      .object({
+        twitter: z.string().optional(),
+        github: z.string().optional(),
+        linkedin: z.string().optional(),
+      })
+      .optional(),
+  }),
+});
+
+const docsCollection = defineCollection({
+  type: 'content',
+  schema: z.object({
+    title: z.string(),
+    description: z.string(),
+    sidebar: z
+      .object({
+        order: z.number().optional(),
+        label: z.string().optional(),
+        hidden: z.boolean().default(false),
+      })
+      .optional(),
+    tags: z.array(z.string()).default([]),
+  }),
+});
+
+export const collections = {
+  blog: blogCollection,
+  authors: authorsCollection,
+  docs: docsCollection,
+};
+```
+
+:::tip[Automatic Validation]
+Astro validates every content file against its schema at build time. If any file has invalid or missing
+frontmatter, the build fails with a clear error message. This prevents broken production deployments
+caused by typos or missing required fields.
+:::
+
+## Content File Format
+
+### Markdown with Frontmatter
+
+```markdown
+---
+title: Getting Started with Astro
+description: Learn how to build blazing-fast websites with Astro's island architecture.
+publishedAt: 2024-01-15
+author: alice
+tags: [astro, web, tutorial]
+featured: true
+cover: ./images/astro-cover.png
+---
+
+# Getting Started with Astro
+
+Welcome to this tutorial on building websites with Astro...
+
+## What is Astro?
+
+Astro is a modern web framework...
+```
+
+### Data Files (YAML)
+
+```yaml
+# src/content/authors/alice.yaml
+name: Alice Johnson
+email: alice@example.com
+bio: Software engineer and technical writer based in San Francisco.
+avatar: https://avatars.example.com/alice
+social:
+  twitter: alicejohnson
+  github: alice-codes
+  linkedin: alice-johnson
+```
+
+### Data Files (JSON)
+
+```json
+// src/content/authors/bob.json
+{
+  "name": "Bob Smith",
+  "email": "bob@example.com",
+  "bio": "Full-stack developer and open source contributor.",
+  "social": {
+    "github": "bob-dev"
+  }
+}
+```
+
+## Querying Collections
+
+### getCollection()
+
+```typescript
+// src/pages/blog/index.astro
+---
+import { getCollection } from 'astro:content';
+import type { CollectionEntry } from 'astro:content';
+
+// Get all blog posts
+const allPosts = await getCollection('blog');
+
+// Filter out drafts in production
+const publishedPosts = await getCollection('blog', ({ data }) => {
+  return import.meta.env.PROD ? !data.draft : true;
+});
+
+// Sort by date (newest first)
+const sortedPosts = publishedPosts.sort(
+  (a, b) => b.data.publishedAt.getTime() - a.data.publishedAt.getTime()
+);
+
+// Filter by tag
+const tag = Astro.url.searchParams.get('tag');
+const filteredPosts = tag
+  ? publishedPosts.filter(post => post.data.tags.includes(tag))
+  : publishedPosts;
+
+// Get featured posts
+const featuredPosts = publishedPosts
+  .filter(post => post.data.featured)
+  .slice(0, 3);
+---
+
+<ul>
+  {sortedPosts.map(post => (
+    <li>
+      <a href={`/blog/${post.slug}`}>{post.data.title}</a>
+      <time>{post.data.publishedAt.toLocaleDateString()}</time>
+    </li>
+  ))}
+</ul>
+```
+
+### getEntry()
+
+```typescript
+---
+import { getEntry, getEntries } from 'astro:content';
+
+// Get a specific entry by collection and slug
+const post = await getEntry('blog', 'first-post');
+if (!post) throw new Error('Post not found');
+
+// Get an entry using a reference field
+const author = await getEntry(post.data.author);
+
+// Get multiple entries by reference
+const relatedPosts = await getEntries(post.data.relatedPosts ?? []);
+---
+
+<h1>{post.data.title}</h1>
+<p>By {author.data.name}</p>
+```
+
+### render()
+
+Convert a content entry's body to an Astro `Content` component:
+
+```astro
+---
+// src/pages/blog/[slug].astro
+import { getCollection, getEntry } from 'astro:content';
+import Layout from '../../layouts/BlogLayout.astro';
+
+export async function getStaticPaths() {
+  const posts = await getCollection('blog', ({ data }) => !data.draft);
+  return posts.map(post => ({
+    params: { slug: post.slug },
+    props: { post },
+  }));
+}
+
+const { post } = Astro.props;
+const author = await getEntry(post.data.author);
+
+// render() returns the Content component and headings
+const { Content, headings, remarkPluginFrontmatter } = await post.render();
+---
+
+<Layout title={post.data.title} description={post.data.description}>
+  <article>
+    <header>
+      <h1>{post.data.title}</h1>
+      <p>By {author.data.name} · {post.data.publishedAt.toLocaleDateString()}</p>
+    </header>
+
+    <!-- Render the Markdown/MDX content -->
+    <Content />
+
+    <nav class="toc">
+      <h2>Table of Contents</h2>
+      <ul>
+        {headings.map(h => (
+          <li style={`padding-left: ${(h.depth - 2) * 1}rem`}>
+            <a href={`#${h.slug}`}>{h.text}</a>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  </article>
+</Layout>
+```
+
+## CollectionEntry Type
+
+Every collection entry follows this structure:
+
+```typescript
+interface CollectionEntry<C extends keyof Collections> {
+  id: string;           // File name without extension
+  slug: string;         // URL-safe version of id
+  body: string;         // Raw content (Markdown/MDX)
+  collection: C;        // Collection name
+  data: InferEntrySchema<C>;  // Validated frontmatter (typed!)
+
+  render(): Promise<{
+    Content: AstroComponentFactory;
+    headings: MarkdownHeading[];
+    remarkPluginFrontmatter: Record<string, any>;
+  }>;
+}
+```
+
+## Reference Fields
+
+Link entries between collections using `reference()`:
+
+```typescript
+// src/content/config.ts
+import { defineCollection, z, reference } from 'astro:content';
+
+const blog = defineCollection({
+  type: 'content',
+  schema: z.object({
+    title: z.string(),
+    author: reference('authors'),           // Single reference
+    relatedPosts: z.array(reference('blog')).optional(), // Array of references
+    category: reference('categories'),
+  }),
+});
+```
+
+```markdown
+---
+title: My Blog Post
+author: alice          # Must match a file in src/content/authors/
+relatedPosts:
+  - second-post        # Slug of another blog post
+  - third-post
+---
+```
+
+## Type-Safe Frontmatter in Pages
+
+```typescript
+// src/pages/tags/[tag].astro
+import { getCollection } from 'astro:content';
+import type { CollectionEntry } from 'astro:content';
+
+export async function getStaticPaths() {
+  const posts = await getCollection('blog');
+
+  // Collect all unique tags
+  const allTags = [...new Set(posts.flatMap(p => p.data.tags))];
+
+  return allTags.map(tag => ({
+    params: { tag },
+    props: {
+      posts: posts.filter(p => p.data.tags.includes(tag)),
+    },
+  }));
+}
+
+interface Props {
+  posts: CollectionEntry<'blog'>[];
+}
+
+const { tag } = Astro.params;
+const { posts } = Astro.props;
+```
+
+## image() Schema Helper
+
+Use the `image()` schema helper for frontmatter image paths — Astro will optimize them automatically:
+
+```typescript
+import { defineCollection, z } from 'astro:content';
+
+const blog = defineCollection({
+  schema: ({ image }) =>
+    z.object({
+      title: z.string(),
+      cover: image(),                 // Required optimized image
+      thumbnail: image().optional(),  // Optional optimized image
+    }),
+});
+```
+
+```astro
+---
+import { Image } from 'astro:assets';
+const { post } = Astro.props;
+---
+
+<!-- Fully optimized with correct dimensions (no layout shift) -->
+<Image src={post.data.cover} alt={post.data.title} />
+```
+
+## RSS Feed with Content Collections
+
+```typescript
+// src/pages/rss.xml.ts
+import rss from '@astrojs/rss';
+import { getCollection } from 'astro:content';
+import type { APIRoute } from 'astro';
+
+export const GET: APIRoute = async (context) => {
+  const posts = await getCollection('blog', ({ data }) => !data.draft);
+  const sorted = posts.sort(
+    (a, b) => b.data.publishedAt.getTime() - a.data.publishedAt.getTime()
+  );
+
+  return rss({
+    title: 'My Blog',
+    description: 'Articles about web development',
+    site: context.site!,
+    items: sorted.map(post => ({
+      title: post.data.title,
+      pubDate: post.data.publishedAt,
+      description: post.data.description,
+      link: `/blog/${post.slug}/`,
+    })),
+    customData: '<language>en-us</language>',
+  });
+};
+```
+
+## Content Layer API (Astro 5)
+
+Astro 5 introduced the Content Layer API for loading content from any source, not just local files:
+
+```typescript
+// src/content/config.ts
+import { defineCollection, z } from 'astro:content';
+import { glob, file } from 'astro/loaders';
+
+const blog = defineCollection({
+  // Use the built-in glob loader for local files
+  loader: glob({ pattern: '**/*.{md,mdx}', base: './src/content/blog' }),
+  schema: z.object({
+    title: z.string(),
+    publishedAt: z.coerce.date(),
+  }),
+});
+
+const products = defineCollection({
+  // Load from a remote API
+  loader: async () => {
+    const res = await fetch('https://api.example.com/products');
+    const data = await res.json();
+    return data.map((item: any) => ({
+      id: String(item.id),
+      ...item,
+    }));
+  },
+  schema: z.object({
+    name: z.string(),
+    price: z.number(),
+    inStock: z.boolean(),
+  }),
+});
+
+export const collections = { blog, products };
+```
+
+:::tip[Content Layer vs Classic Collections]
+The Content Layer API (Astro 5+) is more powerful and flexible than the classic collections API.
+It supports loading from remote APIs, databases, CMSes, and any other data source. For local
+files, both approaches work well — the new API just adds more flexibility.
+:::

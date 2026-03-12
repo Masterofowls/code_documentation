@@ -1,0 +1,395 @@
+---
+title: Getting Started with Tauri
+description: Install prerequisites, scaffold a Tauri 2 app with React and Vite, understand the project structure, and write your first Rust command.
+sidebar:
+  order: 2
+tags: [rust, javascript, desktop]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+This guide walks through creating a Tauri 2 application from scratch. You'll install prerequisites, scaffold the project, understand the file structure, and write a Rust command callable from TypeScript.
+
+## Prerequisites
+
+<Steps>
+
+1. **Install Rust** (includes `cargo` package manager)
+
+   ```bash
+   # Windows (via rustup)
+   winget install Rustlang.Rustup
+   # Or visit https://rustup.rs and run the installer
+
+   # macOS / Linux
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   ```
+
+   After installing, open a new terminal and verify:
+
+   ```bash
+   rustc --version   # rustc 1.79.0 or later
+   cargo --version   # cargo 1.79.0 or later
+   ```
+
+2. **Install system dependencies** (Linux only)
+
+   ```bash
+   # Ubuntu / Debian
+   sudo apt update && sudo apt install -y \
+     libwebkit2gtk-4.1-dev \
+     build-essential \
+     curl \
+     wget \
+     file \
+     libssl-dev \
+     libayatana-appindicator3-dev \
+     librsvg2-dev
+
+   # Fedora
+   sudo dnf install -y \
+     webkit2gtk4.1-devel \
+     openssl-devel \
+     curl \
+     wget \
+     libappindicator-gtk3-devel \
+     librsvg2-devel
+   ```
+
+3. **Verify Node.js** (18+)
+
+   ```bash
+   node --version   # v18.0.0 or later
+   npm --version
+   ```
+
+4. **Install Tauri CLI** (optional — `npm create` works without it)
+
+   ```bash
+   npm install --global @tauri-apps/cli@latest
+   # or
+   cargo install tauri-cli
+   ```
+
+</Steps>
+
+:::tip[Windows: Install Visual Studio Build Tools]
+On Windows, Rust requires the MSVC linker. Install **Visual Studio Build Tools 2022** and select the **"Desktop development with C++"** workload. This provides `link.exe` which Cargo needs to compile Rust.
+:::
+
+## Create a New Project
+
+```bash
+npm create tauri-app@latest my-tauri-app
+```
+
+The interactive wizard will ask:
+
+```
+✔ Project name: my-tauri-app
+✔ Identifier: com.yourcompany.mytauriapp
+✔ Choose which language to use for your frontend: TypeScript / JavaScript
+✔ Choose your package manager: npm
+✔ Choose your UI template: React
+✔ Choose your UI flavor: TypeScript
+```
+
+:::tip[Recommended Stack]
+**React + Vite + TypeScript** is the most widely documented Tauri frontend stack. Svelte and SolidJS are also excellent choices due to their small bundle size. Choose whatever framework your team knows best — Tauri's Rust core is entirely frontend-agnostic.
+:::
+
+## Project Structure
+
+```
+my-tauri-app/
+├── src/                          # Frontend source (React/Vue/etc.)
+│   ├── App.tsx
+│   ├── main.tsx
+│   └── assets/
+│
+├── src-tauri/                    # Rust backend
+│   ├── Cargo.toml                # Rust dependencies and crate config
+│   ├── Cargo.lock                # Locked dependency versions
+│   ├── tauri.conf.json           # Tauri configuration
+│   ├── capabilities/             # Permission capability files
+│   │   └── default.json
+│   ├── icons/                    # App icons (auto-generated)
+│   └── src/
+│       ├── main.rs               # Rust entry point
+│       └── lib.rs                # App builder and command registration
+│
+├── index.html                    # HTML entry point for frontend
+├── package.json
+├── tsconfig.json
+└── vite.config.ts
+```
+
+### `src-tauri/src/lib.rs` — App Builder
+
+```rust
+// src-tauri/src/lib.rs
+use tauri::Manager;
+
+// Custom commands are defined here (or in separate modules)
+#[tauri::command]
+fn greet(name: &str) -> String {
+    format!("Hello, {}! You've been greeted from Rust!", name)
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .invoke_handler(tauri::generate_handler![greet])
+        .setup(|app| {
+            #[cfg(debug_assertions)]
+            {
+                let window = app.get_webview_window("main").unwrap();
+                window.open_devtools();
+            }
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+```
+
+### `src-tauri/src/main.rs` — Entry Point
+
+```rust
+// src-tauri/src/main.rs
+// Prevents additional console window on Windows in release builds
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+fn main() {
+    my_tauri_app_lib::run();
+}
+```
+
+### `src-tauri/Cargo.toml`
+
+```toml
+[package]
+name = "my-tauri-app"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "my_tauri_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
+```
+
+## `tauri.conf.json` Overview
+
+```json
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "MyTauriApp",
+  "version": "0.1.0",
+  "identifier": "com.yourcompany.mytauriapp",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "My Tauri App",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self', img-src 'self' asset: https://asset.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
+```
+
+## Development Workflow
+
+### Start Dev Server
+
+```bash
+npm run tauri dev
+```
+
+This command:
+1. Runs `npm run dev` to start the Vite dev server (frontend)
+2. Compiles your Rust code with `cargo build`
+3. Launches the Tauri window pointing to the Vite dev server URL
+4. Watches Rust source files and recompiles on changes
+
+Frontend changes (HTML/CSS/JS) hot-reload instantly via Vite HMR. Rust changes require a recompile (~5–30 seconds).
+
+### Build for Production
+
+```bash
+npm run tauri build
+```
+
+This:
+1. Runs `npm run build` to produce a static frontend bundle
+2. Compiles Rust in release mode (`--release` flag)
+3. Bundles frontend into the binary
+4. Produces platform-native installers in `src-tauri/target/release/bundle/`
+
+## Your First Rust Command
+
+<Steps>
+
+1. **Define the command in `lib.rs`**
+
+   ```rust
+   use serde::{Deserialize, Serialize};
+
+   #[derive(Serialize, Deserialize)]
+   pub struct FileStats {
+       pub path: String,
+       pub size: u64,
+       pub is_file: bool,
+   }
+
+   #[tauri::command]
+   pub async fn get_file_stats(path: String) -> Result<FileStats, String> {
+       let metadata = tokio::fs::metadata(&path)
+           .await
+           .map_err(|e| e.to_string())?;
+
+       Ok(FileStats {
+           path: path.clone(),
+           size: metadata.len(),
+           is_file: metadata.is_file(),
+       })
+   }
+   ```
+
+2. **Register in the invoke handler**
+
+   ```rust
+   .invoke_handler(tauri::generate_handler![greet, get_file_stats])
+   ```
+
+3. **Call from TypeScript**
+
+   ```typescript
+   import { invoke } from '@tauri-apps/api/core';
+
+   interface FileStats {
+     path: string;
+     size: number;
+     is_file: boolean;
+   }
+
+   const stats = await invoke<FileStats>('get_file_stats', {
+     path: '/Users/username/document.txt',
+   });
+
+   console.log(`File size: ${stats.size} bytes`);
+   ```
+
+4. **Grant the necessary capability** (`src-tauri/capabilities/default.json`)
+
+   ```json
+   {
+     "$schema": "../gen/schemas/desktop-schema.json",
+     "identifier": "default",
+     "description": "Default capabilities",
+     "windows": ["main"],
+     "permissions": [
+       "core:default",
+       "shell:allow-open"
+     ]
+   }
+   ```
+
+</Steps>
+
+:::caution[Function Names: Rust to JS Conversion]
+Tauri automatically converts Rust `snake_case` function names to JavaScript `camelCase`:
+- Rust: `get_file_stats` → JavaScript: `get_file_stats` (kept as-is in `invoke`)
+
+Actually in Tauri 2, function names are passed as-is with underscores. Use `get_file_stats` in your `invoke` call, not `getFileStats`. Verify in the Tauri docs for your version.
+:::
+
+## TypeScript `invoke` Setup
+
+Install the Tauri API package:
+
+```bash
+npm install @tauri-apps/api
+```
+
+```typescript
+// src/lib/tauri.ts — typed wrappers for all commands
+import { invoke } from '@tauri-apps/api/core';
+
+export async function greet(name: string): Promise<string> {
+  return invoke<string>('greet', { name });
+}
+
+export async function getFileStats(path: string): Promise<{
+  path: string;
+  size: number;
+  is_file: boolean;
+}> {
+  return invoke('get_file_stats', { path });
+}
+```
+
+```typescript
+// src/App.tsx
+import { useState } from 'react';
+import { greet } from './lib/tauri';
+
+function App() {
+  const [message, setMessage] = useState('');
+
+  const handleGreet = async () => {
+    const result = await greet('World');
+    setMessage(result);
+  };
+
+  return (
+    <div>
+      <button onClick={handleGreet}>Greet from Rust</button>
+      {message && <p>{message}</p>}
+    </div>
+  );
+}
+```

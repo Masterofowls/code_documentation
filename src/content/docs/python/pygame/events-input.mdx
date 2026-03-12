@@ -1,0 +1,426 @@
+---
+title: Events & Input in Pygame
+description: Handle keyboard, mouse, joystick, and custom events. Master the event loop, held-key polling, and input filtering techniques.
+sidebar:
+  order: 4
+tags: [python, gamedev]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Pygame's input system is driven by an **event queue**. Every frame you drain the queue with `pygame.event.get()` and respond to events. For held-key or held-button state you poll snapshots with `pygame.key.get_pressed()` and `pygame.mouse.get_pressed()`.
+
+## The Event Loop
+
+```python
+for event in pygame.event.get():
+    if event.type == pygame.QUIT:
+        running = False
+```
+
+`pygame.event.get()` returns a list of all events that arrived since the last call, then clears the queue. Events are processed in the order they arrived. If you never call `event.get()` (or `event.pump()`), the OS event queue fills up and the window stops responding.
+
+:::caution[Don't Skip event.get()]
+Never omit `pygame.event.get()` (or `pygame.event.pump()`) from the game loop, even in purely keyboard-driven games. Without it, the window manager's events (resize, minimize, close) are never processed and the window appears frozen.
+:::
+
+## The QUIT Event
+
+```python
+for event in pygame.event.get():
+    if event.type == pygame.QUIT:
+        # User clicked the X button or pressed Alt+F4
+        pygame.quit()
+        sys.exit()
+```
+
+You can also listen for `pygame.KEYDOWN` with `K_ESCAPE` as an additional exit path.
+
+## Keyboard Events
+
+### KEYDOWN and KEYUP
+
+```python
+for event in pygame.event.get():
+    if event.type == pygame.KEYDOWN:
+        print(f"Key pressed:  scancode={event.scancode}, key={event.key}, unicode='{event.unicode}'")
+
+        if event.key == pygame.K_ESCAPE:
+            running = False
+
+        if event.key == pygame.K_f:
+            # Toggle fullscreen
+            pygame.display.toggle_fullscreen()
+
+        if event.key == pygame.K_RETURN and (event.mod & pygame.KMOD_ALT):
+            # Alt+Enter
+            pygame.display.toggle_fullscreen()
+
+    if event.type == pygame.KEYUP:
+        if event.key == pygame.K_SPACE:
+            print("Space released")
+```
+
+### Event Attributes
+
+| Attribute | Type | Description |
+|---|---|---|
+| `event.key` | `int` | Virtual key constant (`pygame.K_*`) |
+| `event.scancode` | `int` | Physical key position (layout-independent) |
+| `event.unicode` | `str` | Printable character produced (may be empty) |
+| `event.mod` | `int` | Modifier bitmask (`KMOD_SHIFT`, `KMOD_CTRL`, `KMOD_ALT`) |
+
+### Common Key Constants
+
+```python
+# Arrow keys
+pygame.K_LEFT, pygame.K_RIGHT, pygame.K_UP, pygame.K_DOWN
+
+# WASD
+pygame.K_w, pygame.K_a, pygame.K_s, pygame.K_d
+
+# Special keys
+pygame.K_SPACE, pygame.K_RETURN, pygame.K_ESCAPE, pygame.K_TAB
+pygame.K_BACKSPACE, pygame.K_DELETE
+
+# Function keys
+pygame.K_F1, pygame.K_F2, ..., pygame.K_F12
+
+# Modifiers
+pygame.KMOD_SHIFT, pygame.KMOD_CTRL, pygame.KMOD_ALT, pygame.KMOD_META
+
+# Number row and numpad
+pygame.K_0 .. pygame.K_9
+pygame.K_KP0 .. pygame.K_KP9
+```
+
+### Checking Modifier Keys
+
+```python
+if event.type == pygame.KEYDOWN:
+    if event.key == pygame.K_z and (event.mod & pygame.KMOD_CTRL):
+        undo()
+    if event.key == pygame.K_s and (event.mod & pygame.KMOD_CTRL):
+        if event.mod & pygame.KMOD_SHIFT:
+            save_as()
+        else:
+            save()
+```
+
+### Keyboard Repeat
+
+By default, holding a key generates a single `KEYDOWN` event. Enable auto-repeat for text input or menu navigation:
+
+```python
+# Enable key repeat: delay (ms before first repeat), interval (ms between repeats)
+pygame.key.set_repeat(400, 50)
+
+# Disable key repeat
+pygame.key.set_repeat(0, 0)
+```
+
+### Polling Held Keys (Continuous Movement)
+
+For smooth, frame-by-frame player movement use `pygame.key.get_pressed()` — it returns a snapshot of the *current* keyboard state, not individual events:
+
+```python
+keys = pygame.key.get_pressed()
+
+speed = 4
+if keys[pygame.K_LEFT]  or keys[pygame.K_a]: player_x -= speed
+if keys[pygame.K_RIGHT] or keys[pygame.K_d]: player_x += speed
+if keys[pygame.K_UP]    or keys[pygame.K_w]: player_y -= speed
+if keys[pygame.K_DOWN]  or keys[pygame.K_s]: player_y += speed
+
+# Diagonal speed normalization
+moving = (keys[pygame.K_LEFT] or keys[pygame.K_RIGHT],
+          keys[pygame.K_UP]   or keys[pygame.K_DOWN])
+if all(moving):
+    speed = speed * 0.7071  # 1/√2
+```
+
+:::tip[Event vs Poll]
+Use **events** (`KEYDOWN`/`KEYUP`) for discrete actions — jump, shoot, open menu. Use **polling** (`key.get_pressed()`) for continuous actions — moving, aiming.
+:::
+
+## Mouse Events
+
+### Mouse Button Events
+
+```python
+for event in pygame.event.get():
+    if event.type == pygame.MOUSEBUTTONDOWN:
+        print(f"Mouse button {event.button} pressed at {event.pos}")
+        if event.button == 1:   # Left click
+            fire_bullet(event.pos)
+        if event.button == 3:   # Right click
+            open_context_menu(event.pos)
+        if event.button == 4:   # Scroll up
+            zoom_in()
+        if event.button == 5:   # Scroll down
+            zoom_out()
+
+    if event.type == pygame.MOUSEBUTTONUP:
+        if event.button == 1:
+            release_drag()
+
+    if event.type == pygame.MOUSEMOTION:
+        # event.pos     — current (x, y)
+        # event.rel     — (dx, dy) since last motion event
+        # event.buttons — tuple of held button states (left, middle, right)
+        if event.buttons[0]:  # Dragging with left button
+            drag_object(event.rel)
+```
+
+### Mouse Button Constants
+
+| `event.button` | Meaning |
+|---|---|
+| `1` | Left button |
+| `2` | Middle button (wheel click) |
+| `3` | Right button |
+| `4` | Scroll wheel up |
+| `5` | Scroll wheel down |
+| `6` | Side button back (not universal) |
+| `7` | Side button forward (not universal) |
+
+### Polling Mouse State
+
+```python
+# Current cursor position
+mx, my = pygame.mouse.get_pos()
+
+# Current button state: (left, middle, right)
+buttons = pygame.mouse.get_pressed()
+if buttons[0]:  # Left held
+    draw_line_to(mx, my)
+
+# Relative movement since last call (useful for FPS-style look)
+dx, dy = pygame.mouse.get_rel()
+camera_yaw   += dx * SENSITIVITY
+camera_pitch += dy * SENSITIVITY
+```
+
+### Cursor Control
+
+```python
+# Show / hide cursor
+pygame.mouse.set_visible(True)
+pygame.mouse.set_visible(False)
+
+# Warp cursor to position
+pygame.mouse.set_pos((400, 300))
+
+# Capture mouse (constrain to window + hide cursor) — for FPS games
+pygame.event.set_grab(True)
+pygame.mouse.set_visible(False)
+
+# Release mouse capture
+pygame.event.set_grab(False)
+pygame.mouse.set_visible(True)
+
+# Custom cursor from a Surface (Pygame CE / 2.0+)
+cursor_img = pygame.image.load("cursor.png").convert_alpha()
+cursor = pygame.cursors.Cursor((0, 0), cursor_img)  # hotspot at top-left
+pygame.mouse.set_cursor(cursor)
+
+# System cursors
+pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_HAND)
+pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_CROSSHAIR)
+```
+
+## Joystick / Gamepad Input
+
+<Steps>
+
+1. **Initialize and enumerate joysticks**
+
+   ```python
+   pygame.joystick.init()
+   joysticks = [pygame.joystick.Joystick(i)
+                for i in range(pygame.joystick.get_count())]
+   for js in joysticks:
+       js.init()
+       print(f"Joystick: {js.get_name()}, axes={js.get_numaxes()}")
+   ```
+
+2. **Handle joystick events**
+
+   ```python
+   for event in pygame.event.get():
+       if event.type == pygame.JOYBUTTONDOWN:
+           print(f"Joy {event.joy}: button {event.button} pressed")
+       if event.type == pygame.JOYBUTTONUP:
+           print(f"Joy {event.joy}: button {event.button} released")
+       if event.type == pygame.JOYAXISMOTION:
+           # event.joy, event.axis, event.value (-1.0 to 1.0)
+           if abs(event.value) > 0.1:  # dead zone
+               print(f"Axis {event.axis}: {event.value:.2f}")
+       if event.type == pygame.JOYHATMOTION:
+           # event.value = (x, y) where each is -1, 0, or 1
+           print(f"Hat: {event.value}")
+       if event.type == pygame.JOYDEVICEADDED:
+           js = pygame.joystick.Joystick(event.device_index)
+           js.init()
+       if event.type == pygame.JOYDEVICEREMOVED:
+           print(f"Joystick {event.instance_id} disconnected")
+   ```
+
+3. **Poll axes directly**
+
+   ```python
+   if joysticks:
+       js = joysticks[0]
+       left_x  = js.get_axis(0)   # Left stick horizontal
+       left_y  = js.get_axis(1)   # Left stick vertical
+       right_x = js.get_axis(2)   # Right stick horizontal
+       right_y = js.get_axis(3)   # Right stick vertical
+
+       DEAD_ZONE = 0.15
+       if abs(left_x) > DEAD_ZONE:
+           player.vx = left_x * PLAYER_SPEED
+   ```
+
+</Steps>
+
+## Custom Events (USEREVENT)
+
+You can define and post your own events to decouple game systems:
+
+```python
+# Define event types (add offsets to USEREVENT to avoid clashes)
+ENEMY_DIED  = pygame.USEREVENT + 1
+LEVEL_UP    = pygame.USEREVENT + 2
+SPAWN_WAVE  = pygame.USEREVENT + 3
+
+# Post a custom event
+pygame.event.post(pygame.event.Event(ENEMY_DIED, {"score": 100, "pos": (200, 300)}))
+
+# Handle it in the event loop
+for event in pygame.event.get():
+    if event.type == ENEMY_DIED:
+        score += event.score
+        spawn_explosion(event.pos)
+    if event.type == LEVEL_UP:
+        transition_to_next_level()
+```
+
+### Timed Events with `pygame.time.set_timer`
+
+```python
+# Fire SPAWN_WAVE every 3 seconds (3000 ms)
+pygame.time.set_timer(SPAWN_WAVE, 3000)
+
+# Fire only once
+pygame.time.set_timer(SPAWN_WAVE, 5000, loops=1)
+
+# Cancel the timer
+pygame.time.set_timer(SPAWN_WAVE, 0)
+
+# Handle in the event loop as usual:
+for event in pygame.event.get():
+    if event.type == SPAWN_WAVE:
+        spawn_enemy_wave()
+```
+
+:::tip[Timers vs Game Loop Counters]
+For game-critical timing (e.g., bullet cooldown), use frame counters in your update logic rather than `set_timer`. Timers fire based on real time, which can desync from game-time if the game is paused.
+:::
+
+## Event Filtering
+
+```python
+# Block events you don't care about (improves performance in event-heavy games)
+pygame.event.set_blocked(pygame.MOUSEMOTION)
+
+# Allow a blocked event type again
+pygame.event.set_allowed(pygame.MOUSEMOTION)
+
+# Allow only specific event types (blocks everything else)
+pygame.event.set_allowed([pygame.QUIT, pygame.KEYDOWN, pygame.KEYUP])
+
+# Peek at events without removing them
+events = pygame.event.peek(pygame.KEYDOWN)  # Returns True if any KEYDOWN queued
+
+# Get a single event type from queue
+event = pygame.event.wait()           # Block until any event arrives
+event = pygame.event.poll()           # Return NOEVENT if queue is empty (non-blocking)
+
+# Clear all events of a type
+pygame.event.clear(pygame.MOUSEMOTION)
+```
+
+## Complete Input Demo
+
+```python
+import pygame
+import sys
+
+pygame.init()
+screen = pygame.display.set_mode((800, 600))
+pygame.display.set_caption("Input Demo — WASD to move, click to place dot")
+clock  = pygame.time.Clock()
+font   = pygame.font.SysFont("monospace", 16)
+
+PLAYER_SPEED = 4
+player_rect  = pygame.Rect(380, 280, 40, 40)
+dots         = []
+last_key     = ""
+
+running = True
+while running:
+    # ── Events ──────────────────────────────────────────────
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+
+        if event.type == pygame.KEYDOWN:
+            last_key = pygame.key.name(event.key)
+            if event.key == pygame.K_ESCAPE:
+                running = False
+            if event.key == pygame.K_c:
+                dots.clear()
+
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            if event.button == 1:
+                dots.append(event.pos)
+            if event.button == 3:
+                dots = [d for d in dots
+                        if (d[0]-event.pos[0])**2 + (d[1]-event.pos[1])**2 > 400]
+
+    # ── Held keys: continuous movement ──────────────────────
+    keys = pygame.key.get_pressed()
+    if keys[pygame.K_LEFT]  or keys[pygame.K_a]: player_rect.x -= PLAYER_SPEED
+    if keys[pygame.K_RIGHT] or keys[pygame.K_d]: player_rect.x += PLAYER_SPEED
+    if keys[pygame.K_UP]    or keys[pygame.K_w]: player_rect.y -= PLAYER_SPEED
+    if keys[pygame.K_DOWN]  or keys[pygame.K_s]: player_rect.y += PLAYER_SPEED
+    player_rect.clamp_ip(screen.get_rect())
+
+    # ── Draw ────────────────────────────────────────────────
+    screen.fill((20, 20, 35))
+
+    for dot in dots:
+        pygame.draw.circle(screen, (255, 150, 50), dot, 6)
+
+    pygame.draw.rect(screen, (80, 180, 255), player_rect)
+
+    mx, my  = pygame.mouse.get_pos()
+    mb      = pygame.mouse.get_pressed()
+    hud = [
+        f"Player:    ({player_rect.x}, {player_rect.y})",
+        f"Mouse:     ({mx}, {my})",
+        f"Buttons:   L={mb[0]} M={mb[1]} R={mb[2]}",
+        f"Last key:  {last_key}",
+        f"Dots:      {len(dots)}  (click=add, R-click=erase, C=clear)",
+        f"FPS:       {clock.get_fps():.0f}",
+    ]
+    for i, line in enumerate(hud):
+        surf = font.render(line, True, (180, 200, 220))
+        screen.blit(surf, (10, 10 + i * 22))
+
+    pygame.display.flip()
+    clock.tick(60)
+
+pygame.quit()
+sys.exit()
+```

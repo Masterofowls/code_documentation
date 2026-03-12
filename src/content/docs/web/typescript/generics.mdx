@@ -1,0 +1,515 @@
+---
+title: Generics
+description: Master TypeScript generics — generic functions, constraints, conditional types, mapped types, utility types, template literals, and recursive types.
+sidebar:
+  order: 4
+tags: [typescript, javascript]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Generics allow you to write **reusable, type-safe code** that works with multiple types while preserving type information through the whole chain. They are the foundation of TypeScript's utility type library and most advanced patterns.
+
+## Generic Functions
+
+Without generics, you must choose between losing type information (`any`) or duplicating code (separate functions per type):
+
+```ts
+// Without generics — loses type information
+function identity(value: any): any {
+  return value;
+}
+const result = identity('hello'); // type: any (lost!)
+
+// With generics — preserves type information
+function identity<T>(value: T): T {
+  return value;
+}
+
+const s = identity('hello');  // type: string (inferred)
+const n = identity(42);       // type: number (inferred)
+const b = identity(true);     // type: boolean (inferred)
+const explicit = identity<string>('hello'); // explicit type argument
+
+// Generic array utilities
+function first<T>(arr: T[]): T | undefined {
+  return arr[0];
+}
+
+function last<T>(arr: T[]): T | undefined {
+  return arr[arr.length - 1];
+}
+
+function zip<A, B>(a: A[], b: B[]): [A, B][] {
+  return a.map((item, i) => [item, b[i]!] as [A, B]);
+}
+
+const zipped = zip([1, 2, 3], ['a', 'b', 'c']);
+// type: [number, string][]
+// value: [[1, 'a'], [2, 'b'], [3, 'c']]
+```
+
+---
+
+## Generic Interfaces
+
+```ts
+// Generic container interface
+interface Box<T> {
+  value: T;
+  map<U>(fn: (value: T) => U): Box<U>;
+}
+
+// Generic response envelope
+interface ApiResponse<T> {
+  data: T;
+  status: number;
+  message: string;
+  timestamp: number;
+}
+
+// Usage with explicit type arguments
+type UserResponse = ApiResponse<{ id: number; name: string }>;
+type ListResponse<T> = ApiResponse<{ items: T[]; total: number }>;
+
+// Generic repository interface
+interface Repository<T, Id = number> {
+  findById(id: Id): Promise<T | null>;
+  findAll(): Promise<T[]>;
+  save(entity: T): Promise<T>;
+  delete(id: Id): Promise<void>;
+}
+
+interface User {
+  id: number;
+  name: string;
+  email: string;
+}
+
+// Concrete implementation satisfies the generic interface
+class UserRepository implements Repository<User> {
+  async findById(id: number): Promise<User | null> {
+    // implementation...
+    return null;
+  }
+  async findAll(): Promise<User[]> { return []; }
+  async save(user: User): Promise<User> { return user; }
+  async delete(id: number): Promise<void> {}
+}
+```
+
+---
+
+## Generic Classes
+
+```ts
+// Generic stack
+class Stack<T> {
+  private items: T[] = [];
+
+  push(item: T): void {
+    this.items.push(item);
+  }
+
+  pop(): T | undefined {
+    return this.items.pop();
+  }
+
+  peek(): T | undefined {
+    return this.items[this.items.length - 1];
+  }
+
+  get size(): number {
+    return this.items.length;
+  }
+
+  isEmpty(): boolean {
+    return this.items.length === 0;
+  }
+}
+
+const numStack = new Stack<number>();
+numStack.push(1);
+numStack.push(2);
+numStack.push(3);
+console.log(numStack.pop()); // 3
+
+const strStack = new Stack<string>();
+strStack.push('a');
+strStack.push('b');
+// strStack.push(42); // Error: Argument of type 'number' is not
+//                    //        assignable to parameter of type 'string'.
+```
+
+---
+
+## Generic Constraints (`extends`)
+
+Use `extends` to constrain which types are valid type arguments:
+
+```ts
+// Constrain to objects with a length property
+function longest<T extends { length: number }>(a: T, b: T): T {
+  return a.length >= b.length ? a : b;
+}
+
+longest('hello', 'hi');        // OK — string has .length
+longest([1, 2, 3], [1, 2]);   // OK — arrays have .length
+longest(10, 20);               // Error: Number doesn't have .length
+
+// Constrain to an object with specific keys
+function getProperty<T, K extends keyof T>(obj: T, key: K): T[K] {
+  return obj[key];
+}
+
+const user = { name: 'Alice', age: 30, role: 'admin' as const };
+const name = getProperty(user, 'name'); // type: string
+const age = getProperty(user, 'age');   // type: number
+// getProperty(user, 'email');          // Error: 'email' not in keyof user
+
+// Constrain to constructors
+function create<T>(Constructor: new () => T): T {
+  return new Constructor();
+}
+
+class Dog { bark() { return 'Woof!'; } }
+const dog = create(Dog); // type: Dog
+```
+
+---
+
+## `keyof` and `typeof`
+
+```ts
+// keyof — produces a union of an object type's keys
+interface Config {
+  host: string;
+  port: number;
+  ssl: boolean;
+}
+
+type ConfigKey = keyof Config; // "host" | "port" | "ssl"
+
+// Useful for safe object access
+function pick<T, K extends keyof T>(obj: T, keys: K[]): Pick<T, K> {
+  const result = {} as Pick<T, K>;
+  for (const key of keys) {
+    result[key] = obj[key];
+  }
+  return result;
+}
+
+const config: Config = { host: 'localhost', port: 5432, ssl: true };
+const subset = pick(config, ['host', 'port']); // type: Pick<Config, "host" | "port">
+
+// typeof — get the type of a value (in type position)
+const defaultConfig = { host: 'localhost', port: 5432, ssl: false };
+type DefaultConfig = typeof defaultConfig;
+// type: { host: string; port: number; ssl: boolean; }
+
+// keyof typeof for runtime objects
+const roles = { admin: 1, user: 2, guest: 3 } as const;
+type Role = keyof typeof roles; // "admin" | "user" | "guest"
+type RoleLevel = (typeof roles)[Role]; // 1 | 2 | 3
+```
+
+---
+
+## Conditional Types
+
+Conditional types choose a type based on a condition: `T extends U ? X : Y`
+
+```ts
+// Basic conditional type
+type IsString<T> = T extends string ? true : false;
+
+type A = IsString<string>;  // true
+type B = IsString<number>;  // false
+type C = IsString<'hello'>; // true — "hello" extends string
+
+// Non-nullable utility
+type NonNullable<T> = T extends null | undefined ? never : T;
+
+type D = NonNullable<string | null | undefined>; // string
+
+// Flatten arrays
+type Flatten<T> = T extends Array<infer Item> ? Item : T;
+
+type E = Flatten<string[]>;    // string
+type F = Flatten<number[][]>;  // number[]
+type G = Flatten<boolean>;     // boolean (not an array, passthrough)
+
+// Extract promise value
+type Awaited<T> =
+  T extends PromiseLike<infer U>
+    ? Awaited<U>   // recursive — handle nested promises
+    : T;
+
+type H = Awaited<Promise<string>>;         // string
+type I = Awaited<Promise<Promise<number>>>; // number
+```
+
+### The `infer` Keyword
+
+`infer` captures a type within a conditional type's `extends` clause:
+
+```ts
+// Infer function return type
+type ReturnType<T extends (...args: any) => any> =
+  T extends (...args: any) => infer R ? R : never;
+
+function fetchUser(): Promise<{ id: number; name: string }> {
+  return Promise.resolve({ id: 1, name: 'Alice' });
+}
+
+type FetchResult = ReturnType<typeof fetchUser>;
+// type: Promise<{ id: number; name: string }>
+
+// Infer function parameters
+type Parameters<T extends (...args: any) => any> =
+  T extends (...args: infer P) => any ? P : never;
+
+function createUser(name: string, age: number, role: string): void {}
+type CreateParams = Parameters<typeof createUser>;
+// type: [name: string, age: number, role: string]
+
+// Infer first argument
+type FirstArg<T extends (...args: any) => any> =
+  T extends (first: infer F, ...rest: any[]) => any ? F : never;
+
+type First = FirstArg<typeof createUser>; // string
+
+// Infer instance type from constructor
+type InstanceType<T extends new (...args: any) => any> =
+  T extends new (...args: any) => infer R ? R : never;
+
+class HttpClient { get(url: string) { return fetch(url); } }
+type Client = InstanceType<typeof HttpClient>; // HttpClient
+```
+
+---
+
+## Distributive Conditional Types
+
+When a conditional type's input type is a **naked type parameter** (not wrapped), it **distributes** over union types:
+
+```ts
+type ToArray<T> = T extends unknown ? T[] : never;
+
+// Distributive (T is naked):
+type DA = ToArray<string | number>;
+// Equivalent to: ToArray<string> | ToArray<number>
+// Result: string[] | number[]
+
+// Non-distributive (T is wrapped in a tuple):
+type ToArrayND<T> = [T] extends [unknown] ? T[] : never;
+type NDA = ToArrayND<string | number>; // (string | number)[]
+
+// Practical example: Filter union members
+type Filter<T, U> = T extends U ? T : never;
+
+type Strings = Filter<string | number | boolean, string>;
+// "string | number | boolean" distributes:
+//   Filter<string, string>  → string
+//   Filter<number, string>  → never
+//   Filter<boolean, string> → never
+// Result: string
+
+type Exclude<T, U> = T extends U ? never : T;
+type Include = Exclude<'a' | 'b' | 'c', 'a' | 'b'>; // 'c'
+```
+
+---
+
+## Mapped Types
+
+Mapped types transform every property of an existing type:
+
+```ts
+// Basic mapped type syntax
+type Readonly<T> = {
+  readonly [K in keyof T]: T[K];
+};
+
+type Partial<T> = {
+  [K in keyof T]?: T[K];
+};
+
+type Required<T> = {
+  [K in keyof T]-?: T[K]; // -? removes optionality
+};
+
+// Remove readonly
+type Mutable<T> = {
+  -readonly [K in keyof T]: T[K]; // -readonly removes readonly
+};
+
+// Real-world example
+interface User {
+  readonly id: number;
+  name: string;
+  email: string;
+  age?: number;
+}
+
+type PartialUser = Partial<User>;
+// { id?: number; name?: string; email?: string; age?: number }
+
+type RequiredUser = Required<User>;
+// { id: number; name: string; email: string; age: number }
+
+type ReadonlyUser = Readonly<User>;
+// { readonly id: number; readonly name: string; readonly email: string; readonly age?: number }
+```
+
+### Built-in Utility Types
+
+```ts
+// Record<K, V> — build an object type from keys and value type
+type Permissions = Record<'read' | 'write' | 'admin', boolean>;
+const perms: Permissions = { read: true, write: false, admin: false };
+
+// Pick<T, K> — select a subset of properties
+type UserPreview = Pick<User, 'id' | 'name'>;
+// { readonly id: number; name: string }
+
+// Omit<T, K> — exclude a subset of properties
+type UserWithoutId = Omit<User, 'id'>;
+// { name: string; email: string; age?: number }
+
+// Exclude<T, U> — remove union members assignable to U
+type NotString = Exclude<string | number | boolean, string>;
+// number | boolean
+
+// Extract<T, U> — keep only union members assignable to U
+type OnlyString = Extract<string | number | boolean, string | boolean>;
+// string | boolean
+
+// NonNullable<T> — remove null and undefined
+type Clean = NonNullable<string | null | undefined | number>;
+// string | number
+
+// ReturnType<T> — extract function return type
+async function getUsers(): Promise<User[]> { return []; }
+type UsersResult = ReturnType<typeof getUsers>; // Promise<User[]>
+type AwaitedUsers = Awaited<ReturnType<typeof getUsers>>; // User[]
+
+// Parameters<T> — extract function parameter types as tuple
+function createUser(name: string, age: number): User {
+  return { id: Date.now(), name, email: '', age };
+}
+type CreateParams = Parameters<typeof createUser>; // [name: string, age: number]
+
+// ConstructorParameters<T> — extract constructor parameter types
+class Socket {
+  constructor(host: string, port: number) {}
+}
+type SocketParams = ConstructorParameters<typeof Socket>; // [host: string, port: number]
+```
+
+---
+
+## Template Literal Types
+
+Template literal types combine string literals using template syntax:
+
+```ts
+type EventName<T extends string> = `${T}Changed`;
+type PropEventSource<T> = {
+  on<K extends keyof T & string>(
+    event: EventName<K>,
+    handler: (value: T[K]) => void
+  ): void;
+};
+
+interface User {
+  name: string;
+  age: number;
+}
+
+declare function makeWatchedObject<T>(obj: T): T & PropEventSource<T>;
+const watched = makeWatchedObject<User>({ name: 'Alice', age: 30 });
+watched.on('nameChanged', (v) => console.log(v)); // v: string
+watched.on('ageChanged', (v) => console.log(v));  // v: number
+// watched.on('emailChanged', ...); // Error: not a valid event
+
+// String manipulation template types
+type Greeting = `Hello, ${string}!`;
+const g: Greeting = 'Hello, TypeScript!'; // OK
+// const bad: Greeting = 'Hi there!';     // Error
+
+// Capitalization utility types
+type Capitalize<S extends string> = intrinsic;  // built-in
+type Uncapitalize<S extends string> = intrinsic;
+type Uppercase<S extends string> = intrinsic;
+type Lowercase<S extends string> = intrinsic;
+
+type CSSProperty = 'margin' | 'padding' | 'border';
+type CSSPropertyWithDirection =
+  `${CSSProperty}-${'top' | 'right' | 'bottom' | 'left'}`;
+// "margin-top" | "margin-right" | "margin-bottom" | ... (12 members)
+```
+
+---
+
+## Recursive Types
+
+Types can reference themselves, enabling tree structures, JSON, and deeply nested schemas:
+
+```ts
+// JSON value type
+type JSONPrimitive = string | number | boolean | null;
+type JSONValue = JSONPrimitive | JSONObject | JSONArray;
+type JSONObject = { [key: string]: JSONValue };
+type JSONArray = JSONValue[];
+
+const data: JSONValue = {
+  name: 'Alice',
+  scores: [95, 87, 92],
+  metadata: {
+    active: true,
+    tags: ['admin', 'user'],
+    nested: { deep: { deeper: null } },
+  },
+};
+
+// Recursive tree structure
+type TreeNode<T> = {
+  value: T;
+  children: TreeNode<T>[];
+};
+
+const tree: TreeNode<string> = {
+  value: 'root',
+  children: [
+    {
+      value: 'child1',
+      children: [
+        { value: 'grandchild1', children: [] },
+        { value: 'grandchild2', children: [] },
+      ],
+    },
+    { value: 'child2', children: [] },
+  ],
+};
+
+// Deep readonly (recursive mapped type)
+type DeepReadonly<T> =
+  T extends (infer U)[]
+    ? ReadonlyArray<DeepReadonly<U>>
+    : T extends object
+    ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
+    : T;
+
+interface AppState {
+  users: { id: number; name: string; settings: { theme: string } }[];
+  config: { apiUrl: string; features: { darkMode: boolean } };
+}
+
+type ImmutableState = DeepReadonly<AppState>;
+// Every nested property is readonly — cannot be mutated
+```
+
+:::tip[Recursive Type Depth]
+TypeScript has a recursion limit to prevent infinite loops. For very deep recursion (e.g., deeply nested paths), you may hit "Type instantiation is excessively deep" errors. Use the `--noUncheckedIndexedAccess` flag and consider limiting depth with explicit `Depth extends number` counters.
+:::

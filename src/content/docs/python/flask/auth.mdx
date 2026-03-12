@@ -1,0 +1,512 @@
+---
+title: Authentication with Flask-Login
+description: Implement user authentication with Flask-Login, secure password hashing with Werkzeug, login/logout flows, remember me, and protected routes.
+sidebar:
+  order: 6
+tags: [python, backend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Flask doesn't include authentication, but **Flask-Login** provides all the session management infrastructure you need. Combined with Werkzeug's password hashing, you get a solid, battle-tested authentication layer without reaching for an external auth provider.
+
+## Installation
+
+```bash
+pip install flask-login flask-wtf
+# Optional: Flask-Bcrypt for more control over bcrypt cost factor
+pip install flask-bcrypt
+```
+
+## How Flask-Login Works
+
+Flask-Login manages the user session. It stores the user's ID in a signed cookie and provides:
+
+- `login_user(user)` — log a user in (write to session)
+- `logout_user()` — log a user out (clear session)
+- `current_user` — proxy to the logged-in user (or `AnonymousUser`)
+- `@login_required` — decorator to protect views
+- `user_loader` — callback that loads a user from the DB given their session ID
+
+## Setting Up LoginManager
+
+```python
+# app/extensions.py
+from flask_login import LoginManager
+
+login_manager = LoginManager()
+login_manager.login_view = 'auth.login'          # Redirect here if unauthenticated
+login_manager.login_message = 'Please log in to access this page.'
+login_manager.login_message_category = 'warning'
+login_manager.session_protection = 'strong'      # Invalidate session on IP/UA change
+```
+
+```python
+# app/__init__.py
+from app.extensions import login_manager
+
+def create_app(config_name='default'):
+    app = Flask(__name__)
+    # ...
+    login_manager.init_app(app)
+    return app
+```
+
+## User Model with UserMixin
+
+`UserMixin` provides default implementations of the four properties Flask-Login requires:
+- `is_authenticated` — True if the user has valid credentials
+- `is_active` — True if the account is active (not banned/deactivated)
+- `is_anonymous` — True for anonymous users
+- `get_id()` — returns the user's ID as a string
+
+```python
+# app/models/user.py
+from datetime import datetime
+from flask_login import UserMixin
+from werkzeug.security import generate_password_hash, check_password_hash
+from app.extensions import db
+
+
+class User(UserMixin, db.Model):
+    __tablename__ = 'users'
+
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(64), unique=True, nullable=False, index=True)
+    email = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    password_hash = db.Column(db.String(256), nullable=False)
+    is_active = db.Column(db.Boolean, default=True, nullable=False)
+    is_admin = db.Column(db.Boolean, default=False, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    last_seen = db.Column(db.DateTime, nullable=True)
+
+    # Override is_active for Flask-Login
+    @property
+    def active(self):
+        return self.is_active
+
+    def set_password(self, password: str) -> None:
+        """Hash and store the password. Never store plaintext."""
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password: str) -> bool:
+        """Verify a plaintext password against the stored hash."""
+        return check_password_hash(self.password_hash, password)
+
+    def ping(self) -> None:
+        """Update last_seen timestamp."""
+        self.last_seen = datetime.utcnow()
+        db.session.add(self)
+        db.session.commit()
+
+    def __repr__(self) -> str:
+        return f'<User {self.username}>'
+```
+
+## Password Hashing with Werkzeug
+
+Werkzeug's `generate_password_hash` uses PBKDF2 by default, and supports scrypt/bcrypt:
+
+```python
+from werkzeug.security import generate_password_hash, check_password_hash
+
+# Default (PBKDF2-SHA256, 260000 iterations)
+password_hash = generate_password_hash('my-secure-password')
+# pbkdf2:sha256:260000$salt$hash
+
+# Using scrypt (more memory-hard)
+password_hash = generate_password_hash('my-secure-password', method='scrypt')
+
+# Using bcrypt (requires bcrypt package)
+password_hash = generate_password_hash('my-secure-password', method='bcrypt')
+
+# Verification
+is_valid = check_password_hash(password_hash, 'my-secure-password')  # True
+is_valid = check_password_hash(password_hash, 'wrong-password')       # False
+```
+
+### Flask-Bcrypt Alternative
+
+If you need fine-grained control over the bcrypt cost factor:
+
+```python
+from flask_bcrypt import Bcrypt
+
+bcrypt = Bcrypt()
+
+# app/__init__.py
+bcrypt.init_app(app)
+
+# Usage in model
+class User(UserMixin, db.Model):
+    def set_password(self, password: str) -> None:
+        self.password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
+
+    def check_password(self, password: str) -> bool:
+        return bcrypt.check_password_hash(self.password_hash, password)
+```
+
+:::tip[Choosing a Hash Method]
+For new projects, **scrypt** (Werkzeug default in newer versions) or **bcrypt** are preferred over PBKDF2. scrypt is memory-hard, making it resistant to GPU/ASIC brute-force attacks. If you change the method, existing hashes remain valid — `check_password_hash` reads the method from the hash string.
+:::
+
+## User Loader
+
+Flask-Login calls this function on every request to reload the user from the session:
+
+```python
+# app/extensions.py (or app/__init__.py)
+from app.extensions import login_manager
+
+@login_manager.user_loader
+def load_user(user_id: str):
+    """Load user by ID stored in the session cookie."""
+    from app.models.user import User
+    return db.session.get(User, int(user_id))
+```
+
+## Forms
+
+```python
+# app/auth/forms.py
+from flask_wtf import FlaskForm
+from wtforms import StringField, PasswordField, BooleanField, SubmitField
+from wtforms.validators import DataRequired, Email, Length, EqualTo, ValidationError
+from app.models.user import User
+
+
+class LoginForm(FlaskForm):
+    email = StringField('Email', validators=[DataRequired(), Email()])
+    password = PasswordField('Password', validators=[DataRequired()])
+    remember_me = BooleanField('Remember Me')
+    submit = SubmitField('Sign In')
+
+
+class RegistrationForm(FlaskForm):
+    username = StringField('Username', validators=[DataRequired(), Length(3, 64)])
+    email = StringField('Email', validators=[DataRequired(), Email(), Length(max=120)])
+    password = PasswordField('Password', validators=[DataRequired(), Length(min=8)])
+    password2 = PasswordField(
+        'Confirm Password',
+        validators=[DataRequired(), EqualTo('password', message='Passwords must match.')],
+    )
+    submit = SubmitField('Register')
+
+    def validate_username(self, field):
+        if User.query.filter_by(username=field.data).first():
+            raise ValidationError('Username already in use.')
+
+    def validate_email(self, field):
+        if User.query.filter_by(email=field.data.lower()).first():
+            raise ValidationError('Email already registered.')
+
+
+class ChangePasswordForm(FlaskForm):
+    current_password = PasswordField('Current Password', validators=[DataRequired()])
+    new_password = PasswordField('New Password', validators=[DataRequired(), Length(min=8)])
+    confirm_password = PasswordField(
+        'Confirm New Password',
+        validators=[DataRequired(), EqualTo('new_password')],
+    )
+    submit = SubmitField('Update Password')
+```
+
+## Auth Routes
+
+```python
+# app/auth/routes.py
+from flask import render_template, redirect, url_for, flash, request
+from flask_login import login_user, logout_user, login_required, current_user
+from urllib.parse import urlsplit
+from app.auth import auth
+from app.auth.forms import LoginForm, RegistrationForm, ChangePasswordForm
+from app.extensions import db
+from app.models.user import User
+
+
+@auth.route('/login', methods=['GET', 'POST'])
+def login():
+    # Redirect already-authenticated users
+    if current_user.is_authenticated:
+        return redirect(url_for('main.index'))
+
+    form = LoginForm()
+    if form.validate_on_submit():
+        user = User.query.filter_by(email=form.email.data.lower()).first()
+
+        if user is None or not user.check_password(form.password.data):
+            flash('Invalid email or password.', 'danger')
+            return redirect(url_for('auth.login'))
+
+        if not user.is_active:
+            flash('This account has been deactivated.', 'warning')
+            return redirect(url_for('auth.login'))
+
+        # Log the user in; remember_me sets a persistent cookie
+        login_user(user, remember=form.remember_me.data)
+        user.ping()
+
+        # Safe redirect — prevent open redirect attacks
+        next_page = request.args.get('next')
+        if not next_page or urlsplit(next_page).netloc != '':
+            next_page = url_for('main.index')
+
+        flash(f'Welcome back, {user.username}!', 'success')
+        return redirect(next_page)
+
+    return render_template('auth/login.html', form=form, title='Sign In')
+
+
+@auth.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    flash('You have been logged out.', 'info')
+    return redirect(url_for('auth.login'))
+
+
+@auth.route('/register', methods=['GET', 'POST'])
+def register():
+    if current_user.is_authenticated:
+        return redirect(url_for('main.index'))
+
+    form = RegistrationForm()
+    if form.validate_on_submit():
+        user = User(
+            username=form.username.data,
+            email=form.email.data.lower(),
+        )
+        user.set_password(form.password.data)
+        db.session.add(user)
+        db.session.commit()
+
+        flash('Account created! Please log in.', 'success')
+        return redirect(url_for('auth.login'))
+
+    return render_template('auth/register.html', form=form, title='Register')
+
+
+@auth.route('/change-password', methods=['GET', 'POST'])
+@login_required
+def change_password():
+    form = ChangePasswordForm()
+    if form.validate_on_submit():
+        if not current_user.check_password(form.current_password.data):
+            flash('Current password is incorrect.', 'danger')
+            return redirect(url_for('auth.change_password'))
+
+        current_user.set_password(form.new_password.data)
+        db.session.commit()
+        flash('Password updated successfully.', 'success')
+        return redirect(url_for('main.index'))
+
+    return render_template('auth/change_password.html', form=form)
+```
+
+## Protecting Routes
+
+```python
+from flask_login import login_required, current_user
+
+# ── Single route ──────────────────────────────────────────────────────────────
+@app.route('/dashboard')
+@login_required
+def dashboard():
+    return render_template('dashboard.html')
+
+# ── With role check ───────────────────────────────────────────────────────────
+from functools import wraps
+from flask import abort
+
+def admin_required(f):
+    """Decorator that requires the user to be an admin."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not current_user.is_authenticated or not current_user.is_admin:
+            abort(403)
+        return f(*args, **kwargs)
+    return decorated_function
+
+@app.route('/admin/users')
+@login_required
+@admin_required
+def admin_users():
+    users = User.query.all()
+    return render_template('admin/users.html', users=users)
+```
+
+## Protecting an Entire Blueprint
+
+Use `before_request` to require login for every route in a blueprint:
+
+```python
+# app/admin/__init__.py
+from flask import Blueprint
+
+admin = Blueprint('admin', __name__, url_prefix='/admin')
+
+from app.admin import routes  # noqa
+
+
+# app/admin/routes.py
+from flask_login import login_required, current_user
+from flask import abort
+from app.admin import admin
+
+
+@admin.before_request
+@login_required
+def require_login():
+    """All admin routes require authentication and admin status."""
+    if not current_user.is_admin:
+        abort(403)
+
+
+@admin.route('/')
+def index():
+    return render_template('admin/index.html')
+
+@admin.route('/users')
+def users():
+    return render_template('admin/users.html', users=User.query.all())
+```
+
+## Login Template
+
+```html
+{# templates/auth/login.html #}
+{% extends "base.html" %}
+{% from "macros/forms.html" import render_field %}
+
+{% block title %}Sign In{% endblock %}
+
+{% block content %}
+<div class="auth-container">
+  <div class="auth-card">
+    <h1 class="auth-title">Sign In</h1>
+
+    <form method="POST" novalidate>
+      {{ form.hidden_tag() }}
+
+      {{ render_field(form.email,
+           type='email',
+           placeholder='your@email.com',
+           autocomplete='email') }}
+
+      {{ render_field(form.password,
+           placeholder='Your password',
+           autocomplete='current-password') }}
+
+      <div class="form-check">
+        {{ form.remember_me() }}
+        {{ form.remember_me.label }}
+      </div>
+
+      {{ form.submit(class='btn btn-primary btn-block') }}
+    </form>
+
+    <div class="auth-links">
+      <a href="{{ url_for('auth.register') }}">Create an account</a>
+      <span>&middot;</span>
+      <a href="{{ url_for('auth.forgot_password') }}">Forgot password?</a>
+    </div>
+  </div>
+</div>
+{% endblock %}
+```
+
+## current_user in Templates
+
+Flask-Login injects `current_user` into the Jinja2 context automatically:
+
+```html
+{# templates/base.html #}
+<nav>
+  {% if current_user.is_authenticated %}
+    <span>Hello, {{ current_user.username }}!</span>
+    <a href="{{ url_for('auth.logout') }}">Logout</a>
+    {% if current_user.is_admin %}
+      <a href="{{ url_for('admin.index') }}">Admin</a>
+    {% endif %}
+  {% else %}
+    <a href="{{ url_for('auth.login') }}">Login</a>
+    <a href="{{ url_for('auth.register') }}">Register</a>
+  {% endif %}
+</nav>
+```
+
+## Session Security
+
+```python
+# config.py
+class Config:
+    SECRET_KEY = os.environ['SECRET_KEY']  # Required — never hardcode
+
+    # Session cookie settings
+    SESSION_COOKIE_SECURE = True      # HTTPS only
+    SESSION_COOKIE_HTTPONLY = True    # No JS access
+    SESSION_COOKIE_SAMESITE = 'Lax'  # CSRF protection
+
+    # Permanent session lifetime (for remember_me)
+    PERMANENT_SESSION_LIFETIME = timedelta(days=30)
+
+    # Flask-Login session protection
+    # 'basic' — regenerate cookie on each request
+    # 'strong' — delete session if user agent or IP changes
+    # None — no protection
+    # Set on LoginManager: login_manager.session_protection = 'strong'
+```
+
+:::caution[SECRET_KEY Must Be Random and Private]
+Every Flask session is signed with `SECRET_KEY`. If an attacker learns your secret key, they can forge any session cookie and impersonate any user. Generate it with `secrets.token_hex(32)`, store it in your environment, and rotate it periodically (it will log out all current sessions).
+:::
+
+## Testing Authentication
+
+```python
+# tests/test_auth.py
+def test_register(client, db):
+    response = client.post('/auth/register', data={
+        'username': 'testuser',
+        'email': 'test@example.com',
+        'password': 'securepass123',
+        'password2': 'securepass123',
+    }, follow_redirects=True)
+    assert response.status_code == 200
+    assert b'Account created' in response.data
+
+
+def test_login(client, db):
+    from app.models.user import User
+    user = User(username='testuser', email='test@example.com')
+    user.set_password('securepass')
+    db.session.add(user)
+    db.session.commit()
+
+    response = client.post('/auth/login', data={
+        'email': 'test@example.com',
+        'password': 'securepass',
+        'remember_me': False,
+    }, follow_redirects=True)
+    assert response.status_code == 200
+
+
+def test_login_wrong_password(client, db):
+    response = client.post('/auth/login', data={
+        'email': 'test@example.com',
+        'password': 'wrongpassword',
+    }, follow_redirects=True)
+    assert b'Invalid email or password' in response.data
+
+
+def test_protected_route_redirects_anonymous(client):
+    response = client.get('/dashboard')
+    assert response.status_code == 302
+    assert '/auth/login' in response.headers['Location']
+
+
+def test_protected_route_accessible_when_logged_in(client, auth):
+    auth.login()
+    response = client.get('/dashboard')
+    assert response.status_code == 200
+```

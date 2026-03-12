@@ -1,0 +1,550 @@
+---
+title: Assertions & Test Output
+description: Master pytest's assertion rewriting, exception testing, warning assertions, approx, and output capture.
+sidebar:
+  order: 4
+tags:
+  - python
+  - testing
+---
+
+pytest transforms Python's plain `assert` statement into a rich diagnostic tool. When an assertion fails, pytest introspects every sub-expression and produces detailed output — without any special assertion methods.
+
+## The Assert Statement
+
+Write assertions exactly as you would in production Python code:
+
+```python
+# ✅ pytest style — readable and Pythonic
+assert result == 42
+assert user.name == "Alice"
+assert "error" not in response.text
+assert response.status_code == 200
+assert items == ["a", "b", "c"]
+assert key in mapping
+
+# ❌ unittest style — unnecessary with pytest
+self.assertEqual(result, 42)
+self.assertEqual(user.name, "Alice")
+self.assertNotIn("error", response.text)
+self.assertEqual(response.status_code, 200)
+```
+
+## Assertion Rewriting
+
+pytest uses **assertion rewriting** — it modifies your `assert` statements at import time to capture the values of all sub-expressions before the assertion runs. This is what makes error messages so useful without any extra work.
+
+Given this failing test:
+
+```python
+def test_split_word():
+    words = "hello world".split()
+    assert words == ["hello", "earth"]
+```
+
+pytest produces:
+
+```
+FAILED tests/test_example.py::test_split_word
+
+============================ FAILURES ============================
+______________________ test_split_word _______________________
+
+    def test_split_word():
+        words = "hello world".split()
+>       assert words == ["hello", "earth"]
+E       AssertionError: assert ['hello', 'world'] == ['hello', 'earth']
+E         At index 1 diff: 'world' != 'earth'
+E         Use -v to get more diff
+
+tests/test_example.py:3: AssertionError
+```
+
+pytest shows:
+- `>` marks the line that failed
+- The actual value (`['hello', 'world']`)
+- The expected value (`['hello', 'earth']`)
+- A human-readable diff explaining what differs
+
+### Dictionary Diffs
+
+```python
+def test_user_update():
+    actual = {"name": "Alice", "age": 31, "role": "admin", "active": True}
+    expected = {"name": "Alice", "age": 30, "role": "user", "active": True}
+    assert actual == expected
+```
+
+```
+E   AssertionError: assert {'active': True, 'age': 31, 'name': 'Alice', 'role': 'admin'}
+E                        == {'active': True, 'age': 30, 'name': 'Alice', 'role': 'user'}
+E   Omitting 2 identical items, use -vv to show
+E   Differing items:
+E   {'age': 31, 'role': 'admin'} != {'age': 30, 'role': 'user'}
+```
+
+### Set Diffs
+
+```python
+def test_permissions():
+    actual = {"read", "write", "delete"}
+    expected = {"read", "write", "execute"}
+    assert actual == expected
+```
+
+```
+E   AssertionError: assert {'delete', 'read', 'write'} == {'execute', 'read', 'write'}
+E     Extra items in the left set:
+E     'delete'
+E     Extra items in the right set:
+E     'execute'
+```
+
+### Adding Custom Messages
+
+Add a message as the second argument to `assert` for context that pytest's diff cannot infer:
+
+```python
+def test_process_result():
+    result = process_data(input_data)
+    assert result.success, f"Processing failed: {result.error_message!r}"
+
+def test_response_ok():
+    response = client.post("/api/users", json=payload)
+    assert response.status_code == 201, (
+        f"Expected 201, got {response.status_code}. "
+        f"Response body: {response.text}"
+    )
+```
+
+## Asserting Exceptions with `pytest.raises`
+
+Use `pytest.raises` as a context manager to assert that a specific exception is raised:
+
+```python
+import pytest
+from myapp.calculator import divide
+from myapp.auth import authenticate, AuthenticationError
+
+
+def test_divide_by_zero():
+    with pytest.raises(ZeroDivisionError):
+        divide(10, 0)
+
+
+def test_invalid_login():
+    with pytest.raises(AuthenticationError):
+        authenticate(username="alice", password="wrong_password")
+```
+
+### Checking the Exception Message
+
+Use the `match` parameter with a regular expression to assert the exception message:
+
+```python
+def test_divide_by_zero_message():
+    with pytest.raises(ZeroDivisionError, match="Cannot divide by zero"):
+        divide(10, 0)
+
+
+def test_value_error_pattern():
+    with pytest.raises(ValueError, match=r"expected a positive number, got -\d+"):
+        process_value(-5)
+
+
+def test_key_error_field():
+    with pytest.raises(KeyError, match="username"):
+        get_field(data={}, key="username")
+```
+
+### Inspecting the Exception Object
+
+The `with pytest.raises(...)` block assigns an `ExceptionInfo` object to the target variable, inspectable **after** the `with` block:
+
+```python
+def test_validation_error_details():
+    with pytest.raises(ValidationError) as exc_info:
+        validate_user({"name": "", "age": -1, "email": "not-an-email"})
+
+    exc = exc_info.value
+    assert "name" in exc.errors
+    assert "age" in exc.errors
+    assert "email" in exc.errors
+    assert exc.error_count == 3
+
+
+def test_exception_repr():
+    with pytest.raises(RuntimeError) as exc_info:
+        raise RuntimeError("something failed", {"code": 500})
+
+    assert "something failed" in str(exc_info.value)
+    assert exc_info.type is RuntimeError
+```
+
+| `ExceptionInfo` attribute | Description |
+| --- | --- |
+| `.value` | The exception instance |
+| `.type` | The exception class |
+| `.traceback` | The traceback object |
+| `str(exc_info.value)` | String representation |
+
+### Parametrizing Exception Tests
+
+```python
+@pytest.mark.parametrize("divisor, expected_exc", [
+    (0, ZeroDivisionError),
+    ("x", TypeError),
+    (None, TypeError),
+    ([], TypeError),
+])
+def test_divide_bad_inputs(divisor, expected_exc):
+    with pytest.raises(expected_exc):
+        divide(10, divisor)
+```
+
+:::tip[Scope your raises block tightly]
+Only wrap the single line that should raise inside `pytest.raises`. Wrapping too much code hides bugs — an exception from a different line will still pass the test.
+
+```python
+# ❌ Too broad — setup code could raise and the test still passes
+with pytest.raises(ZeroDivisionError):
+    result = setup_something()   # this could raise too
+    divide(result, 0)
+
+# ✅ Precise — only the divide call should raise
+result = setup_something()
+with pytest.raises(ZeroDivisionError):
+    divide(result, 0)
+```
+:::
+
+### `pytest.raises` as a Callable (Alternative Form)
+
+You can also pass a callable directly:
+
+```python
+def test_raises_callable_form():
+    pytest.raises(ZeroDivisionError, divide, 10, 0)
+```
+
+This is less common but occasionally useful for one-liner assertions.
+
+## Asserting Warnings with `pytest.warns`
+
+Use `pytest.warns` to assert that code emits a specific Python warning:
+
+```python
+import warnings
+import pytest
+
+
+def legacy_api():
+    warnings.warn(
+        "legacy_api() is deprecated, use new_api() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return {"status": "ok"}
+
+
+def test_legacy_api_warns():
+    with pytest.warns(DeprecationWarning, match="deprecated"):
+        result = legacy_api()
+    assert result == {"status": "ok"}
+
+
+def test_multiple_warnings():
+    with pytest.warns(UserWarning) as warning_list:
+        emit_multiple_user_warnings()
+
+    assert len(warning_list) == 2
+    messages = [str(w.message) for w in warning_list]
+    assert any("first" in m for m in messages)
+    assert any("second" in m for m in messages)
+```
+
+:::caution[filterwarnings interaction]
+If your `pyproject.toml` sets `filterwarnings = ["error"]`, all warnings become errors and `pytest.warns` may behave unexpectedly. Use `@pytest.mark.filterwarnings("default::DeprecationWarning")` on tests that need to observe (rather than catch) warnings.
+
+```python
+@pytest.mark.filterwarnings("default::DeprecationWarning")
+def test_observes_deprecation_warning():
+    with pytest.warns(DeprecationWarning):
+        result = old_function()
+    assert result is not None
+```
+:::
+
+## Floating-Point Comparisons with `pytest.approx`
+
+Floating-point arithmetic is inexact. Never use `==` to compare floats directly:
+
+```python
+# ❌ Fails due to floating-point representation
+assert 0.1 + 0.2 == 0.3     # 0.30000000000000004 != 0.3
+
+# ✅ Use pytest.approx
+assert 0.1 + 0.2 == pytest.approx(0.3)
+```
+
+### Tolerance Control
+
+```python
+import pytest
+
+# Relative tolerance (default: 1e-6 — i.e., within 0.0001%)
+assert 1.0001 == pytest.approx(1.0, rel=1e-3)     # within 0.1%
+
+# Absolute tolerance
+assert 1.0001 == pytest.approx(1.0, abs=1e-3)      # within 0.001
+
+# Disable relative tolerance — use only absolute (important near zero)
+assert 1e-8 == pytest.approx(0.0, abs=1e-6)
+```
+
+### Works with Sequences and Mappings
+
+`pytest.approx` applies element-wise to lists, tuples, numpy arrays, and dict values:
+
+```python
+def test_vector_result():
+    result = normalize_vector([3.0, 4.0])
+    assert result == pytest.approx([0.6, 0.8])
+
+
+def test_metrics():
+    metrics = calculate_classification_metrics(predictions, labels)
+    assert metrics == pytest.approx(
+        {"precision": 0.90, "recall": 0.85, "f1": 0.874},
+        rel=1e-2,   # within 1%
+    )
+
+
+def test_matrix():
+    import numpy as np
+    result = matrix_multiply(A, B)
+    expected = np.array([[1.0, 0.0], [0.0, 1.0]])
+    assert result == pytest.approx(expected, abs=1e-6)
+```
+
+## `pytest.fail()` — Explicit Test Failure
+
+Call `pytest.fail()` to unconditionally fail a test with a descriptive message:
+
+```python
+import pytest
+
+
+def test_feature_not_yet_implemented():
+    pytest.fail("Feature X is not yet implemented — see issue #42")
+
+
+def test_conditional_failure():
+    result = run_complex_operation()
+    if result is None:
+        pytest.fail(f"run_complex_operation() returned None unexpectedly")
+    assert result.code == 0
+
+
+def test_platform_specific():
+    import sys
+    if sys.platform == "win32":
+        pytest.fail("This test only supports POSIX platforms")
+    assert posix_only_function() is not None
+```
+
+### `pytest.skip()` and `pytest.xfail()`
+
+Related control-flow functions:
+
+```python
+def test_requires_gpu():
+    if not gpu_available():
+        pytest.skip("GPU not available in this environment")
+    result = run_gpu_computation()
+    assert result.shape == (100, 100)
+
+
+@pytest.mark.xfail(reason="Known upstream bug — tracked in issue #1234")
+def test_known_broken():
+    assert broken_upstream_function() == "expected"
+
+
+@pytest.mark.xfail(raises=OverflowError, strict=True)
+def test_overflow_on_large_input():
+    process_large_value(10 ** 1000)
+```
+
+| Outcome | Meaning |
+| --- | --- |
+| `PASSED` | Test succeeded |
+| `FAILED` | Assertion failed or unexpected exception |
+| `SKIPPED` | `pytest.skip()` was called or marker condition was met |
+| `XFAIL` | Test was expected to fail and did fail |
+| `XPASS` | Test was expected to fail but passed (check with `strict=True`) |
+| `ERROR` | Exception raised outside test body (in fixture, etc.) |
+
+## Capturing stdout/stderr with `capsys`
+
+The `capsys` fixture captures output written to `sys.stdout` and `sys.stderr`:
+
+```python
+def print_summary(data: list) -> None:
+    print(f"Total items: {len(data)}")
+    print(f"First item: {data[0]}")
+    if not data:
+        import sys
+        print("Warning: empty dataset", file=sys.stderr)
+
+
+def test_print_summary_output(capsys):
+    print_summary(["alpha", "beta", "gamma"])
+    captured = capsys.readouterr()
+
+    assert "Total items: 3" in captured.out
+    assert "First item: alpha" in captured.out
+    assert captured.err == ""
+
+
+def test_stderr_warning(capsys):
+    import sys
+    print("normal output")
+    print("this is an error", file=sys.stderr)
+
+    captured = capsys.readouterr()
+    assert "normal output" in captured.out
+    assert "this is an error" in captured.err
+```
+
+`capsys.readouterr()` returns a named tuple `(out, err)` and **resets** the capture buffers, so you can call it multiple times:
+
+```python
+def test_multiple_capture_reads(capsys):
+    print("step one")
+    out1, _ = capsys.readouterr()
+    assert "step one" in out1
+
+    print("step two")
+    out2, _ = capsys.readouterr()
+    assert "step two" in out2
+    assert "step one" not in out2   # buffer was cleared
+```
+
+### Asserting Logging Output with `caplog`
+
+The `caplog` fixture captures Python `logging` output:
+
+```python
+import logging
+
+
+def process_item(item):
+    logger = logging.getLogger(__name__)
+    if item is None:
+        logger.warning("Received None item, skipping")
+        return
+    logger.info(f"Processing item: {item!r}")
+    return transform(item)
+
+
+def test_logs_warning_for_none(caplog):
+    with caplog.at_level(logging.WARNING):
+        process_item(None)
+
+    assert "Received None item" in caplog.text
+    assert caplog.records[0].levelname == "WARNING"
+
+
+def test_logs_info_for_valid(caplog):
+    with caplog.at_level(logging.INFO):
+        process_item("hello")
+
+    assert any("Processing item" in r.message for r in caplog.records)
+```
+
+## Custom Assertion Helpers
+
+For complex assertions repeated across tests, extract them into helper functions:
+
+```python
+# tests/helpers.py
+
+
+def assert_valid_user(user: dict) -> None:
+    """Assert that a user dict has all required fields with valid values."""
+    assert isinstance(user, dict), f"Expected dict, got {type(user).__name__}"
+    assert "id" in user, "User must have an 'id' field"
+    assert "name" in user, "User must have a 'name' field"
+    assert "email" in user, "User must have an 'email' field"
+    assert isinstance(user["id"], int), f"User id must be int, got {type(user['id']).__name__}"
+    assert user["name"], "User name must be non-empty"
+    assert "@" in user["email"], f"Invalid email address: {user['email']!r}"
+
+
+def assert_response_ok(response, expected_keys: list[str] | None = None) -> None:
+    """Assert an HTTP response is 200 OK and optionally contains specific keys."""
+    assert response.status_code == 200, (
+        f"Expected 200, got {response.status_code}. Body: {response.text[:200]}"
+    )
+    if expected_keys:
+        data = response.json()
+        for key in expected_keys:
+            assert key in data, f"Response missing expected key {key!r}. Got: {list(data)}"
+
+
+def assert_paginated_response(response, min_items: int = 0) -> dict:
+    """Assert a paginated API response has the expected envelope shape."""
+    data = response.json()
+    assert "items" in data, f"Missing 'items' key in response: {list(data)}"
+    assert "total" in data, f"Missing 'total' key in response: {list(data)}"
+    assert "page" in data, f"Missing 'page' key in response: {list(data)}"
+    assert isinstance(data["items"], list), "'items' must be a list"
+    assert data["total"] >= min_items, f"Expected at least {min_items} items, got {data['total']}"
+    return data
+```
+
+```python
+# tests/test_users.py
+from tests.helpers import assert_valid_user, assert_response_ok, assert_paginated_response
+
+
+def test_get_user(client):
+    response = client.get("/users/1")
+    assert_response_ok(response, expected_keys=["id", "name", "email"])
+    assert_valid_user(response.json())
+
+
+def test_list_users(client):
+    response = client.get("/users")
+    data = assert_paginated_response(response, min_items=1)
+    for user in data["items"]:
+        assert_valid_user(user)
+```
+
+:::tip[pytest rewrites helper assertions too]
+If your helpers live under the `tests/` directory, pytest rewrites their assertions and produces the same detailed output on failure. For helpers outside `tests/`, register them explicitly:
+
+```python
+# tests/conftest.py
+import pytest
+
+# Enable assertion rewriting for helpers in other locations
+pytest.register_assert_rewrite("mypackage.test_helpers")
+```
+:::
+
+## Quick Reference
+
+| Pattern | Code |
+| --- | --- |
+| Basic assertion | `assert value == expected` |
+| Assert with message | `assert cond, f"msg {value!r}"` |
+| Expect exception | `with pytest.raises(SomeError):` |
+| Match exception message | `pytest.raises(Err, match=r"pattern")` |
+| Inspect exception | `exc_info.value`, `exc_info.type` |
+| Expect warning | `with pytest.warns(DeprecationWarning):` |
+| Float comparison | `assert x == pytest.approx(y)` |
+| Explicit failure | `pytest.fail("reason")` |
+| Skip test | `pytest.skip("reason")` |
+| Capture stdout | `capsys.readouterr().out` |
+| Capture logs | `caplog.text`, `caplog.records` |

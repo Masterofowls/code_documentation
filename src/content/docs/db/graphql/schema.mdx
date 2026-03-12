@@ -1,369 +1,482 @@
 ---
 title: GraphQL Schema Design
-description: Deep dive into SDL type system, custom scalars, interfaces, unions, directives, pagination with Connections, and schema design best practices.
+description: Deep dive into SDL types, custom scalars, interfaces, unions, enums, input types, directives, pagination patterns, and naming conventions.
 sidebar:
   order: 3
 tags: [database, api]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
 # GraphQL Schema Design
 
-The schema is the heart of a GraphQL API — it defines the contract between server and clients.
+The schema is the contract between your API and its clients. A well-designed schema is intuitive, stable, and easy to evolve.
 
-## Custom Scalars
+## Scalar Types
 
-Custom scalars extend the type system for domain-specific values.
+### Built-in Scalars
+
+| Scalar    | Description                              | JS Type   |
+| --------- | ---------------------------------------- | --------- |
+| `Int`     | 32-bit signed integer                    | `number`  |
+| `Float`   | Double-precision floating-point          | `number`  |
+| `String`  | UTF-8 string                             | `string`  |
+| `Boolean` | `true` or `false`                        | `boolean` |
+| `ID`      | Unique identifier (serialized as String) | `string`  |
+
+### Custom Scalars
 
 ```graphql
 # Declare custom scalars in SDL
-scalar Date
-scalar DateTime
-scalar JSON
-scalar Upload
-scalar UUID
-scalar PositiveInt
-scalar EmailAddress
-scalar URL
-scalar Latitude
-scalar Longitude
+scalar Date # ISO 8601 date: "2024-01-15"
+scalar DateTime # ISO 8601 datetime: "2024-01-15T10:30:00Z"
+scalar JSON # Arbitrary JSON value
+scalar Upload # File upload (graphql-upload)
+scalar URL # Valid URL string
+scalar EmailAddress # Valid email address
+scalar NonNegativeInt
+scalar PositiveFloat
 ```
 
-### Implementing Custom Scalars
-
 ```javascript
+// Implement custom scalars in resolvers
 import { GraphQLScalarType, Kind } from 'graphql';
 
-// Date scalar — serializes to/from ISO date strings
 const DateScalar = new GraphQLScalarType({
   name: 'Date',
-  description: 'ISO 8601 date string: YYYY-MM-DD',
+  description: 'ISO 8601 date string (YYYY-MM-DD)',
 
-  // serialize: converts internal value → client response
+  // Called when sending to client: JS Date → string
   serialize(value) {
     if (value instanceof Date) {
       return value.toISOString().split('T')[0];
     }
-    if (typeof value === 'string') return value;
-    throw new Error('Date scalar expects a Date object or ISO string');
+    return value;
   },
 
-  // parseValue: converts client variable → internal value
+  // Called when receiving as a variable: string → JS Date
   parseValue(value) {
     const date = new Date(value);
     if (isNaN(date.getTime())) {
-      throw new Error(`Invalid Date: "${value}"`);
+      throw new Error(`Invalid date value: ${value}`);
     }
     return date;
   },
 
-  // parseLiteral: converts literal in query text → internal value
+  // Called when receiving as a literal in the query
   parseLiteral(ast) {
     if (ast.kind === Kind.STRING) {
-      const date = new Date(ast.value);
-      if (isNaN(date.getTime())) {
-        throw new Error(`Invalid Date literal: "${ast.value}"`);
-      }
-      return date;
+      return new Date(ast.value);
     }
-    throw new Error('Date scalar only accepts string literals');
+    return null;
   },
 });
 
-// JSON scalar — pass-through for arbitrary JSON
-const JSONScalar = new GraphQLScalarType({
-  name: 'JSON',
-  description: 'Arbitrary JSON value',
-  serialize: (value) => value,
-  parseValue: (value) => value,
-  parseLiteral(ast) {
-    switch (ast.kind) {
-      case Kind.STRING: return ast.value;
-      case Kind.INT: return parseInt(ast.value, 10);
-      case Kind.FLOAT: return parseFloat(ast.value);
-      case Kind.BOOLEAN: return ast.value;
-      case Kind.NULL: return null;
-      case Kind.LIST: return ast.values.map(this.parseLiteral.bind(this));
-      case Kind.OBJECT:
-        return ast.fields.reduce((obj, field) => {
-          obj[field.name.value] = this.parseLiteral(field.value);
-          return obj;
-        }, {});
-    }
-  },
-});
+// In resolvers
+const resolvers = {
+  Date: DateScalar,
+  Query: { ... },
+};
 ```
 
 :::tip[graphql-scalars Package]
-Instead of implementing custom scalars yourself, use the `graphql-scalars` package which provides over 30 battle-tested scalars:
+The `graphql-scalars` package provides 50+ production-ready custom scalars including `Date`, `DateTime`, `EmailAddress`, `URL`, `JSON`, `UUID`, `PhoneNumber`, `NonNegativeInt`, `PositiveFloat`, and more.
+
 ```bash
 npm install graphql-scalars
 ```
-```javascript
-import { DateTimeResolver, EmailAddressResolver, URLResolver } from 'graphql-scalars';
-```
+
 :::
 
-## Interfaces Deep Dive
+## Object Types
 
 ```graphql
-# Base interfaces
+type Product {
+  id: ID!
+  sku: String!
+  name: String!
+  description: String
+  price: Float!
+  compareAtPrice: Float # nullable — sale price
+  inventory: Int!
+  category: Category!
+  tags: [String!]!
+  images: [ProductImage!]!
+  variants: [ProductVariant!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  isAvailable: Boolean!
+  # Field with arguments
+  reviews(first: Int = 10, after: String, rating: Int): ReviewConnection!
+}
+
+type ProductImage {
+  id: ID!
+  url: URL!
+  altText: String
+  width: Int
+  height: Int
+  isPrimary: Boolean!
+}
+```
+
+## Interfaces
+
+An interface defines a set of fields that implementing types must include.
+
+```graphql
 interface Node {
   id: ID!
 }
 
-interface HasTimestamps {
+interface Timestamped {
   createdAt: DateTime!
   updatedAt: DateTime!
-  deletedAt: DateTime
 }
 
-interface Searchable {
-  searchScore: Float
-}
-
-# Multiple interface implementation
-type Article implements Node & HasTimestamps & Searchable {
+interface SearchResult {
   id: ID!
   title: String!
-  content: String!
-  author: User!
-  createdAt: DateTime!
-  updatedAt: DateTime!
-  deletedAt: DateTime
-  searchScore: Float
-  # Article-specific fields
-  category: Category!
-  tags: [Tag!]!
-  readingTimeMinutes: Int!
-}
-
-type Video implements Node & HasTimestamps {
-  id: ID!
-  title: String!
+  snippet: String!
   url: URL!
-  duration: Int!  # seconds
-  thumbnail: URL
+}
+
+# Implementing multiple interfaces
+type Article implements Node & Timestamped & SearchResult {
+  id: ID!
+  title: String!
+  snippet: String!
+  url: URL!
   createdAt: DateTime!
   updatedAt: DateTime!
-  deletedAt: DateTime
+  # Additional fields beyond the interface
+  body: String!
+  author: User!
+  category: Category!
+  readTime: Int!
+}
+
+type Product implements Node & Timestamped & SearchResult {
+  id: ID!
+  title: String!
+  snippet: String!
+  url: URL!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  price: Float!
 }
 ```
 
-### Abstract Type Resolver for Interfaces
-
 ```javascript
+// Interface resolver: tells GraphQL which concrete type a result is
 const resolvers = {
-  Node: {
-    // __resolveType tells GraphQL which concrete type this is
+  SearchResult: {
     __resolveType(obj) {
-      if (obj.content !== undefined) return 'Article';
-      if (obj.url !== undefined && obj.duration !== undefined) return 'Video';
       if (obj.price !== undefined) return 'Product';
-      return null; // Return null if type can't be determined
+      if (obj.body !== undefined) return 'Article';
+      return null;
     },
   },
-  Query: {
-    node: async (_, { id }, { dataSources }) => {
-      return dataSources.db.findNodeById(id); // Returns any type implementing Node
+  Node: {
+    __resolveType(obj, context, info) {
+      return obj.__typename || null;
     },
   },
 };
 ```
 
-## Unions Deep Dive
+## Unions
+
+A union represents one of several object types, with **no shared fields**.
 
 ```graphql
-# Unions — a field can return any of several unrelated types
-union SearchResult = Article | Video | Product | User
+union SearchResult = Article | Product | User | Collection
 
-union MediaItem = Image | Video | Document | Audio
+union PaymentResult = PaymentSuccess | PaymentFailure | PaymentPending
 
-# Mutation result patterns using unions
-union CreateUserResult = User | ValidationError | UserAlreadyExistsError
+type PaymentSuccess {
+  transactionId: String!
+  amount: Float!
+  currency: String!
+  receiptUrl: URL!
+}
 
-type ValidationError {
-  message: String!
-  field: String!
+type PaymentFailure {
   code: String!
-}
-
-type UserAlreadyExistsError {
   message: String!
-  email: String!
+  declineReason: String
 }
 
-type Mutation {
-  createUser(input: CreateUserInput!): CreateUserResult!
+type PaymentPending {
+  pendingReason: String!
+  estimatedResolution: DateTime
 }
 ```
+
+```javascript
+// Union resolver
+const resolvers = {
+  PaymentResult: {
+    __resolveType(obj) {
+      if (obj.transactionId) return 'PaymentSuccess';
+      if (obj.declineReason !== undefined) return 'PaymentFailure';
+      return 'PaymentPending';
+    },
+  },
+};
+```
+
+Client query using union fragments:
 
 ```graphql
-# Querying a union with inline fragments
-query Search($term: String!) {
-  search(query: $term) {
-    ... on Article {
-      id
-      title
-      author { name }
+query ProcessPayment($input: PaymentInput!) {
+  processPayment(input: $input) {
+    ... on PaymentSuccess {
+      transactionId
+      receiptUrl
     }
-    ... on Video {
-      id
-      title
-      duration
-    }
-    ... on Product {
-      id
-      name
-      price
-    }
-    ... on User {
-      id
-      name
-      avatar
-    }
-    # Get the actual type name
-    __typename
-  }
-}
-
-# Mutation with union result
-mutation RegisterUser($input: CreateUserInput!) {
-  createUser(input: $input) {
-    ... on User {
-      id
-      name
-      email
-    }
-    ... on ValidationError {
-      message
-      field
+    ... on PaymentFailure {
       code
-    }
-    ... on UserAlreadyExistsError {
       message
-      email
+      declineReason
+    }
+    ... on PaymentPending {
+      pendingReason
     }
   }
 }
 ```
+
+## Enum Types
+
+```graphql
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+enum SortOrder {
+  ASC
+  DESC
+}
+
+enum UserRole {
+  ADMIN
+  MODERATOR
+  USER
+  GUEST
+}
+
+# Usage in types and arguments
+type Order {
+  id: ID!
+  status: OrderStatus!
+}
+
+type Query {
+  orders(
+    status: OrderStatus
+    sortBy: String
+    sortOrder: SortOrder = ASC
+  ): [Order!]!
+}
+```
+
+## Input Types
+
+Input types are used exclusively for mutation arguments and complex filter arguments. They cannot reference output types and cannot have circular references.
+
+```graphql
+input CreateProductInput {
+  sku: String!
+  name: String!
+  description: String
+  price: Float!
+  compareAtPrice: Float
+  inventory: Int!
+  categoryId: ID!
+  tags: [String!]
+}
+
+input UpdateProductInput {
+  name: String # all fields optional for update
+  description: String
+  price: Float
+  inventory: Int
+  categoryId: ID
+  tags: [String!]
+}
+
+input ProductFilterInput {
+  categoryId: ID
+  minPrice: Float
+  maxPrice: Float
+  inStock: Boolean
+  tags: [String!]
+  search: String
+}
+
+input PaginationInput {
+  first: Int
+  after: String
+  last: Int
+  before: String
+}
+
+# Mutations using input types
+type Mutation {
+  createProduct(input: CreateProductInput!): CreateProductPayload!
+  updateProduct(id: ID!, input: UpdateProductInput!): UpdateProductPayload!
+}
+```
+
+## Non-Null and List Modifiers Summary
+
+```graphql
+type Example {
+  # Nullability
+  a: String # nullable; resolver can return null
+  b: String! # non-null; resolver must return a string
+  # Lists
+  c: [String] # nullable list of nullable strings
+  d: [String!] # nullable list of non-null strings
+  e: [String]! # non-null list of nullable strings
+  f: [String!]! # non-null list of non-null strings (most common)
+  # Nested
+  g: [[Int]] # nullable list of nullable lists of nullable ints
+  h: [[Int!]!]! # non-null list of non-null lists of non-null ints
+}
+```
+
+:::caution[Nullability Design Decision]
+Be deliberate about nullability. Making everything non-null seems appealing but:
+
+- A single null deep in a tree causes the entire parent to become null (null propagation)
+- It makes it harder to add optional fields later without a breaking change
+- Facebook's guidance: make fields nullable by default unless they are truly always present
+
+The exception: `ID`, primary keys, and connection fields should generally be `!`.
+:::
 
 ## Directives
 
 ### Built-in Directives
 
 ```graphql
-# @deprecated — mark a field or enum value as deprecated
+# @deprecated — mark fields or enum values as deprecated
 type User {
   id: ID!
   name: String!
-  # Deprecated field with migration guidance
-  username: String @deprecated(reason: "Use `name` field instead. Removed in v3.0.")
+  username: String! @deprecated(reason: "Use `name` field instead")
   email: String!
 }
 
-# @skip — conditionally skip a field (variable must be Boolean!)
-query GetUser($showEmail: Boolean = false) {
+# @skip — conditionally skip a field (client-side)
+query GetUser($includeEmail: Boolean!) {
   user(id: "1") {
     name
-    email @skip(if: $showEmail)   # Skipped when $showEmail is true
-    avatar
+    email @skip(if: $includeEmail)
   }
 }
 
-# @include — conditionally include a field
-query GetUser($includeEmail: Boolean = true) {
+# @include — conditionally include a field (client-side)
+query GetUser($withPosts: Boolean!) {
   user(id: "1") {
     name
-    email @include(if: $includeEmail)  # Included when $includeEmail is true
+    posts @include(if: $withPosts) {
+      title
+    }
   }
 }
+
+# @specifiedBy — for custom scalar types (GraphQL 2021 spec)
+scalar UUID @specifiedBy(url: "https://tools.ietf.org/html/rfc4122")
 ```
 
 ### Custom Directives
 
 ```graphql
 # Declare custom directives in SDL
-directive @auth(requires: Role = USER) on FIELD_DEFINITION
-
-directive @rateLimit(
-  max: Int!
-  window: String!   # "1m", "1h", "1d"
-) on FIELD_DEFINITION
-
+directive @auth(requires: UserRole = USER) on FIELD_DEFINITION | OBJECT
+directive @rateLimit(max: Int!, window: String!) on FIELD_DEFINITION
 directive @cacheControl(
   maxAge: Int
   scope: CacheControlScope
-) on FIELD_DEFINITION | OBJECT | INTERFACE
+) on FIELD_DEFINITION
 
-directive @deprecated(reason: String = "No longer supported") on FIELD_DEFINITION | ENUM_VALUE
-
-directive @external on FIELD_DEFINITION       # Apollo Federation
-directive @requires(fields: String!) on FIELD_DEFINITION  # Apollo Federation
-directive @key(fields: String!) on OBJECT     # Apollo Federation
-
-# Use directives on type fields
-type User {
-  id: ID!
-  name: String!
-  email: String! @auth(requires: ADMIN)
-  # Only admins can query email
-  salary: Float @auth(requires: ADMIN)
+enum CacheControlScope {
+  PUBLIC
+  PRIVATE
 }
 
 type Query {
-  publicFeed: [Post!]! @cacheControl(maxAge: 60)
-  currentUser: User @auth(requires: USER)
-  adminDashboard: AdminData @auth(requires: ADMIN)
-  sensitiveSearch(q: String!): [SearchResult!]! @rateLimit(max: 10, window: "1m")
+  publicPosts: [Post!]! @cacheControl(maxAge: 60, scope: PUBLIC)
+  adminStats: AdminStats!
+    @auth(requires: ADMIN)
+    @rateLimit(max: 10, window: "1m")
+  myProfile: User @auth
 }
 ```
 
-## Schema Extension
+## Schema Extensions
 
 ```graphql
-# Extend types — useful for schema stitching, modular schemas, and federation
-extend type User {
-  # Add fields to User from a different module
-  billingInfo: BillingInfo @auth(requires: USER)
-  subscriptionTier: SubscriptionTier!
-}
-
+# Extend types (useful for modular schema organization or federation)
 extend type Query {
-  # Add queries from a different module
-  billingHistory(userId: ID!): [Invoice!]! @auth(requires: ADMIN)
+  orders(userId: ID): [Order!]!
+  order(id: ID!): Order
 }
 
 extend type Mutation {
-  updateSubscription(userId: ID!, tier: SubscriptionTier!): User! @auth(requires: ADMIN)
+  createOrder(input: CreateOrderInput!): CreateOrderPayload!
 }
 
-# Extend the root schema type
-extend schema @link(url: "https://specs.apollo.dev/federation/v2.0")
+extend type User {
+  orders(first: Int, after: String): OrderConnection!
+  orderCount: Int!
+}
+
+# Extend the root schema itself
+extend schema {
+  subscription: Subscription
+}
 ```
 
 ## Naming Conventions
 
-| Element | Convention | Example |
-|---------|-----------|---------|
-| Type names | PascalCase | `UserProfile`, `OrderStatus` |
-| Field names | camelCase | `firstName`, `createdAt`, `totalPrice` |
-| Enum values | SCREAMING_SNAKE_CASE | `ORDER_PENDING`, `USER_ACTIVE` |
-| Input types | PascalCase + Input suffix | `CreateUserInput`, `UpdateOrderInput` |
-| Mutation names | verb + noun | `createUser`, `deletePost`, `updateOrderStatus` |
-| Query names | get/list/search + noun | `user`, `users`, `searchProducts` |
-| Connection types | noun + Connection | `UserConnection`, `PostConnection` |
-| Edge types | noun + Edge | `UserEdge`, `PostEdge` |
+| Element       | Convention                              | Example                                     |
+| ------------- | --------------------------------------- | ------------------------------------------- |
+| Types         | PascalCase                              | `UserProfile`, `OrderItem`                  |
+| Fields        | camelCase                               | `firstName`, `createdAt`                    |
+| Arguments     | camelCase                               | `userId`, `pageSize`                        |
+| Enums         | PascalCase type, SCREAMING_SNAKE values | `enum OrderStatus { PENDING, IN_TRANSIT }`  |
+| Input types   | PascalCase + `Input` suffix             | `CreateUserInput`                           |
+| Payload types | PascalCase + `Payload` suffix           | `CreateUserPayload`                         |
+| Connections   | PascalCase + `Connection` suffix        | `UserConnection`                            |
+| Edges         | PascalCase + `Edge` suffix              | `UserEdge`                                  |
+| Mutations     | verb + noun (imperative)                | `createUser`, `deletePost`, `updateProfile` |
+| Queries       | noun (descriptive)                      | `user`, `users`, `featuredProducts`         |
 
-## Pagination — The Connections Spec
+## Pagination: Connections Spec
 
-The Relay Connection specification is the standard for paginating lists in GraphQL.
+The **Relay Connections Specification** is the most widely adopted pagination pattern in GraphQL.
 
 ```graphql
-# Connection types for pagination
+# Connection types
 type UserConnection {
-  edges: [UserEdge!]!
+  edges: [UserEdge]
   pageInfo: PageInfo!
   totalCount: Int!
 }
@@ -380,24 +493,22 @@ type PageInfo {
   endCursor: String
 }
 
-# Use in queries with forward/backward pagination
+# Query with cursor-based pagination
 type Query {
   users(
-    # Forward pagination
-    first: Int
-    after: String
-    # Backward pagination
-    last: Int
-    before: String
-    # Filtering and sorting
-    filter: UserFilterInput
-    orderBy: UserOrderInput
+    first: Int # forward pagination: take N after cursor
+    after: String # cursor to paginate after
+    last: Int # backward pagination: take N before cursor
+    before: String # cursor to paginate before
+    # Filters
+    search: String
+    role: UserRole
   ): UserConnection!
 }
 ```
 
 ```graphql
-# Client query using connections (forward pagination)
+# Client usage
 query GetUsers($first: Int!, $after: String) {
   users(first: $first, after: $after) {
     edges {
@@ -406,7 +517,6 @@ query GetUsers($first: Int!, $after: String) {
         id
         name
         email
-        createdAt
       }
     }
     pageInfo {
@@ -419,83 +529,75 @@ query GetUsers($first: Int!, $after: String) {
 ```
 
 ```javascript
-// Implementing cursor-based pagination in resolvers
+// Server-side resolver for connections
 const resolvers = {
   Query: {
-    users: async (_, { first = 20, after, last, before, filter }, { db }) => {
-      let query = db.users.createQueryBuilder('user');
+    users: async (
+      _,
+      { first = 20, after, last, before, search, role },
+      { db },
+    ) => {
+      // Decode cursor (typically base64-encoded ID or offset)
+      const afterId = after ? Buffer.from(after, 'base64').toString() : null;
 
-      if (filter?.search) {
-        query = query.where('user.name ILIKE :search OR user.email ILIKE :search', {
-          search: `%${filter.search}%`,
-        });
-      }
+      const whereClause = {
+        ...(search && { name: { contains: search } }),
+        ...(role && { role }),
+        ...(afterId && { id: { gt: afterId } }),
+      };
 
-      if (after) {
-        // after cursor is base64(userId)
-        const afterId = Buffer.from(after, 'base64').toString('utf8');
-        query = query.andWhere('user.id > :afterId', { afterId });
-      }
-
-      const [users, totalCount] = await query
-        .orderBy('user.id', 'ASC')
-        .take(first + 1)  // Fetch one extra to check hasNextPage
-        .getManyAndCount();
+      const users = await db.user.findMany({
+        where: whereClause,
+        take: (first ?? 20) + 1, // fetch one extra to check hasNextPage
+        orderBy: { id: 'asc' },
+      });
 
       const hasNextPage = users.length > first;
-      if (hasNextPage) users.pop();  // Remove the extra item
-
-      const edges = users.map(user => ({
-        node: user,
-        cursor: Buffer.from(String(user.id)).toString('base64'),
-      }));
+      const nodes = hasNextPage ? users.slice(0, -1) : users;
 
       return {
-        edges,
-        totalCount,
+        edges: nodes.map((user) => ({
+          node: user,
+          cursor: Buffer.from(user.id.toString()).toString('base64'),
+        })),
         pageInfo: {
           hasNextPage,
           hasPreviousPage: !!after,
-          startCursor: edges[0]?.cursor ?? null,
-          endCursor: edges[edges.length - 1]?.cursor ?? null,
+          startCursor: nodes[0]
+            ? Buffer.from(nodes[0].id.toString()).toString('base64')
+            : null,
+          endCursor: nodes[nodes.length - 1]
+            ? Buffer.from(nodes[nodes.length - 1].id.toString()).toString(
+                'base64',
+              )
+            : null,
         },
+        totalCount: await db.user.count({ where: whereClause }),
       };
     },
   },
 };
 ```
 
-:::caution[Offset vs Cursor Pagination]
-Offset pagination (`LIMIT 20 OFFSET 60`) has issues with large datasets: slow at high offsets, and items can appear or disappear when data changes during pagination. Cursor-based pagination is more reliable and performant for production use. Use offset only for simple cases where precise page navigation is required.
-:::
-
 ## Schema Validation Rules
 
-GraphQL schemas must follow these rules:
-1. Each type must have at least one field
-2. Field names must be unique within a type
-3. Types cannot reference themselves in a way that creates an infinite loop without nullable fields
-4. Input types cannot reference Object types (only scalars, enums, other inputs)
-5. Interfaces must be implemented completely — all interface fields must appear in implementing types
-6. Union members must be Object types (not scalars, interfaces, or other unions)
-7. Directives cannot be applied multiple times to the same location (unless `repeatable`)
+GraphQL validators enforce these rules at schema build time:
 
-```graphql
-# ❌ Invalid: input type referencing object type
-input CreatePostInput {
-  author: User!  # Error: User is an Object type, not an Input type
-}
+- All types referenced in a schema must be defined
+- Field names within a type must be unique
+- Argument names within a field must be unique
+- Interface fields must be implemented by all implementing types
+- Union members must be object types (not scalars, interfaces, or other unions)
+- Input types cannot reference output types
+- There must be no circular references in input types
+- Subscription type must have exactly one root field per subscription operation
 
-# ✅ Valid: reference by ID or use an input type
-input CreatePostInput {
-  authorId: ID!
-}
+:::tip[Schema Linting]
+Use `graphql-schema-linter` or `eslint-plugin-graphql` to enforce naming conventions, require descriptions, detect deprecated field usage, and other best practices in CI:
 
-# ❌ Invalid: union of non-object types
-union Result = String | Int  # Error: scalars cannot be in unions
-
-# ✅ Valid: wrap scalars in object types
-type StringResult { value: String! }
-type IntResult { value: Int! }
-union Result = StringResult | IntResult
+```bash
+npm install graphql-schema-linter
+npx graphql-schema-linter schema.graphql
 ```
+
+:::

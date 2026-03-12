@@ -31,7 +31,11 @@ export default defineConfig({
         replacesTitle: false,
       },
       social: [
-        { icon: 'github', label: 'GitHub', href: 'https://github.com/your-username/code-documentation' },
+        {
+          icon: 'github',
+          label: 'GitHub',
+          href: 'https://github.com/your-username/code-documentation',
+        },
       ],
       editLink: {
         baseUrl:
@@ -362,7 +366,6 @@ export default defineConfig({
         }),
         starlightTags(),
       ],
-
     }),
     AstroPWA({
       mode: 'production',

@@ -6,170 +6,169 @@ sidebar:
 tags: [devops, docker]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
 # Docker
 
-Docker is an open-source platform for developing, shipping, and running applications in **containers** — lightweight, portable, self-sufficient units that package an application's code alongside all its dependencies, libraries, and configuration. Write once, run anywhere.
+Docker is an open-source platform for building, shipping, and running applications in **containers** — lightweight, portable, self-sufficient units that package application code alongside all its dependencies, libraries, and runtime configuration.
+
+Released in 2013 by Solomon Hykes at dotCloud (later renamed Docker, Inc.), Docker popularized the Linux container model and became the de facto standard for packaging and distributing software. Today it underpins most modern CI/CD pipelines, microservice architectures, and cloud-native deployments.
 
 ---
 
 ## Containers vs Virtual Machines
 
-Both containers and VMs provide isolation, but they achieve it at different layers of the stack.
+Both containers and VMs provide isolation, but they operate at fundamentally different layers of the stack.
 
-| Feature | Containers | Virtual Machines |
-|---|---|---|
-| **Isolation** | Process-level (shared OS kernel) | Full OS-level (hypervisor) |
-| **Startup time** | Milliseconds | Seconds to minutes |
-| **Image size** | Megabytes | Gigabytes |
-| **Memory overhead** | Minimal | High (full OS per VM) |
-| **Portability** | Excellent | Good |
-| **Security isolation** | Good (namespaces + cgroups) | Excellent (hardware boundary) |
-| **Use case** | Microservices, CI/CD, dev environments | Legacy apps, full OS requirements |
-| **Density** | Hundreds per host | Tens per host |
-| **Persistent storage** | Volumes / bind mounts | Virtual disks |
-| **Networking** | Virtual Ethernet, overlay networks | Full virtual NIC |
+| Feature                | Containers                           | Virtual Machines             |
+| ---------------------- | ------------------------------------ | ---------------------------- |
+| **Isolation level**    | Process-level (namespaces + cgroups) | Full hardware virtualization |
+| **Boot time**          | Milliseconds                         | Seconds to minutes           |
+| **Image size**         | Megabytes                            | Gigabytes                    |
+| **Resource overhead**  | Minimal (shared OS kernel)           | High (full OS per VM)        |
+| **Density**            | Hundreds per host                    | Tens per host                |
+| **OS portability**     | Same kernel required                 | Any guest OS                 |
+| **Security boundary**  | Weaker (shared kernel)               | Stronger (hypervisor)        |
+| **Persistent storage** | Volumes / bind mounts                | Full disk images             |
+| **Networking**         | Virtual bridges, overlays            | Virtual NICs, full stack     |
+| **Use case**           | Microservices, CI/CD, dev parity     | Strong isolation, mixed OS   |
 
-:::tip[Best of both worlds]
-Many production environments run containers **inside** VMs — you get the security isolation of VMs with the density and speed of containers.
+:::tip[When to Use Each]
+Use containers for application isolation, fast iteration, and density. Use VMs when you need full OS-level isolation, different kernel versions, or are running untrusted workloads. In practice, containers often _run inside_ VMs in cloud environments — you get both.
 :::
 
 ---
 
 ## Docker Architecture
 
-Docker uses a **client-server architecture**. The Docker client talks to the Docker daemon, which does the heavy lifting of building, running, and distributing containers.
+Docker uses a client–server architecture. The Docker client communicates with the Docker daemon (server), which does the heavy lifting of building, running, and managing containers.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        Docker Host                              │
+│  Docker Host                                                    │
 │                                                                 │
-│  ┌──────────────┐     REST API / Unix socket                   │
-│  │ Docker Client│ ──────────────────────────────►  Docker      │
-│  │  (docker CLI)│                                  Daemon      │
-│  └──────────────┘                               (dockerd)      │
-│                                                      │          │
-│                         ┌────────────────────────────┤          │
-│                         ▼          ▼          ▼       │          │
-│                    ┌─────────┐ ┌──────┐ ┌────────┐   │          │
-│                    │ Images  │ │ Nets │ │ Volumes│   │          │
-│                    └────┬────┘ └──────┘ └────────┘   │          │
-│                         │                             │          │
-│              ┌──────────▼──────────┐                  │          │
-│              │     Containers      │                  │          │
-│              │  (running images)   │                  │          │
-│              └─────────────────────┘                  │          │
+│  ┌──────────┐   REST API   ┌─────────────────────────────────┐  │
+│  │  Docker  │◄────────────►│         Docker Daemon           │  │
+│  │  Client  │  (Unix sock  │  (dockerd)                      │  │
+│  │  (CLI)   │  /TCP/TLS)   │                                 │  │
+│  └──────────┘              │  ┌──────────┐  ┌────────────┐  │  │
+│                            │  │  Images  │  │ Containers │  │  │
+│                            │  └──────────┘  └────────────┘  │  │
+│                            │  ┌──────────┐  ┌────────────┐  │  │
+│                            │  │ Volumes  │  │  Networks  │  │  │
+│                            │  └──────────┘  └────────────┘  │  │
+│                            └─────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-                    ┌──────────────────┐
-                    │  Docker Registry │
-                    │  (Docker Hub,    │
-                    │   GHCR, ECR...)  │
-                    └──────────────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Docker Registry │  (Docker Hub, GHCR, ECR, ACR, private)
+└─────────────────┘
 ```
 
 ### Core Components
 
 **Docker Daemon (`dockerd`)**
-The long-running background service that manages Docker objects (images, containers, networks, volumes). It listens for Docker API requests and delegates container lifecycle to `containerd`.
+The background service that manages Docker objects. It listens for API requests and manages images, containers, networks, and volumes. On Linux it runs as a systemd service; on macOS/Windows it runs inside a lightweight VM.
 
 **Docker Client (`docker`)**
-The primary way users interact with Docker. When you run `docker run`, the client sends the command to `dockerd` via the Docker API (Unix socket `/var/run/docker.sock` or TCP).
+The primary CLI tool users interact with. Commands like `docker run`, `docker build`, and `docker pull` are sent via the REST API to the daemon. The client can connect to remote daemons via TCP with TLS.
 
 **Docker Registry**
-A storage and distribution system for Docker images. Docker Hub (`hub.docker.com`) is the default public registry. You can run private registries and use cloud-hosted options like GHCR, ECR, and GAR.
+A storage and distribution system for Docker images. Docker Hub (`hub.docker.com`) is the default public registry. Organizations typically also maintain private registries.
 
 **Images**
-Read-only templates built from a `Dockerfile`. Each instruction in a Dockerfile creates a new layer. Layers are shared and cached, making images efficient.
+Read-only templates built from a `Dockerfile`. Each image is composed of stacked, immutable **layers** stored in a content-addressable cache. Layers are shared across images, making storage efficient.
 
 **Containers**
-A runnable instance of an image. You can create, start, stop, move, or delete a container using the Docker API or CLI. Containers are isolated from other containers and the host by default.
+A runnable instance of an image. Docker adds a thin read-write layer on top of the image layers. Containers are isolated via Linux namespaces (pid, net, mnt, uts, ipc, user) and constrained via cgroups (CPU, memory, I/O).
 
 **Volumes**
-Persistent storage that exists independently of container lifecycle. Named volumes are managed by Docker; bind mounts map host paths into containers.
+Managed storage that persists beyond the container lifecycle. Stored in Docker's data directory (`/var/lib/docker/volumes/`) and decoupled from the container filesystem.
 
 **Networks**
-Virtual networks that allow containers to communicate. Docker provides several network drivers: bridge (default), host, none, overlay, and macvlan.
+Virtual networks that containers attach to. Docker provides several built-in drivers (bridge, host, overlay, macvlan) and supports third-party network plugins.
 
 ---
 
-## containerd and the OCI Standard
+## The OCI Standard
 
-Docker doesn't manage containers directly — it delegates to **containerd**, a CNCF-graduated container runtime.
+Docker helped establish the **Open Container Initiative (OCI)**, a set of open industry standards for container formats and runtimes. The two key specs are:
+
+- **OCI Image Spec** — defines the image format (layers, manifest, config)
+- **OCI Runtime Spec** — defines how to run a container (`runc` is the reference implementation)
+
+Any OCI-compliant tool can build, push, pull, and run OCI images — regardless of whether Docker was involved.
+
+### containerd
+
+`containerd` is the high-level container runtime that Docker (and Kubernetes) use under the hood. It handles image pulling, storage, networking attachment, and lifecycle management. Docker wraps `containerd` with its daemon API and CLI experience.
 
 ```
-docker CLI
-    │
-    ▼
-dockerd (Docker Daemon)
-    │
-    ▼
-containerd
-    │
-    ▼
-runc (OCI runtime)
-    │
-    ▼
-Linux namespaces + cgroups
+docker CLI → dockerd → containerd → runc → container process
 ```
 
-**OCI (Open Container Initiative)** defines two open standards:
-- **Image Spec** — how container images are structured and stored
-- **Runtime Spec** — how containers are created and run
-
-Because Docker images conform to the OCI Image Spec, they can run on any OCI-compliant runtime — not just Docker.
+Kubernetes communicates directly with `containerd` via the **Container Runtime Interface (CRI)**, bypassing Docker entirely since Kubernetes 1.24.
 
 ---
 
 ## Docker Desktop vs Docker Engine
 
-| | Docker Desktop | Docker Engine |
-|---|---|---|
-| **Platform** | macOS, Windows, Linux | Linux only |
-| **GUI** | Yes (dashboard, extensions) | No |
-| **Docker Compose** | Bundled | Separate install |
-| **Kubernetes** | Built-in single-node cluster | Manual setup |
-| **License** | Free for personal/small biz; paid for large enterprise | Apache 2.0 (free) |
-| **VM layer** | Runs in Linux VM (HyperKit/WSL2/VZ) | Runs natively |
-| **Dev experience** | Easiest on macOS/Windows | Best on Linux |
+|                | Docker Desktop                                   | Docker Engine         |
+| -------------- | ------------------------------------------------ | --------------------- |
+| **Platform**   | macOS, Windows, Linux                            | Linux only (natively) |
+| **GUI**        | Yes (dashboard, extensions)                      | No                    |
+| **Kubernetes** | Built-in single-node cluster                     | Not included          |
+| **VM**         | Uses Apple Hypervisor / WSL2                     | Runs on host kernel   |
+| **License**    | Free for personal/small biz; paid for enterprise | Apache 2.0 (free)     |
+| **Best for**   | Developer workstations                           | CI servers, Linux VMs |
 
-:::caution[Docker Desktop License]
-Since 2022, Docker Desktop requires a paid subscription for companies with more than 250 employees or over $10 million in annual revenue. Docker Engine remains free and open source under Apache 2.0.
+:::caution[Docker Desktop Licensing]
+Docker Desktop requires a paid subscription for companies with more than 250 employees or $10M in annual revenue. Docker Engine itself remains free and open source under Apache 2.0. For CI/CD runners and Linux servers, install Docker Engine directly.
 :::
 
 ---
 
 ## Docker vs Podman
 
-**Podman** is a daemonless, rootless container engine from Red Hat that is largely CLI-compatible with Docker.
+**Podman** is a daemonless, rootless container tool developed by Red Hat. It's API-compatible with Docker and can act as a drop-in replacement.
 
-| Feature | Docker | Podman |
-|---|---|---|
-| **Daemon** | Requires `dockerd` | Daemonless (fork-exec model) |
-| **Root requirement** | Historically required root | Rootless by default |
-| **Compose support** | docker compose v2 | podman-compose (third-party) |
-| **Pod support** | Via Kubernetes/Compose | Native pod concept |
-| **systemd integration** | Extra configuration | Native `podman generate systemd` |
-| **CLI compatibility** | `docker` | `podman` (alias-compatible) |
-| **OCI compliant** | Yes | Yes |
+| Feature                 | Docker                       | Podman                                  |
+| ----------------------- | ---------------------------- | --------------------------------------- |
+| **Architecture**        | Daemon-based (`dockerd`)     | Daemonless (fork/exec)                  |
+| **Root required**       | By default (can be rootless) | Rootless by default                     |
+| **Compose**             | `docker compose` (built-in)  | `podman-compose` (separate)             |
+| **Pods**                | Not native                   | Native (mirrors K8s pods)               |
+| **systemd integration** | Limited                      | First-class (`podman generate systemd`) |
+| **OCI compliant**       | Yes                          | Yes                                     |
 
-Most `docker` commands work identically with `podman` — you can often alias `docker=podman`.
+For most developers on Linux, `alias docker=podman` works for the majority of use cases.
 
 ---
 
-## Use Cases
+## Key Use Cases
 
-Docker excels at the following scenarios:
+**Local Development**
+Run databases (PostgreSQL, MySQL, Redis), message brokers (Kafka, RabbitMQ), and third-party services locally without polluting your host OS. Destroy and recreate in seconds.
 
-- **Microservices** — Package each service with its exact dependencies; deploy, scale, and update independently
-- **CI/CD pipelines** — Reproducible build and test environments; no "works on my machine" problems
-- **Development environments** — `docker compose up` to spin up a full stack (app + DB + cache + proxy) in seconds
-- **Application isolation** — Run multiple versions of the same software side-by-side without conflicts
-- **Cloud-native deployment** — The foundation for Kubernetes and container orchestration platforms
-- **Legacy app modernization** — Containerize existing apps for easier deployment without full rewrites
-- **Data science / ML** — Reproducible environments with pinned CUDA/library versions
+**Consistent Environments**
+Eliminate "works on my machine" problems. The container carries its own OS libraries, runtimes, and dependencies — identical across developer laptops, CI runners, and production servers.
+
+**Microservices**
+Package each service with its own runtime and dependencies. Independent deployments, independent scaling, clear service boundaries.
+
+**CI/CD Pipelines**
+Build once, push to registry, pull in any environment. Docker images are the universal artifact format for modern pipelines.
+
+**Application Packaging and Distribution**
+Ship software as a self-contained image. No installation scripts, no dependency conflicts, no OS compatibility matrix.
 
 ---
 
@@ -177,31 +176,71 @@ Docker excels at the following scenarios:
 
 <CardGrid>
   <Card title="Getting Started" icon="rocket">
-    Install Docker, run your first containers, and master essential CLI commands.
-    [Getting Started →](/infra/docker/getting-started)
+    Install Docker, run your first container, and learn the essential CLI commands for day-to-day use.
+
+    [→ Getting Started](/infra/docker/getting-started)
+
 </Card>
-  <Card title="Dockerfile" icon="document">
-    Write optimized Dockerfiles with multi-stage builds, caching, and security best practices.
-    [Dockerfile →](/infra/docker/dockerfile)
+  <Card title="Dockerfile Reference" icon="document">
+    Master every Dockerfile instruction, layer caching, multi-stage builds, and base image selection strategies.
+
+    [→ Dockerfile](/infra/docker/dockerfile)
+
 </Card>
   <Card title="Docker Compose" icon="list-format">
-    Define and run multi-container applications with docker compose.
-    [Compose →](/infra/docker/compose)
+    Define and run multi-container applications with Compose — services, networks, volumes, and override files.
+
+    [→ Docker Compose](/infra/docker/compose)
+
 </Card>
-  <Card title="Networking" icon="random">
-    Understand Docker network types, DNS resolution, and inter-container communication.
-    [Networking →](/infra/docker/networking)
+  <Card title="Networking" icon="bars">
+    Understand Docker network drivers, container DNS, inter-service communication, and port publishing.
+
+    [→ Networking](/infra/docker/networking)
+
 </Card>
-  <Card title="Volumes" icon="open-book">
-    Persist data with named volumes, bind mounts, and tmpfs. Backup and restore strategies.
-    [Volumes →](/infra/docker/volumes)
+  <Card title="Volumes & Storage" icon="open-book">
+    Persist data with named volumes, bind mounts, and tmpfs. Backup, restore, and volume driver patterns.
+
+    [→ Volumes](/infra/docker/volumes)
+
 </Card>
-  <Card title="Registry" icon="external">
-    Push and pull images from Docker Hub, GHCR, ECR, and private registries.
-    [Registry →](/infra/docker/registry)
+  <Card title="Registries" icon="external">
+    Push and pull images from Docker Hub, GHCR, ECR, and private registries. Multi-arch builds and image scanning.
+
+    [→ Registry](/infra/docker/registry)
+
 </Card>
-  <Card title="Production" icon="setting">
-    Resource limits, logging, security hardening, health checks, and graceful shutdown.
-    [Production →](/infra/docker/production)
+  <Card title="Production" icon="approve-check-circle">
+    Harden containers for production: resource limits, logging drivers, secrets, security options, and health checks.
+
+    [→ Production](/infra/docker/production)
+
 </Card>
 </CardGrid>
+
+---
+
+## Quick Reference
+
+```bash
+# Lifecycle
+docker run -d -p 8080:80 --name my-app nginx:alpine
+docker stop my-app && docker start my-app
+docker rm -f my-app
+
+# Images
+docker build -t my-image:latest .
+docker pull postgres:16-alpine
+docker images
+docker rmi my-image:latest
+
+# Inspect
+docker ps -a
+docker logs -f my-app
+docker exec -it my-app sh
+docker inspect my-app
+
+# Cleanup
+docker system prune -af --volumes
+```

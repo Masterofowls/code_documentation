@@ -1,277 +1,331 @@
 ---
 title: Getting Started with C++
-description: Compiler flags, CMake, package managers, namespaces, auto, references, nullptr, and your first C++ class.
+description: Compiler flags, CMake setup, vcpkg, namespaces, auto type deduction, references, std::string, std::vector, and first class example.
 sidebar:
   order: 2
 tags: [systems, cpp, c]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
 # Getting Started with C++
 
 ## Compiler Flags
 
+<Tabs>
+  <TabItem label="g++">
 ```bash
-# C++20 with all important warnings
-g++ -std=c++20 -Wall -Wextra -Wpedantic -Wshadow -Wconversion main.cpp -o program
+# Minimum recommended flags for any C++20 project
+g++ -std=c++20 -Wall -Wextra -Wpedantic -o myapp main.cpp
 
-# Debug build with sanitizers
-g++ -std=c++20 -Wall -Wextra -g -O0 \
-    -fsanitize=address,undefined \
-    -fno-omit-frame-pointer \
-    main.cpp -o program_debug
+# Debug build
+
+g++ -std=c++20 -Wall -Wextra -g -O0 -o myapp_debug main.cpp
 
 # Release build
-g++ -std=c++20 -O2 -DNDEBUG main.cpp -o program_release
 
-# Optimized release with link-time optimization
-g++ -std=c++20 -O3 -march=native -flto -DNDEBUG main.cpp -o program_fast
+g++ -std=c++20 -O2 -DNDEBUG -o myapp main.cpp
 
-# Clang equivalent
-clang++ -std=c++20 -Wall -Wextra -O2 main.cpp -o program
+# With sanitizers (development only)
 
-# MSVC
-cl /std:c++20 /W4 /O2 /EHsc main.cpp
-```
+g++ -std=c++20 -g -fsanitize=address,undefined,leak -o myapp main.cpp
+
+# Profile-guided optimization (two-pass)
+
+g++ -std=c++20 -O2 -fprofile-generate main.cpp -o myapp
+./myapp # Run to collect profile data
+g++ -std=c++20 -O2 -fprofile-use main.cpp -o myapp_pgo
+
+# Link-time optimization
+
+g++ -std=c++20 -O2 -flto -o myapp main.cpp utils.cpp
+
+# All warnings as errors (use in CI)
+
+g++ -std=c++20 -Wall -Wextra -Werror -o myapp main.cpp
+
+# Additional useful warnings
+
+g++ -std=c++20 -Wall -Wextra \
+ -Wshadow \
+ -Wnon-virtual-dtor \
+ -Wold-style-cast \
+ -Wcast-align \
+ -Wunused \
+ -Woverloaded-virtual \
+ -Wconversion \
+ -Wsign-conversion \
+ -Wdouble-promotion \
+ -Wformat=2 \
+ -o myapp main.cpp
+
+````
+</TabItem>
+  <TabItem label="clang++">
+```bash
+# clang++ with libc++
+clang++ -std=c++20 -stdlib=libc++ -Wall -Wextra -o myapp main.cpp
+
+# Or with libstdc++ (GCC's standard library)
+clang++ -std=c++20 -stdlib=libstdc++ -Wall -Wextra -o myapp main.cpp
+
+# Clang-specific: enable all useful warnings
+clang++ -std=c++20 -Weverything \
+    -Wno-c++98-compat \
+    -Wno-padded \
+    -o myapp main.cpp
+
+# Static analysis
+clang-tidy main.cpp -- -std=c++20
+scan-build g++ -std=c++20 main.cpp -o myapp
+````
+
+</TabItem>
+  <TabItem label="MSVC">
+```bash
+# Visual Studio Developer Command Prompt
+cl /std:c++20 /W4 /WX /EHsc main.cpp /Fe:myapp.exe
+
+# Debug with edit-and-continue
+
+cl /std:c++20 /W4 /EHsc /ZI /Od main.cpp /Fe:myapp_debug.exe
+
+# Release with optimization
+
+cl /std:c++20 /W4 /EHsc /O2 /GL /DNDEBUG main.cpp /Fe:myapp.exe
+
+# AddressSanitizer (MSVC 2019+)
+
+cl /std:c++20 /W4 /EHsc /fsanitize=address main.cpp /Fe:myapp.exe
+
+````
+</TabItem>
+</Tabs>
 
 ## CMake for C++
 
 ```cmake
-# CMakeLists.txt — modern CMake (3.20+)
-cmake_minimum_required(VERSION 3.20)
-project(MyApp VERSION 1.0.0 LANGUAGES CXX)
+# CMakeLists.txt — Production-quality C++20 project
+
+cmake_minimum_required(VERSION 3.25)
+
+project(MyApp
+    VERSION 1.0.0
+    DESCRIPTION "A C++20 application"
+    LANGUAGES CXX
+)
 
 # Require C++20 globally
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)   # No GNU extensions
+set(CMAKE_CXX_EXTENSIONS OFF)   # No compiler-specific extensions
 
-# Generate compile_commands.json for IDE/linters
+# Improve IDE integration
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Sources
-add_executable(my_app
-    src/main.cpp
-    src/app.cpp
-    src/utils.cpp
+# Source files
+file(GLOB_RECURSE APP_SOURCES "src/*.cpp")
+file(GLOB_RECURSE APP_HEADERS "include/*.hpp" "include/*.h")
+
+# Main executable
+add_executable(myapp ${APP_SOURCES} ${APP_HEADERS})
+
+# Compile features (alternative to setting CMAKE_CXX_STANDARD)
+target_compile_features(myapp PUBLIC cxx_std_20)
+
+# Include directories
+target_include_directories(myapp
+    PUBLIC  include/          # Part of public API
+    PRIVATE src/internal/     # Implementation only
 )
 
-# Include directories (PRIVATE = only for this target)
-target_include_directories(my_app PRIVATE include/)
-
-# Compiler warnings as interface (propagates to consumers)
-add_library(project_warnings INTERFACE)
-target_compile_options(project_warnings INTERFACE
-    $<$<CXX_COMPILER_ID:GNU,Clang>:
-        -Wall -Wextra -Wpedantic -Wshadow -Wconversion>
-    $<$<CXX_COMPILER_ID:MSVC>:
-        /W4 /permissive->
+# Compiler-specific warning flags
+target_compile_options(myapp PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:   -Wall -Wextra -Wpedantic -Wshadow -Wnon-virtual-dtor>
+    $<$<CXX_COMPILER_ID:Clang>: -Wall -Wextra -Wpedantic -Wshadow -Wnon-virtual-dtor>
+    $<$<CXX_COMPILER_ID:MSVC>:  /W4 /permissive->
 )
-target_link_libraries(my_app PRIVATE project_warnings)
 
-# Sanitizers (debug only)
-option(ENABLE_SANITIZERS "Enable address and UB sanitizers" OFF)
-if(ENABLE_SANITIZERS)
-    target_compile_options(my_app PRIVATE -fsanitize=address,undefined)
-    target_link_options(my_app PRIVATE -fsanitize=address,undefined)
+# Build type-specific flags
+target_compile_options(myapp PRIVATE
+    $<$<CONFIG:Debug>:   $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-O0 -g>>
+    $<$<CONFIG:Release>: $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-O2 -DNDEBUG>>
+)
+
+# Link libraries
+target_link_libraries(myapp PRIVATE)
+
+# Find and use packages
+find_package(fmt QUIET)
+if(fmt_FOUND)
+    target_link_libraries(myapp PRIVATE fmt::fmt)
+    target_compile_definitions(myapp PRIVATE HAS_FMT)
 endif()
 
-# Find and link external library (e.g., fmt)
-find_package(fmt REQUIRED)
-target_link_libraries(my_app PRIVATE fmt::fmt)
-
-# Testing
+# Tests
 enable_testing()
 add_subdirectory(tests)
-```
+````
 
 ```bash
-# Build workflow
-cmake -B build -DCMAKE_BUILD_TYPE=Debug -DENABLE_SANITIZERS=ON
-cmake --build build --parallel 8
-ctest --test-dir build --output-on-failure
+# Configure and build
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel $(nproc)
 
-# Release
-cmake -B build-release -DCMAKE_BUILD_TYPE=Release
-cmake --build build-release
+# Run with sanitizers
+cmake -B build_san -DCMAKE_BUILD_TYPE=Debug \
+      -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined"
+cmake --build build_san
 ```
 
 ## Package Managers
 
 <Tabs>
   <TabItem label="vcpkg">
-    Microsoft's C++ package manager. Integrates with CMake and Visual Studio.
+```bash
+# Install vcpkg
+git clone https://github.com/microsoft/vcpkg
+./vcpkg/bootstrap-vcpkg.sh  # Linux/macOS
+# or: .\vcpkg\bootstrap-vcpkg.bat  # Windows
 
-    ```bash
-    git clone https://github.com/microsoft/vcpkg
-    ./vcpkg/bootstrap-vcpkg.sh
+# Install packages
 
-    # Install packages
-    ./vcpkg/vcpkg install fmt spdlog nlohmann-json
+./vcpkg/vcpkg install fmt nlohmann-json boost spdlog
 
-    # CMake integration
-    cmake -B build -DCMAKE_TOOLCHAIN_FILE=./vcpkg/scripts/buildsystems/vcpkg.cmake
-    ```
+# Integrate with CMake (add to cmake configure command)
 
-    ```cmake
-    # CMakeLists.txt — packages are found automatically
-    find_package(fmt CONFIG REQUIRED)
-    find_package(spdlog CONFIG REQUIRED)
-    target_link_libraries(my_app PRIVATE fmt::fmt spdlog::spdlog)
-    ```
-  </TabItem>
-  <TabItem label="Conan">
-    Decentralized C++ package manager with a recipe-based system.
+cmake -B build -DCMAKE_TOOLCHAIN_FILE=./vcpkg/scripts/buildsystems/vcpkg.cmake
 
-    ```bash
-    pip install conan
-    conan profile detect --force
+# Or use vcpkg.json manifest file in your project root:
 
-    # conanfile.txt
-    # [requires]
-    # fmt/10.1.1
-    # spdlog/1.12.0
-    # [generators]
-    # CMakeDeps
-    # CMakeToolchain
+````
 
-    conan install . --build=missing -s build_type=Release
-    cmake -B build -DCMAKE_TOOLCHAIN_FILE=build/Release/generators/conan_toolchain.cmake
-    cmake --build build
-    ```
-  </TabItem>
-</Tabs>
-
-## Your First C++ Class
-
-```cpp
-#include <iostream>
-#include <string>
-#include <format>   // C++20
-
-class Person {
-public:
-    // Constructor — initializer list (preferred over assignment in body)
-    Person(std::string name, int age)
-        : name_(std::move(name)), age_(age)
-    {
-        if (age_ < 0 || age_ > 150) {
-            throw std::invalid_argument("Invalid age: " + std::to_string(age_));
-        }
-    }
-
-    // Const member functions — don't modify the object
-    [[nodiscard]] const std::string& name() const { return name_; }
-    [[nodiscard]] int age() const { return age_; }
-
-    // Mutating member function
-    void birthday() { ++age_; }
-
-    // Overload stream insertion
-    friend std::ostream& operator<<(std::ostream& os, const Person& p)
-    {
-        return os << std::format("Person({}, {})", p.name_, p.age_);
-    }
-
-    // Spaceship operator — generates all comparisons (C++20)
-    auto operator<=>(const Person&) const = default;
-
-private:
-    std::string name_;
-    int         age_;
-};
-
-int main()
+```json
 {
-    Person alice{"Alice", 30};
-    Person bob{"Bob", 25};
-
-    std::cout << alice << '\n';  // Person(Alice, 30)
-    alice.birthday();
-    std::cout << "After birthday: " << alice.age() << '\n';  // 31
-
-    // Comparison via spaceship operator
-    if (alice > bob) {
-        std::cout << alice.name() << " is older\n";
-    }
-
-    // Vector of objects
-    std::vector<Person> team = {
-        {"Charlie", 28},
-        {"Diana", 32},
-        {"Eve", 27},
-    };
-
-    // Range-based sort by age
-    std::ranges::sort(team, {}, &Person::age);  // sort by member via projection
-    for (const auto& p : team) {
-        std::cout << p << '\n';
-    }
-
-    return 0;
+  "name": "myapp",
+  "version": "1.0.0",
+  "dependencies": [
+    "fmt",
+    "nlohmann-json",
+    "spdlog",
+    { "name": "boost-algorithm", "version>=": "1.84.0" }
+  ]
 }
+````
+
+</TabItem>
+  <TabItem label="Conan">
+```bash
+# Install Conan
+pip install conan
+
+# Configure default profile
+
+conan profile detect
+
+# conanfile.txt in project root
+
+````
+
+```ini
+[requires]
+fmt/10.2.1
+nlohmann_json/3.11.3
+spdlog/1.13.0
+
+[generators]
+CMakeDeps
+CMakeToolchain
+
+[layout]
+cmake_layout
+````
+
+```bash
+# Install dependencies
+conan install . --build=missing -s build_type=Release
+
+# Build
+cmake -B build -DCMAKE_TOOLCHAIN_FILE=build/Release/generators/conan_toolchain.cmake
+cmake --build build
 ```
+
+</TabItem>
+</Tabs>
 
 ## Namespaces
 
 ```cpp
 #include <iostream>
+#include <string>
 
-// Basic namespace
-namespace math {
-    const double PI = 3.14159265358979323846;
-    double sqrt(double x);  // separate from std::sqrt
-}
-
-// Nested namespace (C++17 shorthand: namespace math::trig)
-namespace math {
-    namespace trig {
-        double sin(double x);
-        double cos(double x);
-    }
-}
-// C++17 equivalent:
-namespace math::trig {
-    double tan(double x);
-}
-
-// Anonymous namespace — internal linkage (replaces `static` at file scope)
-namespace {
-    int internal_helper(int x) { return x * 2; }
-    const int MAX_SIZE = 100;
-}
-
-// Inline namespace — members visible in enclosing namespace (for ABI versioning)
+// Define a namespace
 namespace mylib {
-    inline namespace v2 {  // v2 is the default
-        struct Widget { int version = 2; };
+
+    // Everything inside is in the mylib:: scope
+    class Timer {
+    public:
+        void start();
+        void stop();
+        double elapsed_ms() const;
+    };
+
+    void log(const std::string& msg);
+
+    // Nested namespace (C++17: nested namespace shorthand)
+    namespace detail {
+        void internal_helper();
     }
-    namespace v1 {         // explicitly request v1
-        struct Widget { int version = 1; };
+
+    // C++17 nested namespace shorthand
+    namespace io::net {
+        void connect(const std::string& host, int port);
+    }
+
+} // namespace mylib
+
+// Anonymous namespace: internal linkage within translation unit
+// Better than `static` for limiting visibility of types and functions
+namespace {
+    const int kMaxRetries = 3;
+
+    bool internal_check(int value) {
+        return value >= 0 && value < 100;
     }
 }
 
-void namespace_demo()
-{
-    // Qualify with ::
-    double pi = math::PI;
-    double s  = math::trig::sin(pi / 2.0);
-    (void)s;
+// Inline namespace (C++11): symbols accessible from enclosing namespace
+// Useful for versioning ABI
+namespace mylib {
+    inline namespace v2 {
+        class Widget { /* v2 implementation */ };
+    }
+    namespace v1 {
+        class Widget { /* old implementation */ };
+    }
+}
 
-    // using declaration — brings one name into scope
-    using math::PI;
-    std::cout << PI << '\n';
+// Using declarations and directives
+void using_demo() {
+    // Using declaration: bring specific names into scope
+    using mylib::Timer;
+    Timer t;           // OK without mylib::
 
-    // using directive — brings all names into scope (avoid in headers!)
-    using namespace math::trig;
-    // sin, cos, tan now accessible without math::trig::
-    // Caution: can cause name conflicts
+    // Using directive: bring entire namespace into scope
+    // NEVER put "using namespace std;" in a header file
+    using namespace mylib;
+    log("Hello");      // OK
 
-    // ADL (Argument-Dependent Lookup) — automatic namespace lookup
-    mylib::v2::Widget w;
-    mylib::Widget w2;   // same as v2::Widget due to inline namespace
-    (void)w; (void)w2;
+    // Namespace alias (useful for long namespace names)
+    namespace ml = mylib;
+    ml::Timer t2;
 }
 ```
 
@@ -281,44 +335,40 @@ void namespace_demo()
 #include <vector>
 #include <map>
 #include <string>
+#include <memory>
 
-void auto_demo()
-{
-    // auto deduces the type from the initializer
-    auto i    = 42;          // int
-    auto d    = 3.14;        // double
-    auto f    = 3.14f;       // float
-    auto s    = std::string{"hello"};  // std::string (not const char*)
-    auto *p   = &i;          // int*
+void auto_demo() {
+    // auto deduces from initializer
+    auto x = 42;          // int
+    auto y = 3.14;        // double
+    auto z = 3.14f;       // float
+    auto s = std::string("hello");  // std::string
+    auto b = true;        // bool
 
-    // auto with STL — avoid writing long type names
+    // auto with complex types — saves typing
+    auto it = std::vector<int>().begin();  // std::vector<int>::iterator
+
     std::map<std::string, std::vector<int>> data;
-    auto it = data.begin();  // vs: std::map<std::string,std::vector<int>>::iterator
+    auto& ref = data["key"];  // std::vector<int>&
 
-    // auto in range-based for
-    std::vector<std::string> names = {"Alice", "Bob", "Charlie"};
-    for (const auto& name : names) {  // const auto& = const std::string&
-        std::cout << name << '\n';
+    // auto preserves const/reference with modifiers
+    const auto& cref = x;    // const int&
+    auto* ptr = &x;          // int*
+
+    // auto in range-for
+    std::vector<std::pair<int, std::string>> pairs = {{1, "a"}, {2, "b"}};
+    for (const auto& [id, name] : pairs) {   // Structured binding (C++17)
+        // id is const int&, name is const std::string&
     }
 
-    // auto& for modifying
-    for (auto& name : names) {
-        name += "!";
-    }
+    // Return type deduction (C++14+)
+    auto add = [](auto a, auto b) { return a + b; };  // Generic lambda
+    auto result = add(1, 2);     // int
+    auto result2 = add(1.5, 2);  // double
 
-    // auto for structured bindings (C++17)
-    std::map<std::string, int> scores{{"Alice", 95}, {"Bob", 87}};
-    for (const auto& [name, score] : scores) {  // structured binding
-        std::cout << name << ": " << score << '\n';
-    }
-
-    // decltype — deduce type without initializing
-    decltype(i) j = 10;     // int
-    decltype(auto) k = i;   // int (not int& — different from auto)
-
-    // Trailing return type
-    auto add = [](int a, int b) -> int { return a + b; };
-    (void)add;
+    // decltype: get type of expression without evaluating
+    decltype(x) copy = x;     // int
+    decltype(auto) ref2 = x;  // int (exact type, including refs)
 }
 ```
 
@@ -326,134 +376,144 @@ void auto_demo()
 
 ```cpp
 #include <iostream>
+#include <string>
 
-// Lvalue reference — alias for an existing object
-void increment(int& x) { ++x; }
+// Lvalue reference — alias to existing variable
+void lvalue_refs() {
+    int x = 42;
+    int& ref = x;   // ref IS x — same object
 
-// Const lvalue reference — read-only alias; extends temporary lifetime
-void print(const std::string& s) { std::cout << s << '\n'; }
+    ref = 100;
+    std::cout << x << '\n';   // 100 — x was modified
 
-// Rvalue reference (C++11) — binds to temporaries; enables move semantics
-void process(std::string&& s) {
-    std::string local = std::move(s);  // "steal" the string
-    std::cout << "processing: " << local << '\n';
+    // References must be initialized and cannot be rebound
+    // int& bad;          // Error: uninitialized reference
+    // ref = y;           // This assigns y's value to x, doesn't rebind ref
+
+    // Const reference: read-only alias, can bind to temporaries
+    const int& cref = x;       // Alias to x
+    const int& tmp_ref = 42;   // Binds to temporary — extends lifetime
+    // cref = 200;  // Error: const
 }
 
-// Reference vs pointer comparison
-void ref_vs_ptr()
-{
+// Passing by const reference — no copy, read-only
+void print_string(const std::string& s) {
+    std::cout << s << '\n';
+    // s += '!';  // Error: can't modify through const ref
+}
+
+// Passing by non-const reference — modify the original
+void to_upper_inplace(std::string& s) {
+    for (char& c : s) {
+        c = std::toupper(c);
+    }
+}
+
+// References vs pointers comparison
+void ref_vs_ptr() {
     int x = 10;
 
-    // Reference: always valid, can't be null, can't be reseated
-    int& ref = x;
-    ref = 20;          // modifies x (no dereference needed)
-    // int& bad;       // ERROR: references must be initialized
+    // Reference: always valid, no null, no arithmetic, must init
+    int& r = x;
+    r = 20;           // Modify x
 
-    // Pointer: can be null, can be reseated, explicit dereference
-    int* ptr = &x;
-    *ptr = 30;         // must dereference
-    ptr = nullptr;     // can point to nothing
-    ptr = &x;          // can be reseated to another object
-
-    std::cout << "x = " << x << '\n';  // 30
-
-    // Pass large object: prefer const ref over value (avoids copy)
-    // Modify caller's variable: use ref or pointer
-    // Optional or nullable: use pointer (ref can't be null)
-}
-
-int main()
-{
-    int n = 5;
-    increment(n);
-    std::cout << n << '\n';   // 6
-
-    print("hello");            // const ref binds to temporary std::string
-    print(std::string{"world"});
-
-    process(std::string{"temporary"});  // rvalue ref from temporary
-    // process(n);  // ERROR: n is an lvalue
-
-    ref_vs_ptr();
-    return 0;
+    // Pointer: can be null, arithmetic possible, must dereference
+    int* p = &x;
+    if (p) *p = 30;   // Null check, then dereference
+    p++;              // Pointer arithmetic (dangerous here)
 }
 ```
 
-## nullptr, override, final, default, delete, explicit
+## First Class: A Complete Example
 
 ```cpp
 #include <iostream>
-#include <memory>
+#include <string>
+#include <vector>
+#include <format>
+#include <stdexcept>
+#include <algorithm>
 
-// nullptr — type-safe null pointer (not 0, not NULL)
-void* get_ptr(bool condition) {
-    if (condition) return new int(42);
-    return nullptr;   // not 0 — avoids overload ambiguity
-}
+class Person {
+private:
+    std::string m_name;
+    int m_age;
 
-// Override / final — prevent silent virtual function hiding bugs
-struct Base {
-    virtual void draw() const { std::cout << "Base::draw\n"; }
-    virtual void update() = 0;  // pure virtual
-    virtual ~Base() = default;  // virtual destructor required for polymorphism
+public:
+    // Constructor with member initializer list (preferred over assignment in body)
+    Person(std::string name, int age)
+        : m_name(std::move(name))  // Move instead of copy
+        , m_age(age)
+    {
+        if (m_age < 0 || m_age > 150) {
+            throw std::invalid_argument(
+                std::format("Invalid age: {}", m_age)
+            );
+        }
+    }
+
+    // Const member functions: promise not to modify *this
+    const std::string& name() const { return m_name; }
+    int age() const { return m_age; }
+
+    // Non-const: modifies the object
+    void birthday() { ++m_age; }
+    void rename(std::string new_name) { m_name = std::move(new_name); }
+
+    // Comparison operator (C++20 spaceship <=> auto-generates all six)
+    auto operator<=>(const Person& other) const {
+        if (auto cmp = m_name <=> other.m_name; cmp != 0) return cmp;
+        return m_age <=> other.m_age;
+    }
+    bool operator==(const Person& other) const = default;
+
+    // Stream output
+    friend std::ostream& operator<<(std::ostream& os, const Person& p) {
+        return os << std::format("Person({}, {})", p.m_name, p.m_age);
+    }
 };
 
-struct Derived : Base {
-    void draw() const override { std::cout << "Derived::draw\n"; }  // override
-    void update() override {}
-};
+int main() {
+    std::vector<Person> people;
+    people.emplace_back("Alice", 30);
+    people.emplace_back("Bob", 25);
+    people.emplace_back("Charlie", 35);
 
-struct Leaf final : Derived {   // final — cannot be further derived
-    void draw() const override final {}  // also final — no further override
-};
+    // Range-based for with structured output
+    for (const auto& p : people) {
+        std::cout << p << '\n';
+    }
 
-// default and delete
-struct MyClass {
-    MyClass() = default;                         // generate default constructor
-    MyClass(const MyClass&) = default;           // generate copy constructor
-    MyClass& operator=(const MyClass&) = default;
-    MyClass(MyClass&&) = default;                // generate move constructor
-    MyClass& operator=(MyClass&&) = default;
-    ~MyClass() = default;
+    // Sort using <=>
+    std::ranges::sort(people, [](const Person& a, const Person& b) {
+        return a.age() < b.age();
+    });
 
-    // Explicitly disable
-    // (prevents copying — useful for RAII handles, mutexes, etc.)
-};
+    std::cout << "\nSorted by age:\n";
+    for (const auto& p : people) {
+        std::cout << std::format("  {:15s} age {}\n", p.name(), p.age());
+    }
 
-struct NonCopyable {
-    NonCopyable() = default;
-    NonCopyable(const NonCopyable&) = delete;             // no copy
-    NonCopyable& operator=(const NonCopyable&) = delete;  // no copy-assign
-    NonCopyable(NonCopyable&&) = default;                 // move OK
-    NonCopyable& operator=(NonCopyable&&) = default;
-};
-
-// explicit — prevents implicit single-argument constructor conversions
-struct Wrapper {
-    explicit Wrapper(int value) : val(value) {}
-    int val;
-};
-
-void take_wrapper(Wrapper w) { (void)w; }
-
-int main()
-{
-    void* p = get_ptr(true);
-    if (p != nullptr) { delete static_cast<int*>(p); }
-
-    Base* b = new Derived{};
-    b->draw();   // Derived::draw (virtual dispatch)
-    b->update();
-    delete b;
-
-    // Wrapper explicit: must be explicit
-    take_wrapper(Wrapper{42});  // OK
-    // take_wrapper(42);        // ERROR: no implicit conversion (explicit!)
-
-    NonCopyable nc;
-    NonCopyable nc2 = std::move(nc);  // move OK
-    // NonCopyable nc3 = nc2;         // ERROR: copy deleted
+    // Exception handling
+    try {
+        Person invalid("Bad", -1);
+    } catch (const std::invalid_argument& e) {
+        std::cerr << "Caught: " << e.what() << '\n';
+    }
 
     return 0;
 }
 ```
+
+:::tip[nullptr vs NULL vs 0]
+Always use `nullptr` in C++11+. `NULL` is typically `0` (an integer constant), which causes ambiguity in overload resolution. `nullptr` is of type `std::nullptr_t` and only implicitly converts to pointer types.
+
+```cpp
+void foo(int x);
+void foo(int* p);
+
+foo(NULL);     // Ambiguous or calls foo(int)!
+foo(nullptr);  // Always calls foo(int*)
+```
+
+:::

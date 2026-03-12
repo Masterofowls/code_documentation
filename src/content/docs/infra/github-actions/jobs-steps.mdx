@@ -1,89 +1,94 @@
 ---
-title: Jobs & Steps
-description: Job structure, outputs, service containers, caching, artifacts, and the full GitHub Actions step API.
+title: Jobs and Steps
+description: Master GitHub Actions job structure, outputs, service containers, caching, artifacts, and advanced step patterns.
 sidebar:
   order: 4
 tags: [devops, ci-cd]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
-Jobs are the execution units of a workflow. Each job runs on its own fresh runner. This page covers the complete job API, service containers, inter-job outputs, caching, and artifact management.
+## Job Structure Reference
 
-## Job Structure
-
-A job is defined by its ID key under `jobs:`. Here is the full set of job-level configuration options:
+A job is the fundamental unit of work in GitHub Actions. Each job runs on its own fresh runner instance.
 
 ```yaml
 jobs:
-  deploy:
-    name: Deploy to Production       # Display name (optional)
-    runs-on: ubuntu-latest            # Runner label
-    needs: [build, test]              # Job dependencies
-    if: github.ref == 'refs/heads/main'
-    environment:
+  my-job:
+    name: Human-readable name # shown in GitHub UI
+    runs-on: ubuntu-latest # runner label
+    needs: [previous-job] # dependencies
+    if: github.ref == 'refs/heads/main' # conditional execution
+    timeout-minutes: 30 # max runtime
+    continue-on-error: false # whether to fail the workflow on error
+    environment: # deployment environment
       name: production
-      url: https://myapp.com
-    timeout-minutes: 30               # Default: 360 (6 hours)
-    continue-on-error: false
+      url: https://app.example.com
     concurrency:
-      group: deploy-production
+      group: deploy-prod
       cancel-in-progress: false
-    permissions:
-      contents: read
-      id-token: write
-    outputs:
-      deployed-url: ${{ steps.deploy.outputs.url }}
-    strategy:
+    outputs: # values to share with downstream jobs
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      version: ${{ steps.version.outputs.value }}
+    env: # job-level environment variables
+      NODE_ENV: production
+    strategy: # matrix configuration
       matrix:
-        region: [us-east-1, eu-west-1]
-    env:
-      DEPLOY_ENV: production
-    steps:
-      - uses: actions/checkout@v4
+        os: [ubuntu-latest, macos-latest]
+    steps: []
 ```
 
 ## Job Outputs
 
-Pass data between jobs using outputs. A step writes to `$GITHUB_OUTPUT`; the job exposes the value; a downstream job reads it via `needs.<job-id>.outputs.<name>`.
+Job outputs allow passing data between jobs. Set them via `$GITHUB_OUTPUT` in a step, then declare them in the job's `outputs` block.
 
 ```yaml
 jobs:
   build:
     runs-on: ubuntu-latest
     outputs:
-      image-tag: ${{ steps.meta.outputs.image-tag }}
-      build-time: ${{ steps.build.outputs.timestamp }}
-
+      version: ${{ steps.get-version.outputs.version }}
+      image-digest: ${{ steps.build.outputs.digest }}
     steps:
-      - name: Generate image tag
-        id: meta
-        run: |
-          TAG="sha-${GITHUB_SHA::8}"
-          echo "image-tag=$TAG" >> $GITHUB_OUTPUT
+      - uses: actions/checkout@v4
 
-      - name: Record build time
+      - name: Get version from package.json
+        id: get-version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build Docker image
         id: build
         run: |
-          echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+          docker build -t myapp:latest .
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' myapp:latest)
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
 
   deploy:
-    runs-on: ubuntu-latest
     needs: build
+    runs-on: ubuntu-latest
     steps:
-      - name: Deploy image
+      - name: Use version from build job
         run: |
-          echo "Deploying ${{ needs.build.outputs.image-tag }}"
-          echo "Built at ${{ needs.build.outputs.build-time }}"
+          echo "Deploying version: ${{ needs.build.outputs.version }}"
+          echo "Image digest: ${{ needs.build.outputs.image-digest }}"
 ```
 
-:::tip[`$GITHUB_OUTPUT` replaces `set-output`]
-The old `echo "::set-output name=key::value"` workflow command is deprecated. Always use `echo "key=value" >> $GITHUB_OUTPUT` (appending to the file at `$GITHUB_OUTPUT`).
+:::caution[Deprecated set-output]
+The old `echo "::set-output name=key::value"` syntax is **deprecated and disabled**. Always use `echo "key=value" >> $GITHUB_OUTPUT`. The new `$GITHUB_OUTPUT` file approach is the only supported method.
 :::
 
 ## Service Containers
 
-Service containers are Docker containers that run alongside your job — useful for databases, caches, and other external dependencies in integration tests.
+Service containers spin up Docker images (databases, caches, etc.) alongside your job. They're available on the job's virtual network.
 
 ### PostgreSQL Service
 
@@ -91,7 +96,6 @@ Service containers are Docker containers that run alongside your job — useful 
 jobs:
   integration-test:
     runs-on: ubuntu-latest
-
     services:
       postgres:
         image: postgres:16
@@ -100,7 +104,7 @@ jobs:
           POSTGRES_PASSWORD: testpass
           POSTGRES_DB: testdb
         ports:
-          - 5432:5432
+          - 5432:5432 # map container port to host
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -111,17 +115,32 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Run migrations
+        run: npm run migrate
         env:
-          DATABASE_URL: postgresql://testuser:testpass@localhost:5432/testdb
-        run: npm run db:migrate
+          DATABASE_URL: postgres://testuser:testpass@localhost:5432/testdb
 
       - name: Run integration tests
-        env:
-          DATABASE_URL: postgresql://testuser:testpass@localhost:5432/testdb
         run: npm run test:integration
+        env:
+          DATABASE_URL: postgres://testuser:testpass@localhost:5432/testdb
 ```
 
-### Redis and PostgreSQL Together
+### Redis Service
+
+```yaml
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - 6379:6379
+    options: >-
+      --health-cmd "redis-cli ping"
+      --health-interval 10s
+      --health-timeout 5s
+      --health-retries 5
+```
+
+### Multiple Services
 
 ```yaml
 services:
@@ -129,121 +148,94 @@ services:
     image: postgres:16
     env:
       POSTGRES_PASSWORD: secret
-    options: >-
-      --health-cmd pg_isready
-      --health-interval 10s
-      --health-timeout 5s
-      --health-retries 5
     ports:
       - 5432:5432
+    options: --health-cmd pg_isready --health-interval 10s --health-retries 5
 
   redis:
-    image: redis:7-alpine
-    options: >-
-      --health-cmd "redis-cli ping"
-      --health-interval 10s
-      --health-timeout 5s
-      --health-retries 5
+    image: redis:7
     ports:
       - 6379:6379
-```
+    options: --health-cmd "redis-cli ping" --health-interval 10s --health-retries 5
 
-:::caution[Port mapping requirement]
-When running on `ubuntu-latest` (not inside a container), you must map ports with `ports:` to access the service via `localhost`. The service container is on Docker's internal network by default.
-:::
+  minio:
+    image: bitnami/minio:latest
+    env:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - 9000:9000
+```
 
 ## Container Jobs
 
-Run your entire job inside a Docker container instead of on the bare runner:
+Run the entire job inside a Docker container instead of directly on the runner VM:
 
 ```yaml
 jobs:
-  test:
+  build:
     runs-on: ubuntu-latest
     container:
       image: node:20-alpine
       env:
-        NODE_ENV: test
-      options: --cpus 2
+        CI: true
+      options: --cpus 2 --memory 4g
       volumes:
         - /tmp:/tmp
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    services:
-      db:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: secret
-        # Note: use service name as hostname, not localhost!
 
     steps:
       - uses: actions/checkout@v4
-      - run: npm ci
-      - name: Connect to DB
-        env:
-          DATABASE_URL: postgresql://postgres:secret@db:5432/postgres
-        run: npm test
+      - run: node --version # uses the container's node, not the runner's
+      - run: npm ci && npm test
 ```
-
-When using container jobs, service containers are accessible by their **service name** as the hostname (e.g., `db`, `redis`), not `localhost`.
 
 ## Caching with `actions/cache@v4`
 
-Caching stores and restores arbitrary paths between runs, reducing build times significantly.
+### Node.js (npm)
 
 ```yaml
-- name: Cache node_modules
-  id: cache-npm
+- name: Cache npm packages
   uses: actions/cache@v4
+  id: npm-cache
   with:
     path: ~/.npm
-    key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+    key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
     restore-keys: |
-      npm-${{ runner.os }}-
+      ${{ runner.os }}-npm-
 
-- name: Install (skip if cache hit)
-  if: steps.cache-npm.outputs.cache-hit != 'true'
+- name: Install dependencies
+  # Skip install if exact cache was restored
+  if: steps.npm-cache.outputs.cache-hit != 'true'
   run: npm ci
 ```
 
-### Cache Keys and Restore Keys
-
-The `key` must be an exact match for a cache hit. `restore-keys` are fallback prefix patterns:
+### Multiple Cache Paths
 
 ```yaml
-key: build-${{ runner.os }}-${{ hashFiles('**/yarn.lock') }}-${{ github.sha }}
-restore-keys: |
-  build-${{ runner.os }}-${{ hashFiles('**/yarn.lock') }}-
-  build-${{ runner.os }}-
-  build-
-```
-
-If the exact `key` is found → **cache hit** (restored, not saved again).
-If only `restore-keys` match → **partial hit** (restored, new cache saved with exact key at job end).
-
-### Common Cache Configurations
-
-<Tabs>
-<TabItem label="npm">
-```yaml
-- uses: actions/setup-node@v4
+- uses: actions/cache@v4
   with:
-    node-version: '20'
-    cache: 'npm'   # Built-in caching via setup-node
+    path: |
+      ~/.npm
+      node_modules
+      .next/cache
+    key: ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json') }}-${{ hashFiles('**/*.ts', '**/*.tsx') }}
+    restore-keys: |
+      ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json') }}-
+      ${{ runner.os }}-nextjs-
 ```
-</TabItem>
-<TabItem label="pip">
+
+### Python (pip)
+
 ```yaml
 - uses: actions/cache@v4
   with:
     path: ~/.cache/pip
-    key: pip-${{ runner.os }}-${{ hashFiles('**/requirements*.txt') }}
-    restore-keys: pip-${{ runner.os }}-
+    key: ${{ runner.os }}-pip-${{ hashFiles('requirements*.txt') }}
+    restore-keys: ${{ runner.os }}-pip-
 ```
-</TabItem>
-<TabItem label="Cargo">
+
+### Cargo (Rust)
+
 ```yaml
 - uses: actions/cache@v4
   with:
@@ -253,41 +245,40 @@ If only `restore-keys` match → **partial hit** (restored, new cache saved with
       ~/.cargo/registry/cache/
       ~/.cargo/git/db/
       target/
-    key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+    key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
 ```
-</TabItem>
-<TabItem label="Docker layers">
-```yaml
-- uses: actions/cache@v4
-  with:
-    path: /tmp/.buildx-cache
-    key: buildx-${{ runner.os }}-${{ github.sha }}
-    restore-keys: buildx-${{ runner.os }}-
-```
-</TabItem>
-</Tabs>
+
+:::tip[Cache Invalidation Strategy]
+Build your cache key from the content hash of your lockfile (`hashFiles`). When dependencies change, the key changes and the cache is rebuilt. The `restore-keys` fallback lets you still restore a partial cache to speed up installs.
+:::
 
 ## Artifacts
 
-Artifacts are files uploaded during a workflow run. They persist after the job finishes and can be downloaded from the GitHub UI or shared between jobs.
-
-### Upload Artifacts
+### Uploading Artifacts
 
 ```yaml
 - name: Upload test results
-  if: always()   # Upload even if tests fail
   uses: actions/upload-artifact@v4
+  if: always() # upload even if tests fail
   with:
-    name: test-results-${{ matrix.node }}
+    name: test-results-${{ matrix.os }}
     path: |
       coverage/
-      test-results.xml
-    retention-days: 30       # Default: 90, max: 90
-    if-no-files-found: error # error | warn | ignore
-    overwrite: false
+      test-results/
+      playwright-report/
+    retention-days: 30 # default: 90 days
+    compression-level: 6 # 0=none, 9=max (default: 6)
+    overwrite: false # fail if artifact name already exists
+
+- name: Upload build artifact
+  uses: actions/upload-artifact@v4
+  with:
+    name: dist-${{ github.sha }}
+    path: dist/
+    if-no-files-found: error # error, warn, or ignore
 ```
 
-### Download Artifacts
+### Downloading Artifacts
 
 ```yaml
 jobs:
@@ -301,116 +292,131 @@ jobs:
           path: dist/
 
   deploy:
-    runs-on: ubuntu-latest
     needs: build
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
         with:
           name: dist
-          path: dist/      # Download to this path
+          path: ./dist
 
-      - run: ls dist/
-
-  # Download ALL artifacts from this workflow run
-  report:
-    runs-on: ubuntu-latest
-    needs: [build]
-    steps:
-      - uses: actions/download-artifact@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        # Omit 'name' to download all artifacts
         with:
-          path: all-artifacts/   # No 'name' = download all
+          path: ./artifacts
+          # Each artifact goes into artifacts/<artifact-name>/
+
+      - run: ls -la ./dist
 ```
 
 ## `actions/github-script`
 
-Run JavaScript that has full access to the GitHub API via the `@octokit/rest` client:
+Run JavaScript with access to the Octokit API client:
 
 ```yaml
-- name: Comment on PR
-  uses: actions/github-script@v7
+- uses: actions/github-script@v7
   with:
     script: |
-      const { data: comments } = await github.rest.issues.listComments({
+      // Create a PR comment
+      const { data: comment } = await github.rest.issues.createComment({
+        issue_number: context.issue.number,
         owner: context.repo.owner,
         repo: context.repo.repo,
-        issue_number: context.issue.number,
+        body: `## 🚀 Deploy Preview\n\nPreview URL: https://preview-${context.sha.substring(0,7)}.example.com`
       });
+      console.log(`Created comment ${comment.id}`);
 
-      const botComment = comments.find(c =>
-        c.user.type === 'Bot' && c.body.includes('## Test Results')
-      );
+      // Get PR files
+      const { data: files } = await github.rest.pulls.listFiles({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        pull_number: context.issue.number
+      });
+      console.log(`PR changes ${files.length} files`);
+```
 
-      const body = `## Test Results\n✅ All tests passed at ${new Date().toISOString()}`;
+Output from github-script:
 
-      if (botComment) {
-        await github.rest.issues.updateComment({
-          owner: context.repo.owner,
-          repo: context.repo.repo,
-          comment_id: botComment.id,
-          body,
-        });
-      } else {
-        await github.rest.issues.createComment({
-          owner: context.repo.owner,
-          repo: context.repo.repo,
-          issue_number: context.issue.number,
-          body,
-        });
-      }
+```yaml
+- id: script-output
+  uses: actions/github-script@v7
+  with:
+    result-encoding: string
+    script: return 'hello from script'
+
+- run: echo "Output was: ${{ steps.script-output.outputs.result }}"
 ```
 
 ## Job Summary (`$GITHUB_STEP_SUMMARY`)
 
-Write Markdown to `$GITHUB_STEP_SUMMARY` and it appears in the workflow run summary page:
+Write rich Markdown to the job summary page (visible in the Actions run UI):
 
 ```yaml
 - name: Generate test summary
   if: always()
   run: |
-    echo "## Test Results" >> $GITHUB_STEP_SUMMARY
-    echo "" >> $GITHUB_STEP_SUMMARY
-    echo "| Status | Count |" >> $GITHUB_STEP_SUMMARY
-    echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-    echo "| ✅ Passed | $(grep -c 'PASS' test-output.txt || echo 0) |" >> $GITHUB_STEP_SUMMARY
-    echo "| ❌ Failed | $(grep -c 'FAIL' test-output.txt || echo 0) |" >> $GITHUB_STEP_SUMMARY
-```
+    cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+    ## 🧪 Test Results
 
-## Masking Sensitive Values
+    | Suite | Tests | Passed | Failed | Skipped |
+    |-------|-------|--------|--------|---------|
+    | Unit  | 142   | 140    | 2      | 0       |
+    | E2E   | 38    | 38     | 0      | 0       |
 
-Use `add-mask` to prevent a value from appearing in logs:
+    ### Failed Tests
+    - `AuthService > should reject invalid tokens`
+    - `UserController > should return 404 for unknown user`
+    EOF
 
-```yaml
-- name: Set dynamic secret
+- name: Summary with dynamic data
   run: |
-    DYNAMIC_TOKEN=$(./get-token.sh)
-    echo "::add-mask::$DYNAMIC_TOKEN"
-    echo "TOKEN=$DYNAMIC_TOKEN" >> $GITHUB_ENV
+    PASSED=$(cat test-results.json | jq '.numPassedTests')
+    FAILED=$(cat test-results.json | jq '.numFailedTests')
+    echo "## Test Results: $PASSED passed, $FAILED failed" >> $GITHUB_STEP_SUMMARY
+    if [ "$FAILED" -gt "0" ]; then
+      echo "❌ Some tests failed" >> $GITHUB_STEP_SUMMARY
+    else
+      echo "✅ All tests passed" >> $GITHUB_STEP_SUMMARY
+    fi
 ```
 
-Any value masked with `add-mask` is replaced with `***` in all subsequent log output.
+## Secret Masking
 
-## Environment Variables: `$GITHUB_ENV` and `$GITHUB_PATH`
-
-### Persist env vars across steps (`$GITHUB_ENV`)
+Mask sensitive values so they never appear in logs:
 
 ```yaml
-- name: Set environment variables for next steps
+- name: Mask a computed secret
   run: |
-    echo "APP_VERSION=$(node -p "require('./package.json').version")" >> $GITHUB_ENV
-    echo "BUILD_DATE=$(date -u +%Y%m%d)" >> $GITHUB_ENV
+    GENERATED_TOKEN=$(./scripts/generate-token.sh)
+    echo "::add-mask::$GENERATED_TOKEN"
+    echo "TOKEN=$GENERATED_TOKEN" >> $GITHUB_ENV
 
-- name: Use persisted env
-  run: echo "Building version $APP_VERSION on $BUILD_DATE"
+- name: Use masked token
+  run: |
+    # $TOKEN appears as *** in logs
+    curl -H "Authorization: Bearer $TOKEN" https://api.example.com/data
 ```
 
-### Add to PATH (`$GITHUB_PATH`)
+## Persisting Environment Variables Across Steps
 
 ```yaml
-- name: Add custom tools to PATH
-  run: echo "/usr/local/my-tools/bin" >> $GITHUB_PATH
+- name: Set variables for downstream steps
+  run: |
+    echo "DEPLOY_VERSION=1.2.3" >> $GITHUB_ENV
+    echo "DEPLOY_TIMESTAMP=$(date -u +%Y%m%d%H%M%S)" >> $GITHUB_ENV
 
-- name: Use custom tool
-  run: my-tool --version
+- name: Add binary to PATH
+  run: |
+    echo "$HOME/.local/bin" >> $GITHUB_PATH
+    # ~/.local/bin is now available to all subsequent steps
+
+- name: Use the variables
+  run: |
+    echo "Version: $DEPLOY_VERSION"
+    echo "Timestamp: $DEPLOY_TIMESTAMP"
+    my-binary --version    # available because we added to PATH
 ```
 
 ## Complete Job with All Features
@@ -418,70 +424,58 @@ Any value masked with `add-mask` is replaced with `***` in all subsequent log ou
 ```yaml
 jobs:
   full-example:
-    name: Full Integration Test
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     outputs:
-      test-coverage: ${{ steps.coverage.outputs.pct }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      version: ${{ steps.version.outputs.value }}
 
     services:
       postgres:
         image: postgres:16
         env:
           POSTGRES_PASSWORD: secret
-          POSTGRES_DB: testdb
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-retries 5
         ports:
           - 5432:5432
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
+        options: --health-cmd pg_isready --health-interval 10s --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: 20
+          cache: npm
 
       - uses: actions/cache@v4
         with:
-          path: ~/.cache/playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          path: .next/cache
+          key: nextjs-${{ hashFiles('package-lock.json') }}
 
       - run: npm ci
 
-      - name: Run migrations
-        env:
-          DATABASE_URL: postgresql://postgres:secret@localhost:5432/testdb
-        run: npm run db:migrate
+      - id: version
+        run: echo "value=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
 
-      - name: Run integration tests
-        id: test
+      - name: Run tests against real DB
+        run: npm run test:integration
         env:
-          DATABASE_URL: postgresql://postgres:secret@localhost:5432/testdb
-          REDIS_URL: redis://localhost:6379
-        run: npm run test:integration -- --coverage
+          DATABASE_URL: postgres://postgres:secret@localhost:5432/postgres
 
-      - name: Parse coverage
-        id: coverage
+      - name: Build
+        run: npm run build
+
+      - id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ github.sha }}
+          path: .next/
+
+      - name: Write job summary
         if: always()
         run: |
-          PCT=$(node -p "require('./coverage/coverage-summary.json').total.lines.pct")
-          echo "pct=$PCT" >> $GITHUB_OUTPUT
-          echo "## Coverage: $PCT%" >> $GITHUB_STEP_SUMMARY
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: test-artifacts
-          path: |
-            coverage/
-            test-results/
-          retention-days: 14
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Version: ${{ steps.version.outputs.value }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Artifact: ${{ steps.upload.outputs.artifact-id }}" >> $GITHUB_STEP_SUMMARY
 ```

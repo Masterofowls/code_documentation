@@ -1,32 +1,47 @@
 ---
 title: Deployment with GitHub Actions
-description: GitHub Environments, approval gates, deploying to AWS, GCP, Azure, Kubernetes, and release automation.
+description: Deploy to production using GitHub Environments, approval gates, and cloud platforms including AWS, GCP, Azure, Vercel, and Kubernetes.
 sidebar:
   order: 7
 tags: [devops, ci-cd]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
-
-GitHub Actions provides first-class deployment support through Environments, protection rules, and integrations with every major cloud platform.
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
 ## GitHub Environments
 
-Environments represent deployment targets (staging, production, preview). They can have protection rules, secrets, and variables scoped specifically to that environment.
+Environments provide named deployment targets with protection rules, secrets, and approval gates.
 
-### Creating an Environment
+### Creating Environments
 
-<Steps>
-1. Go to **Settings → Environments**
-2. Click **New environment**
-3. Name it (e.g., `production`)
-4. Configure protection rules:
-   - **Required reviewers** — specify users/teams who must approve
-   - **Wait timer** — delay deployment after approval (0–43,200 minutes)
-   - **Deployment branches** — restrict which branches can deploy
-5. Add environment-specific secrets
-6. Add environment variables
-</Steps>
+Navigate to `Repository Settings > Environments > New environment`. You can create:
+
+- **development** — auto-deploy on every push
+- **staging** — auto-deploy from main branch
+- **production** — requires manual approval + deployment timer
+
+### Environment Protection Rules
+
+```yaml
+# Environment: production settings
+# Protection rules (configured in GitHub UI):
+# ✓ Required reviewers: @team/platform-leads (min 1)
+# ✓ Wait timer: 5 minutes (allows cancellation window)
+# ✓ Restrict deployments to: refs/heads/main, refs/tags/v*
+# ✓ Allow administrators to bypass
+
+# Environment-specific secrets (only accessible when deploying to this env):
+# PROD_DATABASE_URL
+# PROD_API_KEY
+# PROD_K8S_KUBECONFIG
+```
 
 ### Using Environments in Workflows
 
@@ -36,16 +51,19 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: production
-      url: https://myapp.com     # Displayed in the deployment UI
+      url: https://app.example.com # shown in deployment panel
     steps:
+      - uses: actions/checkout@v4
       - run: ./deploy.sh
         env:
-          API_KEY: ${{ secrets.API_KEY }}   # From production environment
+          # Secrets from the 'production' environment
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+          API_KEY: ${{ secrets.PROD_API_KEY }}
 ```
 
-When a job targets an environment with required reviewers, the workflow pauses and sends review requests. Deployment only proceeds after approval.
+## Standard Deployment Pipeline Pattern
 
-## Full Deployment Pipeline Pattern
+A production-grade pipeline: build once, promote through environments.
 
 ```yaml
 name: Deploy Pipeline
@@ -53,165 +71,223 @@ name: Deploy Pipeline
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      skip-staging:
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false # queue deployments, never cancel
+
+permissions:
+  id-token: write
+  contents: read
+  deployments: write
 
 jobs:
   build:
     name: Build & Test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     outputs:
-      image-tag: ${{ steps.tag.outputs.value }}
+      image-tag: ${{ steps.meta.outputs.version }}
+      image-digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Generate image tag
-        id: tag
-        run: echo "value=${{ github.sha }}" >> $GITHUB_OUTPUT
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
 
-      - name: Run tests
-        run: npm test
+      - run: npm ci
+      - run: npm run lint && npm run test && npm run build
 
-      - name: Build Docker image
-        run: |
-          docker build -t myapp:${{ steps.tag.outputs.value }} .
-          docker save myapp:${{ steps.tag.outputs.value }} | gzip > image.tar.gz
+      - name: Set image metadata
+        id: meta
+        run: echo "version=${{ github.sha }}" >> $GITHUB_OUTPUT
 
       - uses: actions/upload-artifact@v4
         with:
-          name: docker-image
-          path: image.tar.gz
+          name: dist-${{ github.sha }}
+          path: dist/
 
   deploy-staging:
-    name: Deploy to Staging
+    name: Deploy → Staging
     needs: build
     runs-on: ubuntu-latest
+    if: ${{ !inputs.skip-staging }}
+    timeout-minutes: 15
     environment:
       name: staging
-      url: https://staging.myapp.com
-    outputs:
-      health-check: ${{ steps.health.outputs.status }}
-
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: docker-image
-
-      - name: Load and push image
-        run: |
-          docker load < image.tar.gz
-          docker tag myapp:${{ needs.build.outputs.image-tag }} registry/myapp:staging
-          docker push registry/myapp:staging
-
-      - name: Deploy to staging
-        run: ./scripts/deploy.sh staging ${{ needs.build.outputs.image-tag }}
-
-      - name: Health check
-        id: health
-        run: |
-          sleep 30
-          STATUS=$(curl -sf https://staging.myapp.com/health && echo "healthy" || echo "unhealthy")
-          echo "status=$STATUS" >> $GITHUB_OUTPUT
-          [ "$STATUS" = "healthy" ] || exit 1
-
-  deploy-production:
-    name: Deploy to Production
-    needs: [build, deploy-staging]
-    runs-on: ubuntu-latest
-    environment:
-      name: production          # Has required reviewers — will pause here
-      url: https://myapp.com
-
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: docker-image
-
-      - name: Deploy to production
-        run: ./scripts/deploy.sh production ${{ needs.build.outputs.image-tag }}
-
-      - name: Verify deployment
-        run: |
-          for i in {1..5}; do
-            curl -sf https://myapp.com/health && exit 0
-            sleep 10
-          done
-          echo "Health check failed"
-          exit 1
-```
-
-## Deploy to Vercel
-
-```yaml
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    environment:
-      name: production
-      url: ${{ steps.deploy.outputs.deployment-url }}
-
+      url: https://staging.example.com
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy to Vercel
-        id: deploy
-        uses: amondnet/vercel-action@v25
+      - uses: actions/download-artifact@v4
         with:
-          vercel-token: ${{ secrets.VERCEL_TOKEN }}
-          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
-          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
-          vercel-args: '--prod'
+          name: dist-${{ github.sha }}
+          path: dist/
+
+      - name: Deploy to staging
+        run: ./scripts/deploy.sh staging
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+
+      - name: Run smoke tests
+        run: npm run test:smoke
+        env:
+          BASE_URL: https://staging.example.com
+
+  deploy-production:
+    name: Deploy → Production
+    needs: [build, deploy-staging]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: https://app.example.com
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ github.sha }}
+          path: dist/
+
+      - name: Deploy to production
+        run: ./scripts/deploy.sh production
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+
+      - name: Verify deployment
+        run: |
+          sleep 30
+          curl --retry 5 --retry-delay 10 \
+            -f https://app.example.com/health || exit 1
+
+      - name: Write deployment summary
+        run: |
+          echo "## 🚀 Production Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: ${{ needs.build.outputs.image-tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **URL**: https://app.example.com" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deployed by**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
 ```
 
-Or using Vercel CLI directly:
+:::tip[Build Once, Deploy Everywhere]
+Always build your artifact (Docker image, static files, binary) in a single job, upload it as an artifact or Docker image, and then download/pull it in each deployment job. Never rebuild in deployment jobs — you risk deploying a different artifact than what was tested.
+:::
 
-```yaml
-- name: Deploy with Vercel CLI
-  run: |
-    npm i -g vercel
-    vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
-    vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
-    URL=$(vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }})
-    echo "Deployed to: $URL"
-  env:
-    VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-    VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-```
+## Deploy to Vercel
 
-## Deploy to AWS
-
-### S3 Static Site + CloudFront Invalidation
+<Tabs>
+<TabItem label="Vercel CLI (Recommended)">
 
 ```yaml
 jobs:
-  deploy:
+  deploy-vercel:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Pull Vercel Environment
+        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Build Project
+        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Deploy to Vercel
+        id: deploy
+        run: |
+          URL=$(vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }})
+          echo "url=$URL" >> $GITHUB_OUTPUT
+```
+
+</TabItem>
+<TabItem label="Preview Deployments">
+
+```yaml
+on:
+  pull_request:
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Deploy Preview
+        id: preview
+        run: |
+          vercel pull --yes --environment=preview --token=${{ secrets.VERCEL_TOKEN }}
+          vercel build --token=${{ secrets.VERCEL_TOKEN }}
+          URL=$(vercel deploy --prebuilt --token=${{ secrets.VERCEL_TOKEN }})
+          echo "url=$URL" >> $GITHUB_OUTPUT
+
+      - name: Comment PR with preview URL
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🔍 Preview Deployment\n\n🌐 **URL**: ${{ steps.preview.outputs.url }}`
+            })
+```
+
+</TabItem>
+</Tabs>
+
+## Deploy to AWS
+
+### S3 + CloudFront (Static Sites)
+
+```yaml
+jobs:
+  deploy-s3:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Build
-        run: npm run build
+      - run: npm ci && npm run build
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: us-east-1
 
-      - name: Deploy to S3
+      - name: Sync to S3
         run: |
-          aws s3 sync dist/ s3://${{ vars.S3_BUCKET }} \
-            --delete \
-            --cache-control "max-age=31536000,immutable" \
-            --exclude "*.html" \
-            --exclude "service-worker.js"
+          # Upload immutable assets with long cache
+          aws s3 sync dist/_next/static s3://${{ vars.S3_BUCKET }}/_next/static \
+            --cache-control "public, max-age=31536000, immutable" \
+            --delete
 
-          # HTML files: no cache
-          aws s3 sync dist/ s3://${{ vars.S3_BUCKET }} \
-            --cache-control "no-cache" \
-            --include "*.html" \
-            --include "service-worker.js"
+          # Upload HTML with short cache
+          aws s3 sync dist s3://${{ vars.S3_BUCKET }} \
+            --cache-control "public, max-age=0, must-revalidate" \
+            --delete \
+            --exclude "_next/static/*"
 
       - name: Invalidate CloudFront
         run: |
@@ -220,7 +296,7 @@ jobs:
             --paths "/*"
 ```
 
-### ECS Rolling Deployment
+### ECS (Container Deployments)
 
 ```yaml
 jobs:
@@ -228,182 +304,155 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
-
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: us-east-1
 
-      - name: Login to ECR
+      - uses: aws-actions/amazon-ecr-login@v2
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build and push to ECR
         id: build
         env:
-          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t $REGISTRY/myapp:$IMAGE_TAG .
-          docker push $REGISTRY/myapp:$IMAGE_TAG
-          echo "image=$REGISTRY/myapp:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          docker build -t $ECR_REGISTRY/my-app:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/my-app:$IMAGE_TAG
+          echo "image=$ECR_REGISTRY/my-app:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      - name: Update ECS task definition
+      - name: Download task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition my-app \
+            --query taskDefinition > task-def.json
+
+      - name: Update ECS task definition with new image
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
-          task-definition: task-definition.json
-          container-name: myapp
+          task-definition: task-def.json
+          container-name: my-app
           image: ${{ steps.build.outputs.image }}
 
       - name: Deploy to ECS
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
           task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: myapp-service
-          cluster: myapp-cluster
+          service: my-app-service
+          cluster: production
           wait-for-service-stability: true
 ```
 
 ### Lambda Deployment
 
 ```yaml
-- name: Package Lambda
-  run: zip -r function.zip . -x "*.git*" -x "node_modules/aws-sdk/*"
+jobs:
+  deploy-lambda:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci && npm run build
 
-- name: Deploy Lambda
-  run: |
-    aws lambda update-function-code \
-      --function-name my-function \
-      --zip-file fileb://function.zip
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: us-east-1
 
-    aws lambda wait function-updated \
-      --function-name my-function
+      - name: Package Lambda
+        run: |
+          cd dist
+          zip -r ../function.zip .
+          cd ..
 
-    aws lambda publish-version \
-      --function-name my-function \
-      --description "Deploy $GITHUB_SHA"
+      - name: Update Lambda function
+        run: |
+          aws lambda update-function-code \
+            --function-name my-function \
+            --zip-file fileb://function.zip \
+            --publish
+
+          aws lambda wait function-updated \
+            --function-name my-function
 ```
 
 ## Deploy to GCP Cloud Run
 
 ```yaml
 jobs:
-  deploy:
+  deploy-cloudrun:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
-
     steps:
       - uses: actions/checkout@v4
 
       - uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      - name: Build and push to GCR
+      - name: Build and push to Artifact Registry
         run: |
-          gcloud builds submit \
-            --tag gcr.io/${{ vars.GCP_PROJECT }}/myapp:${{ github.sha }}
+          IMAGE="us-central1-docker.pkg.dev/${{ vars.GCP_PROJECT }}/my-app/api:${{ github.sha }}"
+          gcloud builds submit --tag "$IMAGE" .
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
 
-      - name: Deploy to Cloud Run
-        run: |
-          gcloud run deploy myapp \
-            --image gcr.io/${{ vars.GCP_PROJECT }}/myapp:${{ github.sha }} \
-            --region us-central1 \
-            --platform managed \
-            --allow-unauthenticated \
-            --set-env-vars "NODE_ENV=production"
+      - uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: my-api
+          region: us-central1
+          image: ${{ env.IMAGE }}
+          flags: '--min-instances=1 --max-instances=10 --memory=512Mi'
 ```
 
-## Deploy to Azure
-
-```yaml
-jobs:
-  deploy-azure:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Build and push to ACR
-        uses: azure/docker-login@v1
-        with:
-          login-server: ${{ vars.REGISTRY_LOGIN_SERVER }}
-          username: ${{ secrets.REGISTRY_USERNAME }}
-          password: ${{ secrets.REGISTRY_PASSWORD }}
-
-      - run: |
-          docker build -t ${{ vars.REGISTRY_LOGIN_SERVER }}/myapp:${{ github.sha }} .
-          docker push ${{ vars.REGISTRY_LOGIN_SERVER }}/myapp:${{ github.sha }}
-
-      - uses: azure/webapps-deploy@v3
-        with:
-          app-name: my-azure-app
-          images: '${{ vars.REGISTRY_LOGIN_SERVER }}/myapp:${{ github.sha }}'
-```
-
-## Kubernetes Deployment
+## Deploy to Kubernetes
 
 ```yaml
 jobs:
   deploy-k8s:
     runs-on: ubuntu-latest
     environment: production
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up kubectl
-        uses: azure/setup-kubectl@v3
-        with:
-          version: 'v1.28.0'
-
-      - name: Configure kubeconfig
+      - name: Configure kubectl
         run: |
-          mkdir -p ~/.kube
-          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
-          chmod 600 ~/.kube/config
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig.yaml
+          echo "KUBECONFIG=$PWD/kubeconfig.yaml" >> $GITHUB_ENV
 
-      - name: Deploy
+      - name: Update image in manifests
         run: |
-          kubectl set image deployment/myapp \
-            myapp=registry/myapp:${{ github.sha }} \
-            --namespace production
+          sed -i "s|IMAGE_TAG|${{ github.sha }}|g" k8s/deployment.yaml
 
-          kubectl rollout status deployment/myapp \
-            --namespace production \
-            --timeout=5m
-
-      - name: Verify rollout
+      - name: Apply manifests
         run: |
-          kubectl get pods -n production -l app=myapp
-          kubectl exec -n production \
-            $(kubectl get pod -n production -l app=myapp -o jsonpath='{.items[0].metadata.name}') \
-            -- curl -sf localhost:8080/health
+          kubectl apply -f k8s/
+          kubectl rollout status deployment/my-app -n production --timeout=300s
+
+      - name: Verify deployment
+        run: |
+          kubectl get pods -n production -l app=my-app
+          kubectl rollout history deployment/my-app -n production
 ```
-
-:::caution[Kubeconfig security]
-Store your kubeconfig as a base64-encoded secret (`base64 -w0 ~/.kube/config`). Never write it to disk without restricting permissions (`chmod 600`). Delete it after use in the same step when possible.
-:::
 
 ## Release Automation
 
-### Using `softprops/action-gh-release`
+### `softprops/action-gh-release` (Recommended)
 
 ```yaml
+name: Release
+
 on:
   push:
     tags: ['v*']
@@ -413,34 +462,40 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0 # needed for changelog generation
 
-      - name: Build release artifacts
+      - run: npm ci && npm run build
+
+      - name: Create release archives
         run: |
-          npm run build
-          tar -czf release.tar.gz dist/
+          tar -czf app-linux-amd64.tar.gz -C dist .
+          zip -r app-windows-amd64.zip dist/
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
-          files: |
-            release.tar.gz
-            CHANGELOG.md
-          generate_release_notes: true   # Auto-generate from PRs and commits
+          generate_release_notes: true # auto-generate from PR titles
           draft: false
-          prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') }}
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') }}
+          files: |
+            app-linux-amd64.tar.gz
+            app-windows-amd64.zip
+          body: |
+            ## Installation
+            Download the appropriate binary for your platform.
+
+            ## Changelog
+            See [CHANGELOG.md](CHANGELOG.md) for details.
 ```
 
-### release-please (Google's Automated Release Tool)
-
-`release-please` manages changelogs and releases based on conventional commits.
+### `release-please` (Automated Versioning)
 
 ```yaml
 # .github/workflows/release-please.yml
+name: Release Please
+
 on:
   push:
     branches: [main]
@@ -459,71 +514,70 @@ jobs:
       - uses: googleapis/release-please-action@v4
         id: release
         with:
-          release-type: node
-          token: ${{ secrets.GITHUB_TOKEN }}
+          release-type: node # reads version from package.json
+          package-name: my-app
 
-  deploy:
+  deploy-on-release:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created }}
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "Deploying ${{ needs.release-please.outputs.tag_name }}"
-      - run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    uses: ./.github/workflows/deploy.yml
+    with:
+      version: ${{ needs.release-please.outputs.tag_name }}
+    secrets: inherit
 ```
 
-### Changelog Generation
+:::caution[release-please Commit Convention]
+`release-please` requires [Conventional Commits](https://www.conventionalcommits.org/) format: `feat:` bumps minor, `fix:` bumps patch, `feat!:` or `BREAKING CHANGE:` bumps major. Without this convention, no release PR will be generated.
+:::
 
-```yaml
-- name: Generate changelog
-  id: changelog
-  uses: orhun/git-cliff-action@v3
-  with:
-    config: cliff.toml
-    args: --verbose --latest
-  env:
-    OUTPUT: CHANGELOG.md
-
-- name: Commit changelog
-  run: |
-    git config user.name "github-actions[bot]"
-    git config user.email "github-actions[bot]@users.noreply.github.com"
-    git add CHANGELOG.md
-    git commit -m "docs: update changelog for ${{ github.ref_name }}"
-    git push
-```
-
-## Rollback Strategy
+## Blue-Green Deployments
 
 ```yaml
 jobs:
-  deploy:
+  blue-green:
     runs-on: ubuntu-latest
+    environment: production
     steps:
-      - name: Deploy
-        id: deploy
-        run: ./deploy.sh ${{ github.sha }}
+      - uses: actions/checkout@v4
 
-      - name: Smoke test
-        id: smoke
-        run: ./smoke-test.sh
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: us-east-1
 
-      - name: Rollback on failure
-        if: failure() && steps.smoke.outcome == 'failure'
+      - name: Determine current color and target
+        id: color
         run: |
-          echo "Smoke test failed — rolling back"
-          ./rollback.sh ${{ vars.LAST_STABLE_SHA }}
-          exit 1
+          CURRENT=$(aws ssm get-parameter \
+            --name /myapp/active-color \
+            --query 'Parameter.Value' \
+            --output text)
+          TARGET=$([ "$CURRENT" = "blue" ] && echo "green" || echo "blue")
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
 
-      - name: Store stable SHA
-        if: success()
+      - name: Deploy to ${{ steps.color.outputs.target }}
         run: |
-          gh variable set LAST_STABLE_SHA --body "${{ github.sha }}"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          aws ecs update-service \
+            --cluster myapp-${{ steps.color.outputs.target }} \
+            --service myapp \
+            --force-new-deployment
+          aws ecs wait services-stable \
+            --cluster myapp-${{ steps.color.outputs.target }} \
+            --services myapp
+
+      - name: Run smoke tests against new environment
+        run: |
+          curl -f https://${{ steps.color.outputs.target }}.internal.example.com/health
+
+      - name: Flip traffic to ${{ steps.color.outputs.target }}
+        run: |
+          aws elbv2 modify-rule \
+            --rule-arn ${{ vars.ALB_RULE_ARN }} \
+            --actions "[{\"Type\":\"forward\",\"TargetGroupArn\":\"${{ vars[format('{0}_TG_ARN', steps.color.outputs.target)] }}\"}]"
+
+          aws ssm put-parameter \
+            --name /myapp/active-color \
+            --value ${{ steps.color.outputs.target }} \
+            --overwrite
 ```
-
-:::tip[Blue-green deployments]
-For zero-downtime blue-green deployments, maintain two identical environments. Deploy to the inactive one, run smoke tests, then switch the load balancer. Keep the previous version running for 15-30 minutes in case a quick rollback is needed.
-:::

@@ -1,38 +1,44 @@
 ---
-title: Playwright Network Testing
-description: Intercept, mock, and monitor network requests with Playwright — route.fulfill(), route.abort(), route.continue(), API testing, HAR recording, and offline mode.
+title: Network Interception in Playwright
+description: Intercept, mock, and monitor network requests in Playwright — route.fulfill, route.abort, route.continue, API testing with the request fixture, HAR recording, and offline mode.
 sidebar:
   order: 7
 tags: [testing, javascript]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
-Playwright provides powerful tools for controlling network traffic during tests — from intercepting and mocking API responses to recording HAR files and testing offline scenarios. This enables complete isolation of your frontend from backend services.
+Playwright's network interception layer lets you control every HTTP request made by the browser — mock API responses for isolation, abort unwanted requests for speed, or observe all traffic during debugging.
 
 ## page.route() — Request Interception
 
-`page.route()` intercepts requests matching a URL pattern, giving you complete control over the response.
+`page.route()` registers a handler for requests matching a URL pattern. Handlers can fulfill (mock response), abort, or continue (pass through with optional modifications) the request.
 
 ```typescript
-// Intercept a specific endpoint
-await page.route('**/api/users', route => {
-  route.fulfill({
+// Intercept all requests to a specific endpoint
+await page.route('**/api/users', async (route) => {
+  await route.fulfill({
     status: 200,
     contentType: 'application/json',
     body: JSON.stringify([
-      { id: 1, name: 'Alice', email: 'alice@example.com' },
-      { id: 2, name: 'Bob', email: 'bob@example.com' },
+      { id: 1, name: 'Alice', role: 'admin' },
+      { id: 2, name: 'Bob', role: 'user' },
     ]),
   });
 });
 
 await page.goto('/users');
 await expect(page.getByRole('listitem')).toHaveCount(2);
-await expect(page.getByText('Alice')).toBeVisible();
 ```
 
-URL patterns support:
+### URL Matching
 
 ```typescript
 // Exact URL
@@ -40,364 +46,373 @@ await page.route('https://api.example.com/users', handler);
 
 // Glob pattern
 await page.route('**/api/**', handler);
+await page.route('https://api.example.com/**', handler);
 
 // Regex
 await page.route(/\/api\/users\/\d+/, handler);
 
-// Intercept everything
-await page.route('**/*', handler);
+// Exclude specific routes from a broad pattern
+await page.route('**/*.{png,jpg,svg,gif,webp}', (route) => route.abort()); // block images
 ```
 
-## route.fulfill() — Mocking Responses
+## route.fulfill — Mocking Responses
 
-`route.fulfill()` sends a mock response instead of making the real network request:
+`route.fulfill()` responds to the request with a mock response — the real server is never contacted:
 
 ```typescript
-// Full response mock
-await page.route('**/api/products', route => {
-  route.fulfill({
+await page.route('**/api/products', async (route) => {
+  await route.fulfill({
     status: 200,
     contentType: 'application/json',
     headers: {
-      'X-Total-Count': '42',
-      'Cache-Control': 'no-cache',
+      'x-total-count': '42',
+      'cache-control': 'no-store',
     },
     body: JSON.stringify({
-      items: [
-        { id: 'prod-1', name: 'Widget', price: 9.99 },
-        { id: 'prod-2', name: 'Gadget', price: 24.99 },
+      products: [
+        { id: 1, name: 'Widget', price: 9.99, inStock: true },
+        { id: 2, name: 'Gadget', price: 24.99, inStock: false },
       ],
       total: 42,
+      page: 1,
     }),
   });
 });
+```
 
-// Fulfill with a static file
-await page.route('**/api/config', async route => {
+### Fulfilling with Fixture Files
+
+Store mock responses as JSON files for maintainability:
+
+```typescript
+// tests/fixtures/users-response.json
+// { "users": [...], "total": 3 }
+
+await page.route('**/api/users', async (route) => {
+  await route.fulfill({ path: 'tests/fixtures/users-response.json' });
+});
+```
+
+### Simulating Error Responses
+
+```typescript
+// 404 Not Found
+await page.route('**/api/users/999', async (route) => {
   await route.fulfill({
-    path: './tests/fixtures/config-response.json',
-  });
-});
-
-// Simulate various error responses
-await page.route('**/api/protected', route => {
-  route.fulfill({ status: 401, body: 'Unauthorized' });
-});
-
-await page.route('**/api/missing', route => {
-  route.fulfill({
     status: 404,
     contentType: 'application/json',
-    body: JSON.stringify({ error: 'Not found', code: 'RESOURCE_NOT_FOUND' }),
+    body: JSON.stringify({ error: 'User not found', code: 'USER_NOT_FOUND' }),
   });
 });
 
-await page.route('**/api/broken', route => {
-  route.fulfill({
+// 500 Internal Server Error
+await page.route('**/api/process', async (route) => {
+  await route.fulfill({
     status: 500,
     contentType: 'application/json',
     body: JSON.stringify({ error: 'Internal server error' }),
   });
 });
-```
 
-### Testing Error States
-
-```typescript
-test('shows an error banner when the API returns 500', async ({ page }) => {
-  await page.route('**/api/dashboard/stats', route => {
-    route.fulfill({
-      status: 500,
-      contentType: 'application/json',
-      body: JSON.stringify({ message: 'Internal server error' }),
-    });
+// 401 Unauthorized
+await page.route('**/api/**', async (route) => {
+  await route.fulfill({
+    status: 401,
+    contentType: 'application/json',
+    body: JSON.stringify({ error: 'Unauthorized' }),
   });
-
-  await page.goto('/dashboard');
-
-  await expect(page.getByRole('alert')).toBeVisible();
-  await expect(page.getByRole('alert')).toContainText('Something went wrong');
 });
+```
 
-test('shows empty state when no data is returned', async ({ page }) => {
-  await page.route('**/api/users', route => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ users: [], total: 0 }),
-    });
+### Simulating Slow Responses
+
+```typescript
+await page.route('**/api/reports/export', async (route) => {
+  await new Promise((resolve) => setTimeout(resolve, 3000)); // 3 second delay
+  await route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ reportUrl: '/reports/export-123.pdf' }),
   });
-
-  await page.goto('/users');
-
-  await expect(page.getByText('No users found')).toBeVisible();
-  await expect(page.getByRole('listitem')).toHaveCount(0);
 });
+
+// Test that loading state is shown during slow request
+await page.getByRole('button', { name: 'Export report' }).click();
+await expect(page.getByRole('progressbar')).toBeVisible();
+await expect(page.getByRole('link', { name: 'Download report' })).toBeVisible();
 ```
 
-## route.abort() — Blocking Requests
+## route.abort — Blocking Requests
 
-`route.abort()` cancels a request, simulating network failure:
+Abort requests entirely — useful for blocking analytics, ads, or slow non-critical resources:
 
 ```typescript
-// Block all image requests
-await page.route('**/*.{png,jpg,jpeg,gif,webp}', route => route.abort());
+// Block all image requests (speeds up tests)
+await page.route('**/*.{png,jpg,jpeg,gif,webp,svg,ico}', (route) =>
+  route.abort(),
+);
 
-// Simulate a network failure for a specific endpoint
-await page.route('**/api/analytics', route => route.abort('failed'));
+// Block analytics and tracking
+await page.route('**/(analytics|tracking|gtag|segment)/**', (route) =>
+  route.abort(),
+);
+await page.route('**/www.google-analytics.com/**', (route) => route.abort());
 
-test('handles network failure gracefully', async ({ page }) => {
-  await page.route('**/api/data', route => route.abort('failed'));
+// Block a specific endpoint to test error handling
+await page.route('**/api/recommendations', (route) => route.abort('failed'));
 
-  await page.goto('/data-page');
-
-  await expect(page.getByText('Unable to load data')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Retry' })).toBeEnabled();
-});
+// Test the UI handles network failure gracefully
+await page.goto('/products');
+await expect(page.getByRole('alert')).toContainText(
+  /recommendations unavailable/i,
+);
 ```
 
-Abort error codes: `'aborted'`, `'accessdenied'`, `'addressunreachable'`, `'blockedbyclient'`, `'connectionaborted'`, `'connectionclosed'`, `'connectionfailed'`, `'connectionrefused'`, `'connectionreset'`, `'failed'`, `'internetdisconnected'`, `'namenotresolved'`, `'timedout'`, `'failed'`.
+Abort reasons: `'aborted'`, `'accessdenied'`, `'addressunreachable'`, `'blockedbyclient'`, `'failed'`, `'timedout'`, `'internetdisconnected'`
 
-## route.continue() — Modifying Requests
+## route.continue — Modifying Requests
 
-`route.continue()` passes the request through to the server, optionally with modifications:
+Pass the request through to the real server, optionally modifying it:
 
 ```typescript
-// Add an authentication header to all API requests
-await page.route('**/api/**', async route => {
+// Add auth headers to all API requests
+await page.route('**/api/**', async (route) => {
   await route.continue({
     headers: {
       ...route.request().headers(),
-      'Authorization': `Bearer ${process.env.TEST_API_TOKEN}`,
-      'X-Test-Mode': 'true',
+      authorization: `Bearer ${testToken}`,
     },
   });
 });
 
-// Modify the request body
-await page.route('**/api/orders', async route => {
-  const body = JSON.parse(route.request().postData() ?? '{}');
-  body.testFlag = true; // inject a test flag
-  await route.continue({
-    postData: JSON.stringify(body),
-  });
+// Rewrite the request URL
+await page.route('**/api/v1/**', async (route) => {
+  const url = route.request().url().replace('/api/v1/', '/api/v2/');
+  await route.continue({ url });
 });
 
-// Override the URL (redirect)
-await page.route('**/cdn.external.com/**', async route => {
-  const newUrl = route.request().url().replace('cdn.external.com', 'localhost:3001');
-  await route.continue({ url: newUrl });
+// Change the request method
+await page.route('**/api/submit', async (route) => {
+  await route.continue({
+    method: 'POST',
+    postData: JSON.stringify({
+      ...JSON.parse(route.request().postData() ?? '{}'),
+      source: 'test',
+    }),
+  });
 });
 ```
 
-## waitForRequest and waitForResponse
+## Waiting for Requests and Responses
 
-Use `waitForRequest`/`waitForResponse` to wait for specific network events before asserting:
+### page.waitForRequest
+
+Wait for a specific request to be made:
 
 ```typescript
-// Wait for a specific request to be made
-const requestPromise = page.waitForRequest('**/api/submit');
-await page.getByRole('button', { name: 'Submit' }).click();
-const request = await requestPromise;
+// Click saves and wait for the PUT request
+const [request] = await Promise.all([
+  page.waitForRequest('**/api/profile'),
+  page.getByRole('button', { name: 'Save profile' }).click(),
+]);
+
+expect(request.method()).toBe('PUT');
 const body = JSON.parse(request.postData() ?? '{}');
 expect(body.name).toBe('Alice');
-expect(body.email).toBe('alice@example.com');
+```
 
-// Wait for a response with status check
-const responsePromise = page.waitForResponse(
-  response =>
-    response.url().includes('/api/users') &&
-    response.status() === 200
-);
-await page.goto('/users');
-const response = await responsePromise;
+### page.waitForResponse
+
+Wait for a specific response to arrive:
+
+```typescript
+const [response] = await Promise.all([
+  page.waitForResponse('**/api/users'),
+  page.getByRole('button', { name: 'Load users' }).click(),
+]);
+
+expect(response.status()).toBe(200);
 const data = await response.json();
-expect(data.users).toHaveLength(10);
+expect(data.users).toHaveLength(3);
 
-// With a timeout
-const response2 = await page.waitForResponse('**/api/slow-endpoint', {
-  timeout: 30000,
-});
-
-// Wait for request matching a predicate
-const searchRequest = await page.waitForRequest(
-  req => req.url().includes('/api/search') && req.method() === 'GET'
-);
+// With predicate
+const [errorResponse] = await Promise.all([
+  page.waitForResponse(
+    (resp) => resp.url().includes('/api/validate') && resp.status() === 422,
+  ),
+  page.getByRole('button', { name: 'Submit' }).click(),
+]);
+expect(errorResponse.status()).toBe(422);
 ```
 
 ## API Testing with the request Fixture
 
-Playwright's `request` fixture makes direct HTTP requests without a browser — perfect for testing your API in isolation or setting up state before a UI test:
+Playwright includes a `request` fixture for making HTTP requests directly — no browser required. Use it for setup/teardown, backend assertions, or pure API testing:
 
 ```typescript
 import { test, expect } from '@playwright/test';
 
-test('GET /api/users returns a list of users', async ({ request }) => {
-  const response = await request.get('/api/users');
+test('GET /api/users returns paginated list', async ({ request }) => {
+  const response = await request.get('/api/users', {
+    params: { page: 1, limit: 10 },
+  });
 
-  expect(response.status()).toBe(200);
   await expect(response).toBeOK();
+  expect(response.status()).toBe(200);
 
   const body = await response.json();
-  expect(body.users).toBeInstanceOf(Array);
-  expect(body.users.length).toBeGreaterThan(0);
-  expect(body.users[0]).toMatchObject({
-    id: expect.any(Number),
-    name: expect.any(String),
-    email: expect.stringMatching(/@/),
-  });
+  expect(body.users).toHaveLength(10);
+  expect(body.total).toBeGreaterThan(0);
+  expect(body.page).toBe(1);
 });
 
 test('POST /api/users creates a new user', async ({ request }) => {
   const response = await request.post('/api/users', {
-    data: { name: 'Carol', email: 'carol@example.com', role: 'user' },
-    headers: { Authorization: `Bearer ${process.env.TEST_TOKEN}` },
+    data: {
+      name: 'Carol',
+      email: 'carol@example.com',
+      role: 'user',
+    },
+    headers: {
+      authorization: `Bearer ${process.env.TEST_API_TOKEN}`,
+    },
   });
 
   expect(response.status()).toBe(201);
-  const created = await response.json();
-  expect(created.id).toBeDefined();
-  expect(created.name).toBe('Carol');
+  const user = await response.json();
+  expect(user).toMatchObject({ name: 'Carol', email: 'carol@example.com' });
+  expect(user.id).toBeDefined();
 });
 
-test('PUT /api/users/:id updates a user', async ({ request }) => {
-  const response = await request.put('/api/users/1', {
-    data: { name: 'Alice Johnson Updated' },
+test('DELETE /api/users/:id removes the user', async ({ request }) => {
+  // Create first
+  const createResp = await request.post('/api/users', {
+    data: { name: 'TempUser', email: 'temp@example.com' },
   });
+  const { id } = await createResp.json();
 
-  await expect(response).toBeOK();
-  const updated = await response.json();
-  expect(updated.name).toBe('Alice Johnson Updated');
-});
+  // Delete
+  const deleteResp = await request.delete(`/api/users/${id}`);
+  expect(deleteResp.status()).toBe(204);
 
-test('DELETE /api/users/:id deletes a user', async ({ request }) => {
-  const response = await request.delete('/api/users/99');
-  expect(response.status()).toBe(204);
-});
-
-test('handles 422 validation errors correctly', async ({ request }) => {
-  const response = await request.post('/api/users', {
-    data: { name: '', email: 'not-an-email' },
-  });
-
-  expect(response.status()).toBe(422);
-  const body = await response.json();
-  expect(body.errors).toContainEqual(
-    expect.objectContaining({ field: 'email', message: expect.any(String) })
-  );
+  // Verify gone
+  const getResp = await request.get(`/api/users/${id}`);
+  expect(getResp.status()).toBe(404);
 });
 ```
 
-### API Test Setup with request
+### Authenticated API Context
 
 ```typescript
-// Use the API to seed test data before UI tests
-test.beforeEach(async ({ request }) => {
-  // Clear and seed test data via API
-  await request.post('/api/test/reset');
-  await request.post('/api/users', {
-    data: { name: 'Test User', email: 'test@example.com', role: 'admin' },
-  });
+// Create an authenticated request context outside a test
+const apiContext = await request.newContext({
+  baseURL: 'https://api.example.com',
+  extraHTTPHeaders: {
+    authorization: `Bearer ${process.env.API_TOKEN}`,
+    'content-type': 'application/json',
+  },
 });
+
+const response = await apiContext.get('/users');
+await apiContext.dispose();
 ```
 
 ## HAR Recording and Playback
 
-HAR (HTTP Archive) files record all network interactions. You can record once against a real server and replay in tests:
+HAR (HTTP Archive) files record all network traffic and allow you to replay it in tests — perfect for testing against real API responses without a live backend:
 
 ```typescript
-// Record a HAR file
-const context = await browser.newContext();
-await context.routeFromHAR('./tests/fixtures/api.har', { update: true });
-const page = await context.newPage();
-await page.goto('/dashboard');
-// Interactions are recorded to api.har
-await context.close();
-
-// Replay from HAR — no real network requests made
-await page.routeFromHAR('./tests/fixtures/api.har', {
-  notFound: 'fallback', // 'abort' | 'fallback' (default is 'abort')
-  url: '**/api/**',     // only mock these URLs from the HAR
+// Record a HAR file during a test run
+test.use({
+  recordHar: {
+    path: 'tests/har/checkout-flow.har',
+    mode: 'minimal', // record only status, headers, body
+    urlFilter: '**/api/**', // only record API calls
+  },
 });
-await page.goto('/dashboard');
 
-// Or per-context in playwright.config.ts
-use: {
-  serviceWorkers: 'block',
-},
+// Replay from HAR (serve recorded responses)
+await page.routeFromHAR('tests/har/checkout-flow.har', {
+  notFound: 'fallback', // fall through to real network if not in HAR
+  update: false, // don't re-record
+  urlFilter: '**/api/**',
+});
 ```
 
-## Offline Mode
-
-Test how your application behaves when the network is unavailable:
+## Testing Offline Mode
 
 ```typescript
-test('shows offline message when network is unavailable', async ({ page, context }) => {
+test('shows offline message when network is unavailable', async ({
+  page,
+  context,
+}) => {
   await page.goto('/dashboard');
+  await expect(page.getByRole('main')).toBeVisible();
 
-  // Take the browser context offline
+  // Go offline
   await context.setOffline(true);
 
-  // Try to navigate or trigger a network-dependent action
+  // Try to perform an action that requires network
   await page.getByRole('button', { name: 'Refresh data' }).click();
 
-  // Assert offline state
-  await expect(page.getByRole('alert')).toContainText(/no internet connection/i);
-  await expect(page.getByTestId('offline-indicator')).toBeVisible();
+  // Assert offline message appears
+  await expect(page.getByRole('alert')).toContainText(/offline/i);
+  await expect(page.getByRole('alert')).toBeVisible();
 
-  // Restore connectivity
+  // Come back online
   await context.setOffline(false);
 
-  // Assert recovery
   await page.getByRole('button', { name: 'Retry' }).click();
   await expect(page.getByRole('alert')).not.toBeVisible();
-  await expect(page.getByTestId('offline-indicator')).not.toBeVisible();
 });
 ```
 
 ## Monitoring All Network Requests
 
-Track every request during a test for debugging or verification:
+Log or assert on all network traffic without intercepting:
 
 ```typescript
-test('does not make unexpected API calls on the home page', async ({ page }) => {
-  const requests: string[] = [];
+test('checkout makes the expected API calls', async ({ page }) => {
+  const apiCalls: string[] = [];
 
   // Listen to all requests
-  page.on('request', request => {
+  page.on('request', (request) => {
     if (request.url().includes('/api/')) {
-      requests.push(`${request.method()} ${request.url()}`);
+      apiCalls.push(`${request.method()} ${new URL(request.url()).pathname}`);
     }
   });
 
-  await page.goto('/');
-  await page.waitForLoadState('networkidle');
+  await page.goto('/checkout');
+  await page.getByRole('button', { name: 'Place order' }).click();
+  await expect(page).toHaveURL('/order-confirmation');
 
-  // Assert only expected API calls were made
-  expect(requests).toEqual([
-    expect.stringContaining('GET /api/config'),
-    expect.stringContaining('GET /api/user/me'),
-  ]);
-  expect(requests).toHaveLength(2);
+  // Verify the expected API calls were made
+  expect(apiCalls).toContain('POST /api/orders');
+  expect(apiCalls).toContain('POST /api/payments');
+  expect(apiCalls).toContain('POST /api/notifications/email');
 });
 
-test('logs all failed requests', async ({ page }) => {
-  const failedRequests: string[] = [];
-
-  page.on('requestfailed', request => {
-    failedRequests.push(`${request.method()} ${request.url()} — ${request.failure()?.errorText}`);
-  });
-
-  await page.goto('/dashboard');
-  await page.waitForLoadState('networkidle');
-
-  if (failedRequests.length > 0) {
-    console.error('Failed requests:', failedRequests);
+// Monitor responses for errors
+page.on('response', async (response) => {
+  if (response.status() >= 500) {
+    console.error(`Server error: ${response.status()} ${response.url()}`);
   }
-  expect(failedRequests).toHaveLength(0);
 });
 ```
 
-:::tip[Combine Route Mocking with the request Fixture]
-Use `page.route()` to isolate UI tests from backend services, and the `request` fixture for pure API contract testing. Together, they give you complete control over your application's interactions with backend services.
+:::tip[Combining Mock and Real Requests]
+A common pattern is to mock slow or flaky third-party APIs while letting your own backend requests go through:
+
+```typescript
+// Mock slow payment provider
+await page.route('**/stripe.com/**', async (route) => {
+  await route.fulfill({
+    status: 200,
+    body: JSON.stringify({ status: 'succeeded', id: 'pi_test_123' }),
+  });
+});
+
+// All other requests go through to the real backend
+```
+
 :::

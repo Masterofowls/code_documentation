@@ -1,137 +1,127 @@
 ---
 title: Data Fetching
-description: Fetch data in Next.js Server Components using the fetch API with caching strategies, React cache() deduplication, Suspense streaming, Server Actions, ISR with revalidate, and client-side fetching with SWR.
+description: Fetch data in Next.js using Server Components with fetch(), React cache(), parallel data fetching, Suspense streaming, ISR, Server Actions, and client-side fetching with SWR and React Query.
 sidebar:
   order: 5
 tags: [react, javascript, frontend]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
-Next.js extends the native `fetch` API with caching and revalidation options, and React Server Components enable data fetching directly in the component tree — no `useEffect`, no API roundtrip from the browser.
+Next.js App Router fundamentally changes how data fetching works. Because Server Components are `async` by default, you can `await` data directly in your components — no `useEffect`, no `useState`, no loading state management required (unless you want it).
 
-## fetch in Server Components
+## Fetching in Server Components
 
-Server Components are `async` by default. You can `await` any async call directly in the component body.
+The simplest form of data fetching in Next.js:
 
 ```tsx
-// app/posts/page.tsx — Server Component (no 'use client')
+// app/blog/page.tsx — async Server Component
 interface Post {
   id: number;
   title: string;
-  body: string;
-  userId: number;
+  excerpt: string;
+  slug: string;
 }
 
-async function getPosts(): Promise<Post[]> {
-  const res = await fetch('https://jsonplaceholder.typicode.com/posts', {
-    next: { revalidate: 3600 }, // ISR: regenerate at most once per hour
+export default async function BlogPage() {
+  // Direct async/await — no useEffect needed
+  const posts = await fetch('https://api.example.com/posts').then((res) => {
+    if (!res.ok) throw new Error('Failed to fetch posts');
+    return res.json() as Promise<Post[]>;
   });
 
-  if (!res.ok) {
-    throw new Error(`Failed to fetch posts: ${res.status}`);
-  }
-
-  return res.json();
-}
-
-export default async function PostsPage() {
-  const posts = await getPosts();
-
   return (
-    <ul>
-      {posts.slice(0, 10).map(post => (
-        <li key={post.id}>
+    <div>
+      <h1>Blog</h1>
+      {posts.map((post) => (
+        <article key={post.id}>
           <h2>{post.title}</h2>
-          <p>{post.body}</p>
-        </li>
+          <p>{post.excerpt}</p>
+        </article>
       ))}
-    </ul>
+    </div>
   );
 }
 ```
 
-## Cache Options
+## Caching and Revalidation
 
-The `cache` and `next` options on `fetch` control how responses are cached:
+Next.js extends the native `fetch` API with caching options:
 
-```typescript
-// SSG — cache forever, regenerate at build time
-const data = await fetch('/api/data', {
-  cache: 'force-cache', // default behavior
+```tsx
+// Force cache — cache indefinitely (SSG-like behaviour)
+// This is the default when using generateStaticParams
+const data = await fetch('https://api.example.com/config', {
+  cache: 'force-cache',
 });
 
-// SSR — never cache, always fresh
-const data = await fetch('/api/data', {
+// No cache — always fetch fresh data (SSR-like behaviour)
+const data = await fetch('https://api.example.com/live-prices', {
   cache: 'no-store',
 });
 
-// ISR — cache and revalidate every N seconds (time-based)
-const data = await fetch('/api/data', {
-  next: { revalidate: 60 }, // regenerate after 60 seconds
+// Time-based revalidation (ISR) — revalidate every 60 seconds
+const posts = await fetch('https://api.example.com/posts', {
+  next: { revalidate: 60 },
 });
 
-// Tag-based revalidation (on-demand)
-const data = await fetch('/api/data', {
-  next: {
-    revalidate: 3600,
-    tags: ['products', 'product-123'],
-  },
+// Tag-based revalidation — revalidate when the tag is invalidated
+const post = await fetch(`https://api.example.com/posts/${id}`, {
+  next: { tags: [`post-${id}`, 'posts'] },
 });
 ```
 
 ### On-Demand Revalidation
 
-```typescript
-// app/api/revalidate/route.ts
+Invalidate cached data programmatically via Server Actions or Route Handlers:
+
+```tsx
+// app/actions/revalidate.ts
+'use server';
+
 import { revalidateTag, revalidatePath } from 'next/cache';
-import { NextRequest, NextResponse } from 'next/server';
 
-export async function POST(request: NextRequest) {
-  const secret = request.headers.get('x-revalidation-secret');
+// Revalidate all data tagged with 'posts'
+export async function revalidatePosts() {
+  revalidateTag('posts');
+}
 
-  if (secret !== process.env.REVALIDATION_SECRET) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  const body = await request.json();
-
-  if (body.tag) {
-    revalidateTag(body.tag);           // Revalidate all fetch() with this tag
-  }
-
-  if (body.path) {
-    revalidatePath(body.path, 'page'); // Revalidate a specific page
-  }
-
-  return NextResponse.json({ revalidated: true, now: Date.now() });
+// Revalidate a specific page
+export async function revalidateBlogPage(slug: string) {
+  revalidatePath(`/blog/${slug}`);
+  revalidatePath('/blog'); // Also revalidate the listing page
 }
 ```
 
-Call this from your CMS webhook:
-```bash
-curl -X POST https://myapp.com/api/revalidate \
-  -H "x-revalidation-secret: your-secret" \
-  -H "Content-Type: application/json" \
-  -d '{"tag": "posts"}'
-```
+:::tip[Choosing the Right Cache Strategy]
+
+- **`force-cache`**: Product listings, marketing content, documentation — infrequently changing
+- **`no-store`**: Stock prices, live scores, user-specific data — real-time
+- **`revalidate: N`**: Blog posts, news feeds — changes occasionally but not in real-time
+- **Tag-based**: CMS-driven content — revalidate on CMS publish events
+  :::
 
 ## React cache() for Deduplication
 
-When multiple components in the same render tree fetch the same data, `cache()` ensures the request is made only once.
+The `cache()` function memoises the return value of a function for the duration of a single server request. This prevents the same data from being fetched multiple times across different components in the same render:
 
-```typescript
-// src/lib/data.ts
+```tsx
+// lib/data.ts
 import { cache } from 'react';
 import { db } from './db';
 
-// This function is deduped per request — even if called from 10 components,
-// the database query only runs once
+// This function will only execute once per request, even if called
+// from multiple server components in the same render tree
 export const getUser = cache(async (userId: string) => {
-  return db.user.findUnique({
-    where: { id: userId },
-    include: { profile: true },
-  });
+  console.log(`Fetching user ${userId}`); // Only logs once per request
+  return db.user.findUnique({ where: { id: userId } });
 });
 
 export const getPost = cache(async (postId: string) => {
@@ -143,122 +133,92 @@ export const getPost = cache(async (postId: string) => {
 ```
 
 ```tsx
-// Used in multiple Server Components in the same render — no duplicate queries:
-// app/posts/[id]/page.tsx
-export default async function PostPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
-  const post = await getPost(id);         // Query 1 — DB hit
-  const author = await getUser(post!.authorId); // Query 2 — DB hit
-  return <PostView post={post!} author={author!} />;
-}
-
-// app/posts/[id]/layout.tsx — also calls getPost(id):
-export default async function PostLayout({ params, children }: LayoutProps) {
-  const { id } = await params;
-  const post = await getPost(id);        // Returns CACHED result — no extra DB query
-  return (
-    <>
-      <PostHeader post={post!} />
-      {children}
-    </>
-  );
-}
+// app/posts/[id]/page.tsx — calls getPost
+// app/posts/[id]/layout.tsx — also calls getPost
+// Both use the same cached result — no duplicate DB query
 ```
-
-:::tip[cache() vs fetch() Deduplication]
-`fetch()` requests with the same URL are automatically deduplicated within a render. Use `React.cache()` for database queries, ORM calls, or any async function that isn't a `fetch()`.
-:::
 
 ## Parallel Data Fetching
 
-Fetch multiple independent resources simultaneously with `Promise.all`:
+Fetch independent data in parallel using `Promise.all` to avoid waterfall requests:
 
 ```tsx
 // app/dashboard/page.tsx
-async function getDashboardData() {
-  // Sequential — slow (each waits for the previous)
-  const user = await getUser();
-  const stats = await getStats();       // waits for getUser
-  const notifications = await getNotifications(); // waits for getStats
-
-  // Parallel — fast (all start simultaneously)
-  const [userP, statsP, notificationsP] = await Promise.all([
-    getUser(),
-    getStats(),
-    getNotifications(),
-  ]);
-
-  return { user: userP, stats: statsP, notifications: notificationsP };
-}
+import { getUserProfile } from '@/lib/user';
+import { getRecentOrders } from '@/lib/orders';
+import { getNotifications } from '@/lib/notifications';
+import { getAnalyticsSummary } from '@/lib/analytics';
 
 export default async function DashboardPage() {
-  const { user, stats, notifications } = await getDashboardData();
+  // ❌ Sequential — slow (sum of all latencies)
+  // const profile = await getUserProfile();
+  // const orders = await getRecentOrders();
+  // const notifications = await getNotifications();
+
+  // ✅ Parallel — fast (max of all latencies)
+  const [profile, orders, notifications, analytics] = await Promise.all([
+    getUserProfile(),
+    getRecentOrders(),
+    getNotifications(),
+    getAnalyticsSummary(),
+  ]);
+
   return (
     <div>
-      <UserGreeting user={user} />
-      <StatsGrid stats={stats} />
-      <NotificationsList notifications={notifications} />
+      <ProfileCard profile={profile} />
+      <OrdersList orders={orders} />
+      <NotificationBell count={notifications.unread} />
+      <AnalyticsWidget data={analytics} />
     </div>
   );
 }
 ```
 
-## Suspense Boundaries for Streaming
+## Streaming with Suspense
 
-Wrap slow components in `Suspense` to stream content progressively — fast parts load immediately, slow parts stream in as they complete.
+Wrap slow components in `<Suspense>` to stream them separately, showing immediate UI while they load:
 
 ```tsx
 // app/dashboard/page.tsx
 import { Suspense } from 'react';
-
-// This component fetches data independently
-async function RevenueChart() {
-  const data = await getRevenueData(); // Slow — 1.5s
-  return <Chart data={data} />;
-}
-
-async function LatestInvoices() {
-  const invoices = await getLatestInvoices(); // Medium — 500ms
-  return <InvoiceList invoices={invoices} />;
-}
-
-async function UserCard() {
-  const user = await getUser(); // Fast — 50ms
-  return <UserProfile user={user} />;
-}
-
-// Skeleton loading components
-function ChartSkeleton() {
-  return <div className="h-64 bg-gray-100 rounded-xl animate-pulse" />;
-}
-
-function InvoiceSkeleton() {
-  return (
-    <div className="space-y-3">
-      {[...Array(5)].map((_, i) => (
-        <div key={i} className="h-12 bg-gray-100 rounded animate-pulse" />
-      ))}
-    </div>
-  );
-}
+import { ProfileCard } from '@/components/ProfileCard';
+import { OrdersList } from '@/components/OrdersList';
+import { AnalyticsSkeleton, OrdersSkeleton } from '@/components/skeletons';
+import { Analytics } from '@/components/Analytics'; // Slow component
 
 export default function DashboardPage() {
   return (
-    <div className="space-y-6">
-      {/* Fast component — renders immediately */}
-      <Suspense fallback={<p>Loading user...</p>}>
-        <UserCard />
+    <div className="grid grid-cols-2 gap-6">
+      {/* Fast — renders immediately */}
+      <ProfileCard />
+
+      {/* Slow — streams in when ready */}
+      <Suspense fallback={<AnalyticsSkeleton />}>
+        <Analytics /> {/* This component fetches data internally */}
       </Suspense>
 
-      {/* Medium component */}
-      <Suspense fallback={<InvoiceSkeleton />}>
-        <LatestInvoices />
+      {/* Also slow — streams independently */}
+      <Suspense fallback={<OrdersSkeleton />}>
+        <OrdersList />
       </Suspense>
+    </div>
+  );
+}
+```
 
-      {/* Slow component — renders last but doesn't block others */}
-      <Suspense fallback={<ChartSkeleton />}>
-        <RevenueChart />
-      </Suspense>
+```tsx
+// components/Analytics.tsx — fetches its own data
+export async function Analytics() {
+  // This fetch happens independently and doesn't block other components
+  const data = await fetch('https://api.example.com/analytics/summary', {
+    next: { revalidate: 300 },
+  }).then((r) => r.json());
+
+  return (
+    <div className="rounded-lg border p-6">
+      <h2>Analytics</h2>
+      <p>Visitors: {data.visitors}</p>
+      <p>Revenue: ${data.revenue}</p>
     </div>
   );
 }
@@ -266,157 +226,148 @@ export default function DashboardPage() {
 
 ## unstable_cache
 
-For caching non-fetch async functions (database queries, expensive computations) with tag support:
+Cache the result of a function (like `cache()`) but **across requests** (unlike `cache()` which is per-request):
 
-```typescript
+```tsx
 import { unstable_cache } from 'next/cache';
-import { db } from '@/lib/db';
 
-export const getCachedPosts = unstable_cache(
-  async (category: string, limit: number) => {
-    return db.post.findMany({
-      where: { category, published: true },
-      orderBy: { createdAt: 'desc' },
-      take: limit,
-      include: { author: { select: { name: true, avatarUrl: true } } },
-    });
+// Cached across all requests for 1 hour, tagged for on-demand revalidation
+export const getCachedProducts = unstable_cache(
+  async (category: string) => {
+    return db.product.findMany({ where: { category } });
   },
-  ['posts-by-category'],            // Cache key prefix
+  ['products'], // Cache key prefix
   {
-    revalidate: 300,                // 5 minutes
-    tags: ['posts'],                // revalidateTag('posts') clears this
-  }
+    revalidate: 3600, // 1 hour
+    tags: ['products'],
+  },
 );
 
-// Usage:
-const posts = await getCachedPosts('tutorials', 10);
+// Usage in a Server Component
+const products = await getCachedProducts('electronics');
 ```
 
 ## Server Actions
 
-Server Actions are async functions that run on the server, called from the client (forms, event handlers) or other Server Components.
+Server Actions let you run server-side code directly from form submissions or event handlers in Client Components.
 
 ```tsx
-// app/actions/posts.ts
+// app/posts/new/actions.ts
 'use server';
 
-import { revalidatePath, revalidateTag } from 'next/cache';
+import { z } from 'zod';
+import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { db } from '@/lib/db';
-import { z } from 'zod';
-import { getSession } from '@/lib/auth';
+import { auth } from '@/lib/auth';
 
-const createPostSchema = z.object({
-  title: z.string().min(1).max(200),
-  content: z.string().min(10),
-  category: z.enum(['tech', 'design', 'business']),
+const CreatePostSchema = z.object({
+  title: z.string().min(3).max(100),
+  body: z.string().min(10),
+  published: z.coerce.boolean(),
 });
 
-export async function createPost(formData: FormData) {
-  const session = await getSession();
-  if (!session) throw new Error('Not authenticated');
+export async function createPost(prevState: unknown, formData: FormData) {
+  const session = await auth();
+  if (!session) {
+    return { error: 'You must be logged in to create a post.' };
+  }
 
-  const parsed = createPostSchema.safeParse({
+  const parsed = CreatePostSchema.safeParse({
     title: formData.get('title'),
-    content: formData.get('content'),
-    category: formData.get('category'),
+    body: formData.get('body'),
+    published: formData.get('published'),
   });
 
   if (!parsed.success) {
-    return { error: parsed.error.flatten() };
+    return {
+      error: 'Invalid form data.',
+      fieldErrors: parsed.error.flatten().fieldErrors,
+    };
   }
 
   const post = await db.post.create({
-    data: { ...parsed.data, authorId: session.userId },
+    data: {
+      ...parsed.data,
+      authorId: session.user.id,
+    },
   });
 
-  revalidateTag('posts');
   revalidatePath('/blog');
   redirect(`/blog/${post.slug}`);
 }
-
-export async function deletePost(postId: string) {
-  const session = await getSession();
-  if (!session) throw new Error('Not authenticated');
-
-  const post = await db.post.findUnique({ where: { id: postId } });
-  if (!post || post.authorId !== session.userId) {
-    throw new Error('Not authorized');
-  }
-
-  await db.post.delete({ where: { id: postId } });
-  revalidateTag('posts');
-  revalidatePath('/blog');
-}
 ```
 
-### Using Server Actions in Forms
-
 ```tsx
-// app/blog/new/page.tsx
-import { createPost } from '@/app/actions/posts';
+// app/posts/new/page.tsx — using useFormState and useFormStatus
+'use client';
+
+import { useFormState, useFormStatus } from 'react-dom';
+import { createPost } from './actions';
+
+function SubmitButton() {
+  const { pending } = useFormStatus();
+  return (
+    <button type="submit" disabled={pending}>
+      {pending ? 'Creating...' : 'Create Post'}
+    </button>
+  );
+}
 
 export default function NewPostPage() {
+  const [state, formAction] = useFormState(createPost, null);
+
   return (
-    <form action={createPost}>
-      <input name="title" placeholder="Post title" required />
-      <textarea name="content" placeholder="Content" required />
-      <select name="category">
-        <option value="tech">Tech</option>
-        <option value="design">Design</option>
-      </select>
-      <button type="submit">Publish Post</button>
+    <form action={formAction} className="space-y-4">
+      {state?.error && <p className="text-red-500">{state.error}</p>}
+      <div>
+        <label htmlFor="title">Title</label>
+        <input
+          id="title"
+          name="title"
+          type="text"
+          className="w-full border rounded p-2"
+        />
+        {state?.fieldErrors?.title && (
+          <p className="text-red-500 text-sm">{state.fieldErrors.title[0]}</p>
+        )}
+      </div>
+      <div>
+        <label htmlFor="body">Content</label>
+        <textarea
+          id="body"
+          name="body"
+          rows={8}
+          className="w-full border rounded p-2"
+        />
+      </div>
+      <label className="flex items-center gap-2">
+        <input type="checkbox" name="published" />
+        Publish immediately
+      </label>
+      <SubmitButton />
     </form>
   );
 }
 ```
 
-### useActionState for Feedback
+:::tip[Server Actions Without Forms]
+Server Actions can also be called directly from event handlers in Client Components — they're not limited to `<form action>`:
 
 ```tsx
 'use client';
-import { useActionState } from 'react';
-import { createPost } from '@/app/actions/posts';
+import { deletePost } from './actions';
 
-interface FormState {
-  error?: { title?: string[]; content?: string[] };
-  message?: string;
-}
-
-const initialState: FormState = {};
-
-export function CreatePostForm() {
-  const [state, formAction, isPending] = useActionState(createPost, initialState);
-
-  return (
-    <form action={formAction}>
-      {state.message && <p className="text-green-600">{state.message}</p>}
-
-      <div>
-        <input name="title" placeholder="Title" />
-        {state.error?.title && (
-          <p className="text-red-500 text-sm">{state.error.title[0]}</p>
-        )}
-      </div>
-
-      <div>
-        <textarea name="content" placeholder="Content" />
-        {state.error?.content && (
-          <p className="text-red-500 text-sm">{state.error.content[0]}</p>
-        )}
-      </div>
-
-      <button type="submit" disabled={isPending}>
-        {isPending ? 'Publishing...' : 'Publish Post'}
-      </button>
-    </form>
-  );
+export function DeleteButton({ postId }: { postId: string }) {
+  return <button onClick={() => deletePost(postId)}>Delete</button>;
 }
 ```
 
+:::
+
 ## Client-Side Fetching with SWR
 
-For data that must update without a page reload, use SWR or TanStack Query:
+For data that needs to be fetched client-side (user-specific, real-time):
 
 ```bash
 npm install swr
@@ -424,50 +375,86 @@ npm install swr
 
 ```tsx
 'use client';
-import useSWR, { SWRConfig } from 'swr';
 
-const fetcher = (url: string) => fetch(url).then(r => {
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
-});
+import useSWR from 'swr';
+import useSWRMutation from 'swr/mutation';
 
-// Global SWR config in a provider:
-export function SWRProvider({ children }: { children: React.ReactNode }) {
-  return (
-    <SWRConfig
-      value={{
-        fetcher,
-        revalidateOnFocus: false,
-        revalidateOnReconnect: true,
-        dedupingInterval: 5000,
-        errorRetryCount: 3,
-      }}
-    >
-      {children}
-    </SWRConfig>
+const fetcher = (url: string) => fetch(url).then((r) => r.json());
+
+export function UserProfile() {
+  const {
+    data: user,
+    error,
+    isLoading,
+    mutate,
+  } = useSWR('/api/user/me', fetcher, {
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    refreshInterval: 0,
+  });
+
+  const { trigger: updateProfile, isMutating } = useSWRMutation(
+    '/api/user/me',
+    async (url: string, { arg }: { arg: { name: string } }) => {
+      const res = await fetch(url, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(arg),
+      });
+      return res.json();
+    },
   );
-}
 
-// Usage:
-export function UserNotifications() {
-  const { data, error, isLoading, mutate } = useSWR<Notification[]>(
-    '/api/notifications',
-    { refreshInterval: 30000 } // poll every 30s
-  );
-
-  if (isLoading) return <NotificationSkeleton />;
-  if (error) return <p>Failed to load notifications.</p>;
+  if (isLoading) return <div>Loading...</div>;
+  if (error) return <div>Error loading profile</div>;
 
   return (
-    <ul>
-      {data?.map(n => (
-        <li key={n.id}>{n.message}</li>
-      ))}
-    </ul>
+    <div>
+      <p>{user.name}</p>
+      <button
+        onClick={() => updateProfile({ name: 'New Name' })}
+        disabled={isMutating}
+      >
+        {isMutating ? 'Saving...' : 'Update Name'}
+      </button>
+    </div>
   );
 }
 ```
 
-:::caution[Server vs Client Fetching]
-Avoid duplicating data-fetching logic. Fetch in Server Components when possible — it runs on the server, doesn't bloat the JS bundle, and has direct database access. Use client-side fetching only for data that must be live, user-specific, or requires interactivity.
-:::
+## ISR (Incremental Static Regeneration)
+
+Generate static pages that automatically regenerate after a specified time:
+
+```tsx
+// app/products/[id]/page.tsx
+export const revalidate = 3600; // Revalidate this page every hour (route segment config)
+
+export async function generateStaticParams() {
+  const products = await getTopProducts(); // Pre-render top 100 products
+  return products.map((p) => ({ id: p.id }));
+}
+
+export default async function ProductPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = await params;
+  const product = await getProduct(id);
+
+  return <div>{product.name}</div>;
+}
+```
+
+## Data Fetching Summary
+
+| Strategy                             | When to Use                 | How                                            |
+| ------------------------------------ | --------------------------- | ---------------------------------------------- |
+| **Server Component fetch (cached)**  | Static content, ISR         | `fetch(url, { next: { revalidate: N } })`      |
+| **Server Component fetch (dynamic)** | User-specific, real-time    | `fetch(url, { cache: 'no-store' })`            |
+| **React cache()**                    | Deduplicate in one request  | `const fn = cache(async () => {...})`          |
+| **unstable_cache**                   | Cross-request caching       | `const fn = unstable_cache(async () => {...})` |
+| **Server Actions**                   | Form submissions, mutations | `'use server'` directive                       |
+| **SWR**                              | Client-side, real-time      | `useSWR(key, fetcher)`                         |
+| **TanStack Query**                   | Complex client-side state   | `useQuery({ queryKey, queryFn })`              |

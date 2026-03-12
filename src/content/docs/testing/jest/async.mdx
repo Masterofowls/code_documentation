@@ -1,338 +1,344 @@
 ---
 title: Testing Async Code with Jest
-description: Test Promises, async/await, callbacks, timers, fetch, Axios, event emitters, and complex async workflows in Jest — including fake timers and expect.assertions().
+description: Test Promises, async/await, callbacks, timers, fetch, Axios, and event emitters in Jest — including fake timers, expect.assertions, and real-world service patterns.
 sidebar:
   order: 5
 tags: [testing, javascript]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
-Asynchronous code is everywhere in JavaScript — network requests, database queries, timers, event handlers. Jest provides multiple patterns for testing async code reliably and without introducing flakiness.
+Asynchronous code is everywhere in modern JavaScript — API calls, database queries, file I/O, timers, and event streams. Jest provides several patterns for testing async code correctly and reliably.
 
-## Why Async Tests Need Special Care
+## The Problem with Async Tests
 
-The core risk with async testing is that a test can pass even when an assertion never executes:
-
-```typescript
-// ❌ DANGEROUS — this test always passes, even if the assertion fails
-it('gets user data', () => {
-  fetchUser(1).then(user => {
-    expect(user.name).toBe('Alice'); // assertion may be skipped
-  });
-  // Jest sees no assertions, considers test passed
-});
-```
-
-Jest provides `expect.assertions(n)` to guard against this:
+Without proper async handling, tests can pass incorrectly:
 
 ```typescript
-// ✅ Will fail if the callback never runs
-it('gets user data', done => {
-  expect.assertions(1); // exactly 1 assertion must execute
-  fetchUser(1).then(user => {
-    expect(user.name).toBe('Alice');
-    done();
+// WRONG — this test always passes because Jest doesn't wait for the assertion
+test('fetches user data', () => {
+  fetchUser(1).then((user) => {
+    expect(user.name).toBe('Alice'); // never executed if the test ends first
   });
 });
 ```
+
+Jest finishes the test synchronously, the assertion inside `.then()` never runs, and the test passes despite the potential failure.
 
 ## Callbacks with `done`
 
-For legacy code or libraries that use Node.js-style callbacks, use the `done` parameter.
+For older callback-based APIs, use the `done` parameter. Jest waits until `done()` is called before considering the test complete.
 
 ```typescript
-import { readFileCallback } from './file-reader';
+import { readFileCallback } from './fileReader';
 
-it('reads a file asynchronously', done => {
-  readFileCallback('./fixture.txt', (error, data) => {
-    expect(error).toBeNull();
-    expect(data).toContain('expected content');
-    done(); // signal test completion
-  });
-});
-
-it('calls done with an error on failure', done => {
-  readFileCallback('./nonexistent.txt', (error, data) => {
-    expect(error).not.toBeNull();
-    expect(error.code).toBe('ENOENT');
-    done();
-  });
-});
-```
-
-If your callback might call `done` with an error argument, Jest will fail the test:
-
-```typescript
-it('handles callback errors via done(error)', done => {
-  riskyOperation((error, result) => {
+test('reads file contents', (done) => {
+  readFileCallback('./data.txt', (error, contents) => {
     if (error) {
-      done(error); // this fails the test with the error
+      done(error); // fail the test with the error
       return;
     }
-    expect(result).toBeDefined();
-    done();
+    expect(contents).toContain('Hello');
+    done(); // signal the test is complete
   });
 });
 ```
 
-:::caution[Timeout with done]
-If `done` is never called, Jest fails the test with a timeout error after 5 seconds (default `testTimeout`). Always ensure every code path calls `done()`, including error paths.
+:::caution[Always call done on error paths]
+If you forget to call `done(error)` on the error path, the test will time out rather than fail with a useful message. Always handle both the success and error cases.
 :::
+
+### Converting callbacks to Promises
+
+When possible, wrap callback APIs in Promises for cleaner tests:
+
+```typescript
+import { promisify } from 'util';
+import { readFile } from 'fs';
+
+const readFileAsync = promisify(readFile);
+
+test('reads file contents', async () => {
+  const contents = await readFileAsync('./data.txt', 'utf8');
+  expect(contents).toContain('Hello');
+});
+```
 
 ## Testing Promises
 
-You can test Promises by returning them from the test function. Jest waits for the returned Promise to resolve or reject.
+### Return the promise
+
+The simplest way to test Promises is to return them from the test. Jest will wait for the returned Promise to settle.
 
 ```typescript
-// ✅ Return the promise
-it('resolves with user data', () => {
-  return fetchUser(1).then(user => {
+test('resolves with user data', () => {
+  return fetchUser(1).then((user) => {
     expect(user.name).toBe('Alice');
-    expect(user.id).toBe(1);
+    expect(user.email).toBeDefined();
   });
 });
 
-// ✅ Return a rejection assertion
-it('rejects when user not found', () => {
-  return expect(fetchUser(9999)).rejects.toThrow('User not found');
+test('rejects on invalid ID', () => {
+  return expect(fetchUser(-1)).rejects.toThrow('Invalid user ID');
 });
 ```
 
-### Using `.resolves` and `.rejects` Matchers
+### `.resolves` and `.rejects` matchers
 
-Jest provides special matchers for Promises that combine awaiting with assertions:
+These matchers unwrap the Promise before running the assertion:
 
 ```typescript
-// .resolves — unwraps the resolved value for further assertion
-it('fetches user successfully', () => {
-  return expect(fetchUser(1)).resolves.toEqual({
-    id: 1,
-    name: 'Alice',
-    email: 'alice@example.com',
-  });
+test('resolves with user data', async () => {
+  await expect(fetchUser(1)).resolves.toEqual(
+    expect.objectContaining({ name: 'Alice' }),
+  );
 });
 
-it('resolves with the correct user name', async () => {
-  await expect(fetchUser(1)).resolves.toMatchObject({ name: 'Alice' });
-});
-
-// .rejects — asserts the Promise rejects
-it('rejects on invalid user id', async () => {
-  await expect(fetchUser(-1)).rejects.toThrow('Invalid user ID');
-});
-
-it('rejects with a specific error type', async () => {
-  await expect(fetchUser(-1)).rejects.toBeInstanceOf(ValidationError);
-});
-
-it('rejects with specific error properties', async () => {
-  await expect(fetchUser(-1)).rejects.toMatchObject({
-    message: 'Invalid user ID',
-    statusCode: 400,
+test('rejects with a network error', async () => {
+  await expect(fetchFromBrokenEndpoint()).rejects.toThrow('Network error');
+  await expect(fetchFromBrokenEndpoint()).rejects.toMatchObject({
+    message: expect.stringContaining('Network'),
+    status: 503,
   });
 });
 ```
 
-:::tip[Always Await or Return]
-When using `.resolves` or `.rejects`, you **must** either `await` the assertion or `return` it from the test. Without this, the assertion becomes a floating Promise that resolves after Jest has already marked the test as passed.
+:::tip[Always await .resolves and .rejects]
+`expect(promise).resolves.toBe(value)` returns a Promise. If you forget to `await` it, the assertion never runs and the test passes regardless of the actual resolved value.
 :::
 
-## async/await
+## `async` / `await`
 
-The cleanest way to write async tests — async/await makes async tests read like synchronous code:
+The cleanest pattern for testing Promises is `async/await`:
 
 ```typescript
-it('fetches and transforms user data', async () => {
-  const user = await fetchUser(1);
+test('creates and retrieves a user', async () => {
+  // Arrange
+  const payload = { name: 'Alice', email: 'alice@example.com' };
 
-  expect(user.id).toBe(1);
-  expect(user.name).toBe('Alice');
-  expect(user.displayName).toBe('Alice (Admin)');
-  expect(user.createdAt).toBeInstanceOf(Date);
+  // Act
+  const created = await userService.create(payload);
+  const retrieved = await userService.findById(created.id);
+
+  // Assert
+  expect(retrieved.name).toBe('Alice');
+  expect(retrieved.email).toBe('alice@example.com');
 });
 ```
 
-### Testing Async Error Paths with try/catch
+### Testing async errors with try/catch
 
 ```typescript
-it('throws a specific error when the request fails', async () => {
-  expect.assertions(2); // ensure the catch block runs
+test('throws when user is not found', async () => {
+  await expect(userService.findById(99999)).rejects.toThrow('User not found');
+});
 
+// Alternatively with try/catch (more verbose but useful for inspecting the error)
+test('throws with correct error code', async () => {
   try {
-    await fetchUser(-1);
+    await userService.findById(99999);
+    fail('Expected an error to be thrown'); // force failure if no error thrown
   } catch (error) {
-    expect(error).toBeInstanceOf(ValidationError);
-    expect((error as ValidationError).message).toBe('Invalid user ID');
+    expect(error).toBeInstanceOf(NotFoundError);
+    expect((error as NotFoundError).code).toBe('USER_NOT_FOUND');
+    expect((error as NotFoundError).statusCode).toBe(404);
   }
 });
 ```
 
-### Using expect.assertions()
+## `expect.assertions()` — Guarding Async Error Paths
 
-`expect.assertions(n)` is critical for async error tests where you expect a code path to execute:
+`expect.assertions(N)` declares that exactly N assertions must be called during the test. If fewer assertions run (e.g., because a Promise resolved instead of rejecting), the test fails.
 
 ```typescript
-// Without expect.assertions, this test could pass vacuously
-// if the promise resolves instead of rejects
-it('rejects invalid input', async () => {
-  expect.assertions(1); // MUST run exactly one assertion
+test('rejects on database error', async () => {
+  expect.assertions(2); // exactly 2 assertions must run
+
+  mockDb.query.mockRejectedValue(new Error('Connection refused'));
 
   try {
-    await processInvalidData({ type: 'unknown' });
-    // if we get here, the test should fail — but without
-    // expect.assertions(1), it would pass silently
+    await userService.findById(1);
   } catch (error) {
-    expect(error.message).toMatch(/unsupported type/i);
+    expect(error).toBeInstanceOf(DatabaseError); // assertion 1
+    expect((error as DatabaseError).message).toContain('Connection refused'); // assertion 2
   }
 });
+```
 
-// expect.hasAssertions() — at least one assertion must run
-it('processes all items', async () => {
+Without `expect.assertions(2)`, if `findById` unexpectedly resolves, the `catch` block never runs, the test has zero assertions, and **Jest considers it a pass**.
+
+Use `expect.hasAssertions()` when you know at least one assertion should run, but you don't know exactly how many:
+
+```typescript
+test('processes all items', async () => {
   expect.hasAssertions();
 
-  for await (const item of asyncIterator()) {
-    expect(item).toBeDefined();
-  }
+  const items = await fetchItems();
+  items.forEach((item) => {
+    expect(item).toHaveProperty('id');
+  });
 });
 ```
 
-## Testing setTimeout and setInterval
-
-Use Jest's fake timers for deterministic control over time-dependent code:
+## Testing `setTimeout` and `setInterval` with Fake Timers
 
 ```typescript
-import { debounce } from './utils';
+// src/utils/debounce.ts
+export function debounce<T extends (...args: unknown[]) => void>(
+  fn: T,
+  delay: number,
+): T {
+  let timer: ReturnType<typeof setTimeout>;
+  return function (this: unknown, ...args: Parameters<T>) {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn.apply(this, args), delay);
+  } as T;
+}
+```
+
+```typescript
+// src/utils/debounce.test.ts
+import { debounce } from './debounce';
 
 describe('debounce', () => {
-  beforeEach(() => jest.useFakeTimers());
-  afterEach(() => jest.useRealTimers());
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
 
-  it('only calls the function once after rapid successive calls', () => {
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('calls the function after the delay', () => {
     const mockFn = jest.fn();
     const debounced = debounce(mockFn, 300);
 
-    debounced();
-    debounced();
-    debounced();
+    debounced('call 1');
+    expect(mockFn).not.toHaveBeenCalled(); // not called yet
 
-    // Nothing called yet — still within debounce window
-    expect(mockFn).not.toHaveBeenCalled();
+    jest.advanceTimersByTime(300);
+    expect(mockFn).toHaveBeenCalledTimes(1);
+    expect(mockFn).toHaveBeenCalledWith('call 1');
+  });
 
-    // Fast-forward time
+  it('only calls the function once for rapid calls', () => {
+    const mockFn = jest.fn();
+    const debounced = debounce(mockFn, 300);
+
+    debounced('call 1');
+    debounced('call 2');
+    debounced('call 3');
+
     jest.advanceTimersByTime(300);
 
-    // Now it should have been called exactly once
     expect(mockFn).toHaveBeenCalledTimes(1);
-  });
-
-  it('resets the timer on each call', () => {
-    const mockFn = jest.fn();
-    const debounced = debounce(mockFn, 300);
-
-    debounced();
-    jest.advanceTimersByTime(200); // 200ms in, still waiting
-    debounced();                   // reset timer
-    jest.advanceTimersByTime(200); // 400ms from first, 200ms from second — still waiting
-    expect(mockFn).not.toHaveBeenCalled();
-
-    jest.advanceTimersByTime(100); // 300ms after second call
-    expect(mockFn).toHaveBeenCalledTimes(1);
+    expect(mockFn).toHaveBeenCalledWith('call 3'); // last call wins
   });
 });
 ```
 
-### Async Fake Timers
-
-For code that uses `await` with timers, combine fake timers with async/await:
+### Testing polling with `setInterval`
 
 ```typescript
-import { retry } from './retry-utils';
+// src/utils/poller.ts
+export class StatusPoller {
+  private intervalId: ReturnType<typeof setInterval> | null = null;
 
-describe('retry', () => {
+  start(checkFn: () => Promise<void>, intervalMs: number) {
+    this.intervalId = setInterval(checkFn, intervalMs);
+  }
+
+  stop() {
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+  }
+}
+```
+
+```typescript
+describe('StatusPoller', () => {
   beforeEach(() => jest.useFakeTimers());
   afterEach(() => jest.useRealTimers());
 
-  it('retries failed requests with exponential backoff', async () => {
-    const mockFetch = jest.fn()
-      .mockRejectedValueOnce(new Error('Network error'))
-      .mockRejectedValueOnce(new Error('Network error'))
-      .mockResolvedValue({ data: 'success' });
+  it('calls checkFn at the specified interval', async () => {
+    const checkFn = jest.fn().mockResolvedValue(undefined);
+    const poller = new StatusPoller();
 
-    const promise = retry(mockFetch, { retries: 3, delay: 1000 });
+    poller.start(checkFn, 1000);
 
-    // First attempt fails immediately
-    await Promise.resolve();
-    expect(mockFetch).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(3500);
 
-    // Wait for backoff delay
-    jest.advanceTimersByTime(1000);
-    await Promise.resolve();
-    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // Called at t=1000, t=2000, t=3000
+    expect(checkFn).toHaveBeenCalledTimes(3);
 
-    // Wait for second backoff
-    jest.advanceTimersByTime(2000);
-    await Promise.resolve();
-    expect(mockFetch).toHaveBeenCalledTimes(3);
-
-    const result = await promise;
-    expect(result.data).toBe('success');
+    poller.stop();
   });
 });
 ```
 
-## Testing Fetch
+## Testing `fetch`
 
 ```typescript
-// Mock the global fetch
+// src/services/weatherService.ts
+export async function getWeather(city: string) {
+  const response = await fetch(`https://api.weather.com/v1/current?q=${city}`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch weather: ${response.status}`);
+  }
+  return response.json();
+}
+```
+
+```typescript
+// src/services/weatherService.test.ts
 global.fetch = jest.fn();
 
-describe('ApiClient', () => {
-  afterEach(() => {
+describe('getWeather', () => {
+  beforeEach(() => {
     jest.clearAllMocks();
   });
 
-  it('fetches user data successfully', async () => {
-    const mockUser = { id: 1, name: 'Alice', email: 'alice@example.com' };
-
+  it('returns weather data for a valid city', async () => {
+    const mockData = { city: 'Paris', temp: 22, condition: 'Sunny' };
     (global.fetch as jest.Mock).mockResolvedValue({
       ok: true,
-      status: 200,
-      json: async () => mockUser,
+      json: jest.fn().mockResolvedValue(mockData),
     });
 
-    const user = await ApiClient.getUser(1);
+    const result = await getWeather('Paris');
 
     expect(global.fetch).toHaveBeenCalledWith(
-      'https://api.example.com/users/1',
-      expect.objectContaining({
-        method: 'GET',
-        headers: expect.objectContaining({
-          'Content-Type': 'application/json',
-        }),
-      })
+      'https://api.weather.com/v1/current?q=Paris',
     );
-
-    expect(user).toEqual(mockUser);
+    expect(result).toEqual(mockData);
   });
 
-  it('throws an ApiError when the server returns 404', async () => {
+  it('throws on non-OK response', async () => {
     (global.fetch as jest.Mock).mockResolvedValue({
       ok: false,
       status: 404,
-      statusText: 'Not Found',
-      json: async () => ({ message: 'User not found' }),
     });
 
-    await expect(ApiClient.getUser(9999)).rejects.toThrow('User not found');
+    await expect(getWeather('Atlantis')).rejects.toThrow(
+      'Failed to fetch weather: 404',
+    );
   });
 
-  it('throws a NetworkError when fetch itself fails', async () => {
+  it('propagates network errors', async () => {
     (global.fetch as jest.Mock).mockRejectedValue(
-      new TypeError('Failed to fetch')
+      new TypeError('Failed to fetch'),
     );
 
-    await expect(ApiClient.getUser(1)).rejects.toBeInstanceOf(NetworkError);
+    await expect(getWeather('Paris')).rejects.toThrow('Failed to fetch');
   });
 });
 ```
@@ -340,47 +346,47 @@ describe('ApiClient', () => {
 ## Testing Axios
 
 ```typescript
+// src/services/userApiService.ts
 import axios from 'axios';
+
+export async function getUser(id: number) {
+  const { data } = await axios.get(`/api/users/${id}`);
+  return data;
+}
+
+export async function createUser(payload: { name: string; email: string }) {
+  const { data } = await axios.post('/api/users', payload);
+  return data;
+}
+```
+
+```typescript
+// src/services/userApiService.test.ts
+import axios from 'axios';
+import { getUser, createUser } from './userApiService';
 
 jest.mock('axios');
 const mockedAxios = axios as jest.Mocked<typeof axios>;
 
-describe('UserService with Axios', () => {
-  it('fetches user list', async () => {
+describe('getUser', () => {
+  it('fetches user by ID', async () => {
     mockedAxios.get.mockResolvedValue({
-      data: [{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }],
-      status: 200,
+      data: { id: 1, name: 'Alice', email: 'alice@example.com' },
     });
 
-    const users = await UserService.list();
+    const user = await getUser(1);
 
-    expect(mockedAxios.get).toHaveBeenCalledWith('/api/users');
-    expect(users).toHaveLength(2);
-    expect(users[0].name).toBe('Alice');
+    expect(mockedAxios.get).toHaveBeenCalledWith('/api/users/1');
+    expect(user.name).toBe('Alice');
   });
 
-  it('creates a new user', async () => {
-    const newUser = { name: 'Carol', email: 'carol@example.com' };
-    mockedAxios.post.mockResolvedValue({
-      data: { id: 3, ...newUser },
-      status: 201,
+  it('throws on 404', async () => {
+    const error = Object.assign(new Error('Not Found'), {
+      response: { status: 404, data: { message: 'User not found' } },
     });
+    mockedAxios.get.mockRejectedValue(error);
 
-    const created = await UserService.create(newUser);
-
-    expect(mockedAxios.post).toHaveBeenCalledWith('/api/users', newUser);
-    expect(created.id).toBe(3);
-  });
-
-  it('handles Axios error responses', async () => {
-    const axiosError = {
-      isAxiosError: true,
-      response: { status: 422, data: { errors: ['Email is invalid'] } },
-    };
-    mockedAxios.post.mockRejectedValue(axiosError);
-
-    await expect(UserService.create({ name: 'X', email: 'bad' }))
-      .rejects.toMatchObject({ message: expect.stringContaining('invalid') });
+    await expect(getUser(999)).rejects.toThrow('Not Found');
   });
 });
 ```
@@ -388,34 +394,124 @@ describe('UserService with Axios', () => {
 ## Testing Event Emitters
 
 ```typescript
+// src/events/eventBus.ts
 import { EventEmitter } from 'events';
-import { FileWatcher } from './FileWatcher';
 
-describe('FileWatcher', () => {
-  it('emits a "change" event when a file is modified', done => {
-    expect.assertions(2);
+export class OrderEventBus extends EventEmitter {
+  placeOrder(order: Order) {
+    // ... process order
+    this.emit('order:placed', order);
+    return order;
+  }
+}
+```
 
-    const watcher = new FileWatcher('./test-fixture.txt');
+```typescript
+// src/events/eventBus.test.ts
+import { OrderEventBus } from './eventBus';
 
-    watcher.on('change', (filename, stats) => {
-      expect(filename).toBe('test-fixture.txt');
-      expect(stats.size).toBeGreaterThan(0);
-      done();
-    });
+test('emits order:placed event when order is placed', (done) => {
+  const bus = new OrderEventBus();
+  const order = { id: 1, item: 'Widget', quantity: 2 };
 
-    watcher.triggerChange(); // simulate change
+  bus.on('order:placed', (emittedOrder) => {
+    expect(emittedOrder).toEqual(order);
+    done();
   });
 
-  it('emits "change" events — promise-based', () => {
-    const watcher = new FileWatcher('./test-fixture.txt');
+  bus.placeOrder(order);
+});
 
-    const changePromise = new Promise<string>(resolve => {
-      watcher.once('change', filename => resolve(filename));
-    });
+// Using a mock listener
+test('notifies all listeners', () => {
+  const bus = new OrderEventBus();
+  const listener = jest.fn();
 
-    watcher.triggerChange();
+  bus.on('order:placed', listener);
+  bus.placeOrder({ id: 1, item: 'Widget', quantity: 2 });
+  bus.placeOrder({ id: 2, item: 'Gadget', quantity: 1 });
 
-    return expect(changePromise).resolves.toBe('test-fixture.txt');
+  expect(listener).toHaveBeenCalledTimes(2);
+  expect(listener).toHaveBeenNthCalledWith(
+    1,
+    expect.objectContaining({ item: 'Widget' }),
+  );
+});
+```
+
+## Retry Logic Testing
+
+```typescript
+// src/utils/withRetry.ts
+export async function withRetry<T>(
+  fn: () => Promise<T>,
+  options: { maxRetries: number; delayMs: number },
+): Promise<T> {
+  let lastError: Error;
+  for (let attempt = 0; attempt <= options.maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error as Error;
+      if (attempt < options.maxRetries) {
+        await new Promise((resolve) => setTimeout(resolve, options.delayMs));
+      }
+    }
+  }
+  throw lastError!;
+}
+```
+
+```typescript
+// src/utils/withRetry.test.ts
+import { withRetry } from './withRetry';
+
+describe('withRetry', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  it('returns the result on first success', async () => {
+    const mockFn = jest.fn().mockResolvedValue('success');
+
+    const result = await withRetry(mockFn, { maxRetries: 3, delayMs: 100 });
+
+    expect(result).toBe('success');
+    expect(mockFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries on failure and eventually succeeds', async () => {
+    const mockFn = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('Attempt 1 failed'))
+      .mockRejectedValueOnce(new Error('Attempt 2 failed'))
+      .mockResolvedValue('success on attempt 3');
+
+    const resultPromise = withRetry(mockFn, { maxRetries: 3, delayMs: 100 });
+
+    // Advance through the delay periods
+    await Promise.resolve(); // let first attempt run
+    jest.advanceTimersByTime(100);
+    await Promise.resolve(); // let second attempt run
+    jest.advanceTimersByTime(100);
+
+    const result = await resultPromise;
+
+    expect(result).toBe('success on attempt 3');
+    expect(mockFn).toHaveBeenCalledTimes(3);
+  });
+
+  it('throws after exhausting all retries', async () => {
+    const mockFn = jest.fn().mockRejectedValue(new Error('Always fails'));
+
+    const resultPromise = withRetry(mockFn, { maxRetries: 2, delayMs: 50 });
+
+    for (let i = 0; i < 2; i++) {
+      await Promise.resolve();
+      jest.advanceTimersByTime(50);
+    }
+
+    await expect(resultPromise).rejects.toThrow('Always fails');
+    expect(mockFn).toHaveBeenCalledTimes(3); // 1 initial + 2 retries
   });
 });
 ```
@@ -423,113 +519,67 @@ describe('FileWatcher', () => {
 ## Real-World Async Service Test
 
 ```typescript
-// services/payment.service.ts
-export class PaymentService {
-  constructor(
-    private stripe: StripeClient,
-    private db: Database,
-    private mailer: Mailer,
-  ) {}
+// src/services/orderService.test.ts
+import { OrderService } from './orderService';
+import { paymentGateway } from './paymentGateway';
+import { inventoryService } from './inventoryService';
+import { emailService } from './emailService';
 
-  async processPayment(userId: string, amount: number): Promise<PaymentResult> {
-    const customer = await this.db.findUser(userId);
-    if (!customer) throw new Error('Customer not found');
+jest.mock('./paymentGateway');
+jest.mock('./inventoryService');
+jest.mock('./emailService');
 
-    const charge = await this.stripe.charge({
-      amount,
-      currency: 'usd',
-      customer: customer.stripeId,
-    });
+const mockPayment = paymentGateway as jest.Mocked<typeof paymentGateway>;
+const mockInventory = inventoryService as jest.Mocked<typeof inventoryService>;
+const mockEmail = emailService as jest.Mocked<typeof emailService>;
 
-    await this.db.createPaymentRecord({
-      userId,
-      chargeId: charge.id,
-      amount,
-      status: 'completed',
-    });
-
-    await this.mailer.send({
-      to: customer.email,
-      subject: 'Payment Confirmed',
-      body: `Your payment of $${(amount / 100).toFixed(2)} was successful.`,
-    });
-
-    return { chargeId: charge.id, status: 'success' };
-  }
-}
-
-// services/payment.service.test.ts
-describe('PaymentService.processPayment', () => {
-  const mockStripe = { charge: jest.fn() };
-  const mockDb = { findUser: jest.fn(), createPaymentRecord: jest.fn() };
-  const mockMailer = { send: jest.fn() };
-
-  let service: PaymentService;
+describe('OrderService.placeOrder', () => {
+  let service: OrderService;
 
   beforeEach(() => {
+    service = new OrderService();
     jest.clearAllMocks();
-    service = new PaymentService(mockStripe, mockDb, mockMailer);
+  });
 
-    mockDb.findUser.mockResolvedValue({
-      id: 'user-1',
-      email: 'alice@example.com',
-      stripeId: 'cus_abc123',
+  it('completes a successful order', async () => {
+    expect.assertions(4);
+
+    mockInventory.reserve.mockResolvedValue({ reservationId: 'res-123' });
+    mockPayment.charge.mockResolvedValue({ transactionId: 'txn-456' });
+    mockEmail.send.mockResolvedValue({ messageId: 'msg-789' });
+
+    const result = await service.placeOrder({
+      userId: 1,
+      items: [{ productId: 'SKU-001', quantity: 2 }],
+      paymentMethod: 'card_visa',
     });
-    mockStripe.charge.mockResolvedValue({ id: 'ch_xyz789' });
-    mockDb.createPaymentRecord.mockResolvedValue(undefined);
-    mockMailer.send.mockResolvedValue(undefined);
+
+    expect(result.status).toBe('confirmed');
+    expect(mockInventory.reserve).toHaveBeenCalledWith([
+      { productId: 'SKU-001', quantity: 2 },
+    ]);
+    expect(mockPayment.charge).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 1 }),
+    );
+    expect(mockEmail.send).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'order_confirmation' }),
+    );
   });
 
-  it('charges the correct amount and returns the charge id', async () => {
-    const result = await service.processPayment('user-1', 4999);
+  it('releases inventory reservation when payment fails', async () => {
+    mockInventory.reserve.mockResolvedValue({ reservationId: 'res-123' });
+    mockPayment.charge.mockRejectedValue(new Error('Card declined'));
 
-    expect(mockStripe.charge).toHaveBeenCalledWith({
-      amount: 4999,
-      currency: 'usd',
-      customer: 'cus_abc123',
-    });
-    expect(result).toEqual({ chargeId: 'ch_xyz789', status: 'success' });
-  });
+    await expect(
+      service.placeOrder({
+        userId: 1,
+        items: [{ productId: 'SKU-001', quantity: 2 }],
+        paymentMethod: 'card_expired',
+      }),
+    ).rejects.toThrow('Card declined');
 
-  it('saves the payment record to the database', async () => {
-    await service.processPayment('user-1', 4999);
-
-    expect(mockDb.createPaymentRecord).toHaveBeenCalledWith({
-      userId: 'user-1',
-      chargeId: 'ch_xyz789',
-      amount: 4999,
-      status: 'completed',
-    });
-  });
-
-  it('sends a confirmation email with the correct amount', async () => {
-    await service.processPayment('user-1', 4999);
-
-    expect(mockMailer.send).toHaveBeenCalledWith({
-      to: 'alice@example.com',
-      subject: 'Payment Confirmed',
-      body: expect.stringContaining('$49.99'),
-    });
-  });
-
-  it('throws when the customer does not exist', async () => {
-    mockDb.findUser.mockResolvedValue(null);
-
-    await expect(service.processPayment('user-999', 4999))
-      .rejects.toThrow('Customer not found');
-
-    expect(mockStripe.charge).not.toHaveBeenCalled();
-    expect(mockMailer.send).not.toHaveBeenCalled();
-  });
-
-  it('does not send an email if the Stripe charge fails', async () => {
-    mockStripe.charge.mockRejectedValue(new Error('Card declined'));
-
-    await expect(service.processPayment('user-1', 4999))
-      .rejects.toThrow('Card declined');
-
-    expect(mockDb.createPaymentRecord).not.toHaveBeenCalled();
-    expect(mockMailer.send).not.toHaveBeenCalled();
+    expect(mockInventory.release).toHaveBeenCalledWith('res-123');
+    expect(mockEmail.send).not.toHaveBeenCalled();
   });
 });
 ```

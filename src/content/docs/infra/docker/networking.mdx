@@ -1,31 +1,34 @@
 ---
 title: Docker Networking
-description: Deep dive into Docker network types, bridge networking, DNS resolution, host networks, overlay networks, and inter-container communication.
+description: Master Docker network types — bridge, host, overlay, and macvlan — plus DNS resolution, port publishing, and troubleshooting.
 sidebar:
   order: 5
 tags: [devops, docker]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
 # Docker Networking
 
-Docker networking enables containers to communicate with each other and the outside world. Understanding network types and DNS resolution is essential for building robust multi-container applications.
-
----
+Docker networking controls how containers communicate with each other and the outside world. Understanding network types and DNS resolution is essential for building reliable multi-container applications.
 
 ## Network Types Overview
 
-| Driver | Use Case | Scope |
-|---|---|---|
-| **bridge** | Default for standalone containers; container-to-container on same host | Local |
-| **host** | Remove network isolation; container shares host network stack | Local |
-| **none** | Completely isolated container; no networking | Local |
-| **overlay** | Multi-host networking for Docker Swarm | Swarm |
-| **macvlan** | Assign MAC address to container; appear as physical device on network | Local |
-| **ipvlan** | Like macvlan but shares MAC; useful in environments where MAC spoofing is blocked | Local |
-
----
+| Driver    | Scope       | Use Case                                               |
+| --------- | ----------- | ------------------------------------------------------ |
+| `bridge`  | Single host | Default; container-to-container on same host           |
+| `host`    | Single host | Maximum performance; container uses host network stack |
+| `none`    | Single host | No networking; fully isolated container                |
+| `overlay` | Multi-host  | Docker Swarm; spans multiple Docker hosts              |
+| `macvlan` | Single host | Container gets its own MAC/IP on the physical network  |
+| `ipvlan`  | Single host | Similar to macvlan but shares MAC address              |
 
 ## Managing Networks
 
@@ -33,19 +36,14 @@ Docker networking enables containers to communicate with each other and the outs
 # List all networks
 docker network ls
 
-# Inspect a network
+# Inspect a network (full JSON details)
 docker network inspect bridge
-docker network inspect my-network
+docker network inspect my-app-net
 
-# Create a network
+# Create a custom network
 docker network create my-network
 docker network create --driver bridge my-bridge
-docker network create \
-  --driver bridge \
-  --subnet 172.20.0.0/16 \
-  --ip-range 172.20.240.0/20 \
-  --gateway 172.20.0.1 \
-  my-custom-network
+docker network create --subnet 172.20.0.0/16 --gateway 172.20.0.1 my-custom-net
 
 # Remove a network
 docker network rm my-network
@@ -55,350 +53,405 @@ docker network prune
 
 # Connect a running container to a network
 docker network connect my-network my-container
-docker network connect --alias db my-network my-postgres
+
+# Connect with alias
+docker network connect --alias db-alias my-network my-container
 
 # Disconnect a container from a network
 docker network disconnect my-network my-container
 ```
 
----
+## Bridge Network
 
-## Bridge Networking
-
-The **bridge** network is the default network driver. When you start a container without specifying a network, it joins the default `bridge` network.
+The default network driver. Docker creates a virtual bridge (`docker0`) on the host. Containers on the same bridge can communicate; containers on different bridges are isolated.
 
 ### Default Bridge Network
 
 ```bash
-# Start two containers on the default bridge network
-docker run -d --name container1 alpine sleep 3600
-docker run -d --name container2 alpine sleep 3600
+# Containers join the default bridge if no network is specified
+docker run -d --name container1 nginx:alpine
+docker run -d --name container2 nginx:alpine
 
-# Inspect the bridge network to see connected containers
-docker network inspect bridge
+# They can communicate by IP — but NOT by name (no DNS on default bridge)
+docker inspect --format '{{.NetworkSettings.IPAddress}}' container1
+# 172.17.0.2
 
-# container1 can reach container2 only via IP, NOT by name
-# (DNS name resolution does NOT work on the default bridge network)
-docker exec container1 ping 172.17.0.3   # works (by IP)
-docker exec container1 ping container2    # FAILS on default bridge
+docker exec container2 ping 172.17.0.2   # works (by IP)
+docker exec container2 ping container1   # FAILS — no DNS on default bridge
 ```
+
+:::caution[Default Bridge Limitations]
+The default `bridge` network does **not** provide automatic DNS resolution between containers. You must use IPs or `--link` (deprecated). Always create a **user-defined bridge** for any non-trivial application.
+:::
 
 ### User-Defined Bridge Network
 
-User-defined bridge networks are **strongly preferred**. They provide automatic DNS resolution between containers.
-
 ```bash
-# Create a custom bridge network
-docker network create app-network
+# Create a named network
+docker network create app-net
 
-# Start containers on the custom network
-docker run -d --name web --network app-network nginx
-docker run -d --name api --network app-network my-api
-docker run -d --name db  --network app-network postgres
+# Run containers on the named network
+docker run -d --name db --network app-net postgres:16-alpine
+docker run -d --name app --network app-net myapp:latest
 
-# Now containers can reach each other by name!
-docker exec api ping db          # works!
-docker exec api curl http://web  # works!
+# Now name-based DNS works!
+docker exec app ping db          # resolves to db container's IP
+docker exec app curl http://db:5432
+
+# Inspect the network
+docker network inspect app-net
 ```
 
-:::tip[Default bridge vs user-defined bridge]
-| Feature | Default Bridge | User-Defined Bridge |
-|---|---|---|
-| DNS resolution by container name | ❌ No | ✅ Yes |
-| Automatic service discovery | ❌ No | ✅ Yes |
-| Network isolation | Shared by all | Per-network isolation |
-| `--link` required for name res | Yes (deprecated) | Not needed |
-| Recommended | No | **Yes** |
-:::
+### Default Bridge vs User-Defined Bridge
 
-### Port Mapping
-
-Port mapping exposes a container port on the host, enabling external access.
-
-```bash
-# Host port 8080 → Container port 80
-docker run -p 8080:80 nginx
-
-# Bind only to localhost (don't expose publicly)
-docker run -p 127.0.0.1:8080:80 nginx
-
-# Let Docker choose an available host port
-docker run -p 80 nginx
-docker port <container-id>          # Find the assigned port
-
-# Map multiple ports
-docker run -p 80:80 -p 443:443 nginx
-
-# Map UDP port
-docker run -p 53:53/udp dns-server
-
-# Map all exposed ports to random host ports
-docker run -P nginx                 # -P is capital P
-```
-
-**EXPOSE vs -p:**
-- `EXPOSE` in a Dockerfile is **documentation only** — it does not publish the port
-- `-p` (or `--publish`) in `docker run` **actually publishes** the port on the host
-
----
+| Feature                     | Default `bridge`                          | User-Defined Bridge     |
+| --------------------------- | ----------------------------------------- | ----------------------- |
+| **DNS resolution by name**  | ❌ No                                     | ✅ Yes                  |
+| **Isolation**               | Shared with all default-bridge containers | Isolated per network    |
+| **Connect/disconnect live** | ❌ Requires restart                       | ✅ Hot-connect possible |
+| **Network-wide env vars**   | Limited                                   | N/A                     |
+| **Recommended**             | No (legacy)                               | Yes                     |
 
 ## Host Network
 
-With the **host** network driver, the container shares the host's network namespace directly. There's no network isolation — the container behaves as if it's a process directly on the host.
+The container shares the host's network namespace directly — no network isolation, no NAT. The container's ports are the host's ports.
 
 ```bash
-docker run --network host nginx
-# nginx now listens on host port 80 directly (no -p needed)
+# Use host network (Linux only)
+docker run -d --network host nginx:alpine
+
+# nginx now listens on port 80 of the HOST directly
+# No -p flag needed or possible — the port IS the host port
+curl http://localhost:80     # works directly
 ```
 
-**When to use:**
-- Maximum network performance (no NAT overhead)
-- Applications that need to bind to specific host interfaces
-- Network monitoring tools that need to see all host traffic
-
-:::caution[Linux only]
-The host network driver **only works on Linux**. On macOS and Windows, Docker runs in a VM, so `--network host` connects to the VM's network, not your Mac/Windows host network.
+:::caution[Host Network — Linux Only]
+Host networking is only available on **Linux**. On macOS and Windows, Docker runs inside a VM, so `--network host` refers to the VM's network, not your laptop's network. It won't behave as expected on those platforms.
 :::
 
----
+### When to Use Host Network
 
-## Container DNS Resolution
+- **Maximum performance** — eliminates the NAT overhead of bridge networking
+- **Monitoring agents** — cAdvisor, Prometheus node-exporter that need to see host network metrics
+- **Legacy apps** — apps that discover services on specific well-known ports
 
-Docker runs an embedded DNS server at `127.0.0.11` for containers on user-defined networks. This provides automatic service discovery.
+## None Network
+
+Completely disables networking for a container. Useful for batch processing jobs that must not have network access.
 
 ```bash
-# From within a container on a user-defined network:
-# Resolve by container name
-nslookup my-container           # → container's IP
-
-# Resolve by service alias
-nslookup db.backend              # → if alias 'db' is set on 'backend' network
-
-# DNS search domains are set automatically
-# In docker-compose, 'postgres' resolves to the postgres service IP
+docker run --rm --network none alpine sh -c "ping 8.8.8.8"
+# PING 8.8.8.8 (8.8.8.8): 56 data bytes
+# ping: sendto: Network unreachable
 ```
 
-### DNS in Docker Compose
+## Overlay Network (Swarm)
 
-Services in a Compose file automatically get DNS entries equal to their service name.
-
-```yaml
-services:
-  api:
-    image: my-api
-    # Can reach postgres at: postgres://db:5432/mydb
-    # Can reach redis at: redis://cache:6379
-    environment:
-      DATABASE_URL: postgres://db:5432/mydb
-      REDIS_URL: redis://cache:6379
-
-  db:
-    image: postgres:16
-
-  cache:
-    image: redis:7
-```
-
----
-
-## Overlay Networks (Docker Swarm)
-
-Overlay networks span multiple Docker hosts. They're used in Docker Swarm mode to allow containers on different machines to communicate as if on the same network.
+Overlay networks span multiple Docker hosts, enabling containers on different machines to communicate as if on the same network. Requires Docker Swarm mode.
 
 ```bash
 # Initialize Swarm
 docker swarm init
 
-# Create an overlay network
-docker network create --driver overlay --attachable my-overlay
-
-# Services on the overlay network can communicate across hosts
-docker service create --network my-overlay --name web nginx
-docker service create --network my-overlay --name api my-api
-```
-
----
-
-## Network Aliases
-
-Network aliases allow a container to be reachable by multiple names on a network.
-
-```bash
-# Assign alias when connecting to a network
-docker network connect --alias db --alias primary my-network postgres
-
-# In docker-compose:
-```
-
-```yaml
-services:
-  postgres:
-    image: postgres:16
-    networks:
-      backend:
-        aliases:
-          - db
-          - primary-db
-          - database
-```
-
----
-
-## The `--link` Flag (Deprecated)
-
-`--link` was the original mechanism for container-to-container communication. It is **deprecated** and should not be used in new projects.
-
-```bash
-# Old way (don't use this)
-docker run --link db:database my-app
-
-# Modern way — use user-defined networks instead
-docker network create app-net
-docker run --network app-net --name db postgres
-docker run --network app-net my-app  # can reach 'db' by name
-```
-
----
-
-## IPv6 Support
-
-```bash
-# Enable IPv6 in daemon.json
-# /etc/docker/daemon.json
-```
-
-```json
-{
-  "ipv6": true,
-  "fixed-cidr-v6": "2001:db8:1::/64"
-}
-```
-
-```bash
-# Create IPv6-enabled network
+# Create an attachable overlay network
 docker network create \
-  --driver bridge \
-  --ipv6 \
-  --subnet 172.20.0.0/16 \
-  --subnet "2001:db8:2::/64" \
-  ip6net
+  --driver overlay \
+  --attachable \
+  --subnet 10.0.9.0/24 \
+  my-overlay
+
+# Deploy a service on the overlay
+docker service create \
+  --name webapp \
+  --network my-overlay \
+  --replicas 3 \
+  nginx:alpine
 ```
 
----
+## Macvlan Network
 
-## Inter-Service Communication in Compose
-
-With Docker Compose, services communicate via their **service name** as hostname on the default network.
-
-```yaml
-services:
-  nginx:
-    image: nginx
-    # nginx proxies to api:3000
-
-  api:
-    image: my-node-api
-    # api connects to database:5432 and redis:6379
-
-  database:
-    image: postgres:16
-
-  redis:
-    image: redis:7
-```
-
-```nginx
-# nginx.conf — upstream using service name as hostname
-upstream api {
-  server api:3000;
-}
-
-server {
-  listen 80;
-  location /api/ {
-    proxy_pass http://api;
-  }
-}
-```
-
----
-
-## macvlan Networks
-
-macvlan networks assign a unique MAC address to each container, making them appear as physical network devices. Useful for legacy applications that need to be on the physical network.
+Assigns each container a unique MAC address and IP address on the physical network. The container appears as a physical device to the network switch. Useful for legacy apps that need to be on the same Layer 2 segment as the host.
 
 ```bash
 docker network create \
   --driver macvlan \
   --subnet 192.168.1.0/24 \
   --gateway 192.168.1.1 \
-  -o parent=eth0 \
+  --opt parent=eth0 \
   macvlan-net
 
-docker run --network macvlan-net \
+docker run -d \
+  --network macvlan-net \
   --ip 192.168.1.100 \
-  nginx
+  --name legacy-app \
+  mylegacyapp:latest
 ```
 
-:::caution[macvlan and promiscuous mode]
-Many cloud providers and managed switches disable promiscuous mode, which macvlan requires. If macvlan doesn't work, your network interface may have MAC spoofing protection enabled.
+## Container DNS Resolution
+
+Docker runs an embedded DNS server at `127.0.0.11` inside each container. It resolves:
+
+- **Service/container names** → container IPs (on user-defined networks)
+- **Network aliases** → container IPs
+- **External hostnames** → resolved via host's DNS config
+
+```bash
+# DNS server is 127.0.0.11
+docker exec myapp cat /etc/resolv.conf
+# nameserver 127.0.0.11
+# options ndots:0
+
+# Resolving other service names
+docker exec myapp nslookup db
+# Server: 127.0.0.11
+# Name: db
+# Address: 172.20.0.3
+
+# Fully qualified service DNS (useful for cross-network resolution)
+# format: <container>.<network>.docker
+# In Docker Compose:
+# format: <service>.<project>_<network>
+```
+
+## Port Publishing Deep Dive
+
+### EXPOSE vs -p
+
+```dockerfile
+# In Dockerfile — ONLY documentation, no actual port opening
+EXPOSE 3000
+EXPOSE 8080/tcp
+EXPOSE 53/udp
+```
+
+```bash
+# -p actually publishes the port (EXPOSE is optional but good practice)
+
+# Publish on all interfaces (0.0.0.0)
+docker run -p 8080:80 nginx
+
+# Restrict to localhost
+docker run -p 127.0.0.1:8080:80 nginx
+
+# Random host port (Docker chooses)
+docker run -p 80 nginx
+docker port container_name 80    # see which port was assigned
+
+# Publish all EXPOSEd ports to random host ports
+docker run -P nginx              # capital P
+
+# UDP port
+docker run -p 53:53/udp dns-server
+
+# Port range
+docker run -p 8080-8090:8080-8090 myapp
+```
+
+:::tip[Security: Bind to Localhost]
+On servers with a public IP, always bind to `127.0.0.1` unless the port genuinely needs to be publicly accessible. Many security incidents stem from accidentally exposing internal services.
+
+```bash
+# Unsafe — accessible from anywhere
+docker run -p 5432:5432 postgres
+
+# Safe — only accessible locally or via SSH tunnel
+docker run -p 127.0.0.1:5432:5432 postgres
+```
+
 :::
 
----
+## Network Aliases
+
+A container can be reached by multiple names on a network using aliases:
+
+```bash
+# docker run with alias
+docker run -d \
+  --network app-net \
+  --network-alias primary-db \
+  --network-alias read-db \
+  --name postgres-1 \
+  postgres:16
+
+# Other containers can reach it as "primary-db" or "read-db"
+docker exec app curl postgres-1:5432      # by name
+docker exec app curl primary-db:5432      # by alias
+docker exec app curl read-db:5432         # by alias
+```
+
+```yaml
+# In Compose
+services:
+  postgres:
+    image: postgres:16
+    networks:
+      app-net:
+        aliases:
+          - primary-db
+          - read-db
+```
+
+## --link (Deprecated)
+
+```bash
+# Legacy: don't use --link in new projects
+docker run --link postgres:db myapp
+
+# Use user-defined networks instead — same functionality, more flexible
+docker network create app-net
+docker run --network app-net --name postgres postgres:16
+docker run --network app-net myapp      # reaches postgres by name "postgres"
+```
+
+## IPv6 Support
+
+```bash
+# Enable IPv6 in daemon.json
+cat /etc/docker/daemon.json
+# {
+#   "ipv6": true,
+#   "fixed-cidr-v6": "fd00::/80"
+# }
+
+# Create IPv6 network
+docker network create \
+  --ipv6 \
+  --subnet fd00:1::/64 \
+  ipv6-net
+
+# Run with IPv6
+docker run --network ipv6-net nginx:alpine
+```
+
+## Inter-Service Communication in Docker Compose
+
+In Compose, services on the same network reach each other by their **service name**:
+
+```yaml
+services:
+  app:
+    environment:
+      DB_HOST: db # "db" resolves to the db container
+      REDIS_HOST: redis # "redis" resolves to the redis container
+      CACHE_HOST: cache
+    networks:
+      - backend
+
+  db:
+    image: postgres:16
+    networks:
+      - backend
+
+  redis:
+    image: redis:7
+    networks:
+      - backend
+
+  cache:
+    image: redis:7
+    networks:
+      backend:
+        aliases:
+          - cache
+          - session-store
+```
 
 ## Network Troubleshooting
 
-The `nicolaka/netshoot` image is an all-in-one network troubleshooting toolkit.
+### Inspect Container Network
 
 ```bash
-# Run a temporary troubleshooting container on the same network
-docker run --rm -it \
-  --network my-network \
-  nicolaka/netshoot
+# Show all network interfaces in a container
+docker exec -it myapp ip addr
 
-# Check DNS resolution
-nslookup db
-nslookup db.my-network
+# Show routing table
+docker exec -it myapp ip route
 
-# Test connectivity
-ping api
-curl http://api:3000/health
-wget -qO- http://web
+# Show DNS config
+docker exec -it myapp cat /etc/resolv.conf
 
-# Port scan
-nmap -p 3000 api
-
-# Trace route
-traceroute api
-
-# Check open ports
-ss -tlnp
-netstat -tlnp
-
-# DNS lookup from inside a container
-docker exec my-container nslookup postgres
-docker exec my-container cat /etc/resolv.conf
-docker exec my-container curl -v http://api:3000
-
-# Inspect network settings of a running container
-docker inspect --format '{{json .NetworkSettings}}' my-container | jq
-docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' my-container
+# Show all listening ports
+docker exec -it myapp ss -tlnp
+docker exec -it myapp netstat -tlnp
 ```
 
-### Common Network Issues
-
-| Symptom | Likely Cause | Fix |
-|---|---|---|
-| `Name or service not known` | Container on default bridge, not user-defined | Create and use a user-defined network |
-| `Connection refused` | Port not published or service not listening | Check `EXPOSE` + `-p` flag, verify service is running |
-| `No route to host` | Containers on different networks | Connect both to same network |
-| DNS works, connections fail | Firewall / iptables rules | Check `docker network inspect` for subnet; check host firewall |
-| macOS/Windows host not reachable | Host networking limitation | Use `host.docker.internal` as hostname to reach the host machine |
+### Test Connectivity
 
 ```bash
-# On macOS/Windows, reach the host from a container:
-curl http://host.docker.internal:8080
+# Ping another container by name (if DNS works)
+docker exec -it app ping db
+docker exec -it app ping redis
 
-# On Linux, use the host gateway IP:
-docker run --add-host=host.docker.internal:host-gateway my-app
+# HTTP request to another service
+docker exec -it app curl http://db:5432
+docker exec -it app wget -qO- http://backend-api:3000/health
+
+# DNS lookup
+docker exec -it app nslookup db
+docker exec -it app nslookup db 127.0.0.11   # force Docker DNS
+
+# TCP connectivity check (without curl)
+docker exec -it app sh -c "nc -zv db 5432"
+```
+
+### Common Issues
+
+```bash
+# Container can't reach another — check they're on same network
+docker inspect container1 | grep -A 20 '"Networks"'
+docker inspect container2 | grep -A 20 '"Networks"'
+
+# Check if ports are actually listening
+docker exec db ss -tlnp | grep 5432
+
+# Network not found after prune
+docker network ls
+docker compose up    # recreates networks
+
+# Port conflict — see what's using a host port
+lsof -i :8080                    # Linux/macOS
+netstat -ano | findstr :8080     # Windows
+```
+
+:::caution[Network Prune Caution]
+`docker network prune` removes all unused networks — including those used by stopped Compose projects. If you have stopped services that need the network when restarted, their containers will have lost network membership. Run `docker compose up` again to recreate the networks.
+:::
+
+## Compose Network Defaults
+
+When you run `docker compose up`, Compose automatically:
+
+1. Creates a default network named `<project>_default`
+2. Attaches all services to that network
+3. Each service is reachable by its service name as hostname
+
+```yaml
+# This works without any explicit network config
+services:
+  app:
+    image: myapp
+    environment:
+      DB_URL: postgresql://db/mydb # "db" resolves automatically
+
+  db:
+    image: postgres:16
+```
+
+To isolate services or create multiple network segments:
+
+```yaml
+services:
+  nginx:
+    networks: [frontend]
+
+  app:
+    networks: [frontend, backend] # bridge between frontend and backend
+
+  db:
+    networks: [backend] # only accessible from backend
+
+networks:
+  frontend:
+  backend:
+    internal: true # no external internet access
 ```

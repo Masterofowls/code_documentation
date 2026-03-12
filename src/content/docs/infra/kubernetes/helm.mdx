@@ -1,32 +1,35 @@
 ---
 title: Helm
-description: Kubernetes package manager — chart structure, templating, values, dependencies, Helmfile, OCI registries, secrets, and chart testing.
+description: Package, template, and deploy Kubernetes applications with Helm charts, values files, helpers, dependencies, Helmfile, and OCI registries.
 sidebar:
   order: 8
 tags: [devops, kubernetes]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
 # Helm
 
-Helm is the package manager for Kubernetes. It packages Kubernetes manifests into **charts** — reusable, configurable, versioned bundles that simplify deployment and management of complex applications.
-
----
+Helm is the package manager for Kubernetes. It bundles Kubernetes manifests into reusable **charts**, manages releases with versioning and rollback, and provides a powerful templating engine for configuration.
 
 ## Why Helm?
 
-Without Helm, deploying a complex application means managing dozens of individual YAML files with `kubectl apply`. Helm solves:
+Without Helm, deploying an application requires managing 5–15 YAML files with repeated values (app name, image tag, namespace). Helm:
 
-- **Packaging** — Bundle all manifests for an application together
-- **Configuration** — Parameterize manifests with a `values.yaml` file
-- **Versioning** — Track application releases and roll back when needed
-- **Dependency management** — Bundle dependent charts (e.g., PostgreSQL alongside your app)
-- **Reuse** — Community charts on Artifact Hub for common software
+- **Packages** all those files into a single chart
+- **Templates** values so one chart deploys to dev, staging, and prod
+- **Tracks releases** — knows what's deployed and can roll back
+- **Manages dependencies** — pulls in charts for PostgreSQL, Redis, etc.
+- **Shares** via registries (Artifact Hub, OCI registries)
 
----
-
-## Installation
+## Installing Helm
 
 ```bash
 # macOS
@@ -35,14 +38,14 @@ brew install helm
 # Linux
 curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
-# Windows (Scoop)
-scoop install helm
+# Windows
+winget install Helm.Helm
+# or
+choco install kubernetes-helm
 
 # Verify
 helm version
 ```
-
----
 
 ## Chart Structure
 
@@ -50,78 +53,95 @@ helm version
 mychart/
 ├── Chart.yaml              # Chart metadata (name, version, description)
 ├── values.yaml             # Default configuration values
-├── values.schema.json      # Optional: JSON Schema for values validation
-├── README.md               # Documentation
-├── LICENSE                 # License file
-├── .helmignore             # Files to exclude from chart package
-├── charts/                 # Dependent charts (subcharts)
-│   └── postgresql-13.2.0.tgz
+├── values.schema.json      # Optional JSON schema to validate values
+├── charts/                 # Dependency charts (downloaded here)
 ├── crds/                   # Custom Resource Definitions (installed first)
-│   └── myapp-crd.yaml
-└── templates/              # Kubernetes manifest templates
-    ├── _helpers.tpl        # Template helper functions (not rendered directly)
-    ├── deployment.yaml
-    ├── service.yaml
-    ├── ingress.yaml
-    ├── configmap.yaml
-    ├── secret.yaml
-    ├── serviceaccount.yaml
-    ├── hpa.yaml
-    └── NOTES.txt           # Shown to user after helm install
+├── templates/              # Kubernetes manifest templates
+│   ├── _helpers.tpl        # Template helpers and partials
+│   ├── deployment.yaml
+│   ├── service.yaml
+│   ├── ingress.yaml
+│   ├── configmap.yaml
+│   ├── secret.yaml
+│   ├── serviceaccount.yaml
+│   ├── hpa.yaml
+│   ├── NOTES.txt           # Shown to user after helm install
+│   └── tests/
+│       └── test-connection.yaml
+└── .helmignore             # Files to exclude from chart archive
 ```
 
 ### Chart.yaml
 
 ```yaml
-apiVersion: v2                    # Helm 3 chart format
-name: my-app
-description: A production-ready web application
-type: application                 # application | library
-version: 1.2.3                    # Chart version (SemVer)
-appVersion: "2.5.1"               # Application version (informational)
+apiVersion: v2 # Helm 3 chart format (v2)
+name: myapp
+version: 1.2.3 # Chart version (SemVer)
+appVersion: '2.5.1' # Application version (informational)
+description: My application Helm chart
+type: application # application | library
+
+# Optional metadata
 keywords:
+  - nodejs
   - web
   - api
-home: https://example.com
+home: https://github.com/org/myapp
 sources:
-  - https://github.com/myorg/my-app
+  - https://github.com/org/myapp
 maintainers:
   - name: Jane Smith
     email: jane@example.com
+    url: https://example.com
+icon: https://example.com/icon.png
+annotations:
+  category: WebApp
+
+# Dependencies
 dependencies:
   - name: postgresql
-    version: "13.2.0"
+    version: '13.2.x'
     repository: https://charts.bitnami.com/bitnami
-    condition: postgresql.enabled   # Only install if postgresql.enabled=true
-    alias: db                       # Use as 'db' in values.yaml
+    condition: postgresql.enabled # only install if values.postgresql.enabled=true
   - name: redis
-    version: "18.x.x"
+    version: '18.x.x'
     repository: https://charts.bitnami.com/bitnami
     condition: redis.enabled
-annotations:
-  category: Application
 ```
 
 ### values.yaml
 
 ```yaml
-# Default values — users override these at install time
-replicaCount: 1
+# Default values — overridden with --set or --values flags
+replicaCount: 2
 
 image:
-  repository: ghcr.io/myorg/my-app
+  repository: myregistry/myapp
+  tag: '' # default to Chart.appVersion if empty
   pullPolicy: IfNotPresent
-  tag: ""                         # Overrides appVersion if set
+  pullSecrets: []
 
-imagePullSecrets: []
-nameOverride: ""
-fullnameOverride: ""
+nameOverride: ''
+fullnameOverride: ''
 
 serviceAccount:
   create: true
-  automount: true
   annotations: {}
-  name: ""
+  name: ''
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  fsGroup: 1001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
 
 service:
   type: ClusterIP
@@ -133,430 +153,544 @@ ingress:
   className: nginx
   annotations: {}
   hosts:
-    - host: chart-example.local
+    - host: myapp.example.com
       paths:
         - path: /
           pathType: Prefix
   tls: []
 
 resources:
-  limits:
-    cpu: 500m
-    memory: 512Mi
   requests:
     cpu: 100m
     memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
 
 autoscaling:
   enabled: false
-  minReplicas: 1
-  maxReplicas: 10
-  targetCPUUtilizationPercentage: 70
+  minReplicas: 2
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 60
 
-env:
-  NODE_ENV: production
-  PORT: "3000"
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 30
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 5
+
+env: {}
+  # NODE_ENV: production
+  # LOG_LEVEL: info
+
+envFrom: []
+  # - configMapRef:
+  #     name: my-config
+
+extraVolumes: []
+extraVolumeMounts: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
 
 postgresql:
-  enabled: true
+  enabled: false
   auth:
-    username: myapp
-    password: changeme
     database: myapp
-  primary:
-    persistence:
-      size: 10Gi
+    username: myapp
 
 redis:
   enabled: false
   auth:
-    enabled: false
+    enabled: true
 ```
-
----
-
-## Helm CLI Commands
-
-### Installing and Managing Releases
-
-```bash
-# Install a chart
-helm install my-release ./mychart
-helm install my-release ./mychart --namespace production --create-namespace
-
-# Install from a remote repository
-helm repo add bitnami https://charts.bitnami.com/bitnami
-helm repo update
-helm install my-postgres bitnami/postgresql
-
-# Install with custom values
-helm install my-app ./mychart \
-  --set image.tag=1.2.3 \
-  --set replicaCount=3 \
-  --set ingress.enabled=true
-
-# Install with a values file
-helm install my-app ./mychart -f values.production.yaml
-
-# Combine multiple values files (later files override earlier)
-helm install my-app ./mychart \
-  -f values.yaml \
-  -f values.production.yaml \
-  -f values.secrets.yaml
-
-# Upgrade a release
-helm upgrade my-app ./mychart --set image.tag=1.2.4
-
-# Install or upgrade (atomic)
-helm upgrade --install my-app ./mychart \
-  --namespace production \
-  --create-namespace \
-  --atomic \           # Roll back if upgrade fails
-  --timeout 5m \
-  -f values.production.yaml
-
-# Rollback to previous release
-helm rollback my-app
-helm rollback my-app 2             # Roll back to revision 2
-
-# Uninstall
-helm uninstall my-app
-helm uninstall my-app --keep-history  # Keep release history
-
-# List releases
-helm list
-helm list --all-namespaces
-helm list -n production
-
-# Status of a release
-helm status my-app
-
-# Release history
-helm history my-app
-```
-
----
 
 ## Template Syntax
-
-Helm uses Go templates with the [Sprig](https://masterminds.github.io/sprig/) function library.
 
 ### Built-in Objects
 
 ```yaml
-# .Values — values from values.yaml (or --set/--values flags)
-image: {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
+# .Release — information about the current release
+{{ .Release.Name }}           # release name
+{{ .Release.Namespace }}      # target namespace
+{{ .Release.IsInstall }}      # true on first install
+{{ .Release.IsUpgrade }}      # true on upgrade
+{{ .Release.Revision }}       # revision number (1 on install)
 
-# .Release — release metadata
-name: {{ .Release.Name }}-deployment
-namespace: {{ .Release.Namespace }}
-isUpgrade: {{ .Release.IsUpgrade }}
+# .Chart — Chart.yaml contents
+{{ .Chart.Name }}
+{{ .Chart.Version }}
+{{ .Chart.AppVersion }}
 
-# .Chart — Chart.yaml metadata
-app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+# .Values — merged values (default + overrides)
+{{ .Values.image.repository }}
+{{ .Values.replicaCount }}
 
-# .Files — access non-template files in chart directory
-config: {{ .Files.Get "files/config.json" | b64enc }}
+# .Files — access files in the chart
+{{ .Files.Get "config/app.conf" }}
 
-# .Capabilities — cluster capabilities
-{{- if .Capabilities.APIVersions.Has "networking.k8s.io/v1/Ingress" }}
+# .Capabilities — K8s API capabilities
+{{ .Capabilities.KubeVersion.Major }}
+{{ .Capabilities.APIVersions.Has "networking.k8s.io/v1/Ingress" }}
+```
+
+### Template Functions and Pipelines
+
+```yaml
+# Quote strings (important for values that might be numbers)
+image: {{ .Values.image.repository }}:{{ .Values.image.tag | quote }}
+
+# Default value
+tag: {{ .Values.image.tag | default .Chart.AppVersion | quote }}
+
+# Required value (fail if not set)
+password: {{ required "A password is required!" .Values.auth.password | b64enc }}
+
+# Base64 encoding
+password: {{ .Values.auth.password | b64enc }}
+
+# Upper/lower case
+name: {{ .Values.name | upper }}
+
+# Truncate and trim
+name: {{ .Release.Name | trunc 63 | trimSuffix "-" }}
+
+# Replace
+name: {{ .Values.name | replace "." "-" }}
+
+# toString
+port: {{ .Values.service.port | toString }}
+
+# Type check with kindIs
+{{- if kindIs "string" .Values.image.tag }}
+
+# nindent — add indentation with leading newline (essential for embedded YAML)
+annotations:
+  {{- toYaml .Values.podAnnotations | nindent 4 }}
+
+# indent — add indentation without leading newline
+  {{- toYaml .Values.podAnnotations | indent 4 }}
+
+# include — render a named template and return as string (usable in pipelines)
+name: {{ include "myapp.fullname" . }}
+labels:
+  {{- include "myapp.labels" . | nindent 4 }}
 ```
 
 ### Control Flow
 
 ```yaml
-# if / else / end
+# if / else if / else
 {{- if .Values.ingress.enabled }}
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-{{- end }}
-
-# if / else
-{{- if eq .Values.service.type "LoadBalancer" }}
-  type: LoadBalancer
-{{- else if eq .Values.service.type "NodePort" }}
-  type: NodePort
+# ... ingress manifest
+{{- else if .Values.service.type "LoadBalancer" }}
+# ... alternative
 {{- else }}
-  type: ClusterIP
+# ... fallback
 {{- end }}
 
-# range (loop)
+# with — changes context to a value (skips block if nil/empty)
+{{- with .Values.nodeSelector }}
+nodeSelector:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+
+# range — iterate over lists
 {{- range .Values.ingress.hosts }}
-- host: {{ .host | quote }}
+- host: {{ .host }}
   http:
     paths:
     {{- range .paths }}
-    - path: {{ .path }}
-      pathType: {{ .pathType }}
+      - path: {{ .path }}
+        pathType: {{ .pathType }}
     {{- end }}
 {{- end }}
 
-# with (change scope)
-{{- with .Values.resources }}
-resources:
-  {{- toYaml . | nindent 10 }}
+# range with index
+{{- range $i, $val := .Values.envVars }}
+- name: VAR_{{ $i }}
+  value: {{ $val }}
+{{- end }}
+
+# range over map
+{{- range $key, $val := .Values.env }}
+- name: {{ $key }}
+  value: {{ $val | quote }}
 {{- end }}
 ```
 
-### Functions
+### Whitespace Control
 
 ```yaml
-# quote — add quotes
-image: {{ .Values.image.tag | quote }}
+# {{-  removes whitespace BEFORE the action
+# -}}  removes whitespace AFTER the action
 
-# default — use fallback if empty
-tag: {{ .Values.image.tag | default .Chart.AppVersion }}
-
-# required — error if value not set
-password: {{ required "A database password is required!" .Values.db.password }}
-
-# toYaml + nindent — convert value to YAML with indentation
-resources:
-  {{- toYaml .Values.resources | nindent 2 }}
-
-# indent vs nindent (nindent adds leading newline)
+# Without whitespace control — blank lines appear
 labels:
-  {{- include "my-app.labels" . | nindent 4 }}
+  app: myapp
+  {{ if .Values.extra }}
+  extra: true
+  {{ end }}
 
-# tpl — render a value as a template
-{{- tpl .Values.configMap.data . | nindent 4 }}
-
-# b64enc / b64dec
-data:
-  password: {{ .Values.password | b64enc }}
-
-# sha256sum — for annotations to force pod restarts on config change
-annotations:
-  checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+# With whitespace control — clean output
+labels:
+  app: myapp
+  {{- if .Values.extra }}
+  extra: "true"
+  {{- end }}
 ```
 
-### `_helpers.tpl` — Reusable Templates
+## \_helpers.tpl
+
+Define reusable template snippets:
 
 ```yaml
 {{/*
 Expand the name of the chart.
 */}}
-{{- define "my-app.name" -}}
+{{- define "myapp.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Create a default fully qualified app name.
 */}}
-{{- define "my-app.fullname" -}}
+{{- define "myapp.fullname" -}}
 {{- if .Values.fullnameOverride }}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
 {{- else }}
 {{- $name := default .Chart.Name .Values.nameOverride }}
+{{- if contains $name .Release.Name }}
+{{- .Release.Name | trunc 63 | trimSuffix "-" }}
+{{- else }}
 {{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" }}
+{{- end }}
 {{- end }}
 {{- end }}
 
 {{/*
-Common labels
+Common labels — applied to all resources
 */}}
-{{- define "my-app.labels" -}}
-helm.sh/chart: {{ include "my-app.chart" . }}
-{{ include "my-app.selectorLabels" . }}
+{{- define "myapp.labels" -}}
+helm.sh/chart: {{ include "myapp.chart" . }}
+{{ include "myapp.selectorLabels" . }}
+{{- if .Chart.AppVersion }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
 {{/*
 Selector labels
 */}}
-{{- define "my-app.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "my-app.name" . }}
+{{- define "myapp.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "myapp.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{/*
+Service account name
+*/}}
+{{- define "myapp.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create }}
+{{- default (include "myapp.fullname" .) .Values.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.serviceAccount.name }}
+{{- end }}
 {{- end }}
 ```
 
-Using helpers in templates:
+## Helm CLI Reference
 
-```yaml
-# deployment.yaml
-metadata:
-  name: {{ include "my-app.fullname" . }}
-  labels:
-    {{- include "my-app.labels" . | nindent 4 }}
-spec:
-  selector:
-    matchLabels:
-      {{- include "my-app.selectorLabels" . | nindent 6 }}
+### Install and Upgrade
+
+```bash
+# Install a chart
+helm install myrelease ./mychart
+helm install myrelease ./mychart -n mynamespace --create-namespace
+
+# Install with value overrides
+helm install myrelease ./mychart \
+  --set image.tag=v2.0.0 \
+  --set replicaCount=3
+
+# Install with custom values file
+helm install myrelease ./mychart -f values-prod.yaml
+
+# Install with multiple values files (later files override earlier)
+helm install myrelease ./mychart \
+  -f values.yaml \
+  -f values-prod.yaml \
+  --set image.tag=v2.0.0
+
+# Dry run (template rendering + validation, no apply)
+helm install myrelease ./mychart --dry-run
+
+# Template only (outputs YAML, no cluster connection)
+helm template myrelease ./mychart -f values-prod.yaml
+
+# Upgrade existing release
+helm upgrade myrelease ./mychart -f values-prod.yaml
+
+# Upgrade or install if not exists
+helm upgrade --install myrelease ./mychart -f values-prod.yaml
+
+# Wait for pods to be ready before marking upgrade complete
+helm upgrade myrelease ./mychart --wait --timeout 5m
+
+# Automatically roll back on failure
+helm upgrade myrelease ./mychart --atomic --timeout 5m
 ```
 
----
+### List, Status, History
+
+```bash
+# List all releases
+helm list
+helm list -A              # all namespaces
+helm list -n production
+
+# Release status and info
+helm status myrelease
+helm status myrelease -n production
+
+# Release history (revisions)
+helm history myrelease
+helm history myrelease -n production
+
+# Show current values
+helm get values myrelease
+helm get values myrelease --all    # includes defaults
+
+# Show rendered manifests
+helm get manifest myrelease
+
+# Show release notes
+helm get notes myrelease
+```
+
+### Rollback and Uninstall
+
+```bash
+# Roll back to previous revision
+helm rollback myrelease
+
+# Roll back to specific revision
+helm rollback myrelease 3
+
+# Uninstall release
+helm uninstall myrelease
+helm uninstall myrelease -n production
+
+# Uninstall but keep history
+helm uninstall myrelease --keep-history
+```
+
+### Repositories
+
+```bash
+# Add a repository
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+helm repo add cert-manager https://charts.jetstack.io
+helm repo add kedacore https://kedacore.github.io/charts
+
+# Update repo index
+helm repo update
+
+# List repositories
+helm repo list
+
+# Search for charts
+helm search repo nginx
+helm search repo bitnami/postgresql --versions
+
+# Remove a repo
+helm repo remove bitnami
+```
 
 ## Chart Dependencies
 
 ```bash
-# Download dependencies listed in Chart.yaml
+# After adding dependencies to Chart.yaml
 helm dependency update ./mychart
 
-# List dependencies
-helm dependency list ./mychart
+# This creates:
+# charts/postgresql-13.2.3.tgz
+# charts/redis-18.0.1.tgz
+# Chart.lock                     # pinned versions
 
-# Build dependencies into charts/ directory
-helm dependency build ./mychart
+# Install chart with dependencies
+helm install myrelease ./mychart
+
+# Disable a dependency at install time
+helm install myrelease ./mychart --set postgresql.enabled=false
 ```
-
----
 
 ## Artifact Hub
 
-[Artifact Hub](https://artifacthub.io) is the official hub for finding Kubernetes packages (Helm charts, operators, etc.).
+[artifacthub.io](https://artifacthub.io) is the CNCF hub for finding public Helm charts.
 
 ```bash
-# Add popular chart repositories
+# Search Artifact Hub via CLI
+helm search hub nginx
+helm search hub postgresql
+
+# Install a chart from Artifact Hub
 helm repo add bitnami https://charts.bitnami.com/bitnami
-helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-helm repo add cert-manager https://charts.jetstack.io
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm repo add grafana https://grafana.github.io/helm-charts
-
-# Update all repos
-helm repo update
-
-# Search for charts
-helm search repo postgresql
-helm search hub nginx               # Search Artifact Hub
-
-# Show chart values
-helm show values bitnami/postgresql
-helm show chart bitnami/postgresql
-helm show readme bitnami/postgresql
+helm install my-postgres bitnami/postgresql \
+  --set auth.postgresPassword=mysecret \
+  --set primary.persistence.size=20Gi
 ```
 
----
+## OCI Registries for Charts
 
-## Helmfile
-
-[Helmfile](https://github.com/helmfile/helmfile) manages multiple Helm releases declaratively in a single file.
-
-```yaml
-# helmfile.yaml
-environments:
-  default:
-    values:
-      - environments/default.yaml
-  production:
-    values:
-      - environments/production.yaml
-
-repositories:
-  - name: bitnami
-    url: https://charts.bitnami.com/bitnami
-  - name: ingress-nginx
-    url: https://kubernetes.github.io/ingress-nginx
-
-releases:
-  - name: ingress-nginx
-    namespace: ingress-nginx
-    chart: ingress-nginx/ingress-nginx
-    version: "4.9.0"
-    values:
-      - controller:
-          replicaCount: 2
-
-  - name: postgres
-    namespace: data
-    chart: bitnami/postgresql
-    version: "13.2.0"
-    values:
-      - auth:
-          username: myapp
-          password: {{ requiredEnv "POSTGRES_PASSWORD" }}
-          database: myapp
-
-  - name: my-app
-    namespace: production
-    chart: ./charts/my-app
-    version: "1.2.3"
-    values:
-      - values/common.yaml
-      - values/{{ .Environment.Name }}.yaml
-    needs:
-      - data/postgres            # Deploy postgres first
-```
+Modern Helm (3.8+) supports storing charts in OCI-compliant container registries.
 
 ```bash
+# Login to OCI registry
+helm registry login ghcr.io --username myuser --password "$GITHUB_TOKEN"
+
+# Push a chart to OCI registry
+helm package ./mychart
+helm push mychart-1.2.3.tgz oci://ghcr.io/myorg/charts
+
+# Install from OCI registry
+helm install myrelease oci://ghcr.io/myorg/charts/mychart --version 1.2.3
+
+# Pull chart without installing
+helm pull oci://ghcr.io/myorg/charts/mychart --version 1.2.3
+```
+
+## Helmfile — Multi-Chart Deployments
+
+Helmfile manages multiple Helm releases declaratively.
+
+```bash
+# Install Helmfile
+brew install helmfile
+
 # Apply all releases
 helmfile apply
 
-# Apply only specific releases
-helmfile apply --selector name=my-app
-
-# Diff planned changes
-helmfile diff
-
-# Sync all releases
+# Sync (detect drift and reconcile)
 helmfile sync
+
+# Diff before applying
+helmfile diff
 
 # Destroy all releases
 helmfile destroy
 ```
 
----
+```yaml
+# helmfile.yaml
+repositories:
+  - name: bitnami
+    url: https://charts.bitnami.com/bitnami
+  - name: ingress-nginx
+    url: https://kubernetes.github.io/ingress-nginx
+  - name: cert-manager
+    url: https://charts.jetstack.io
+
+helmDefaults:
+  wait: true
+  timeout: 300
+  atomic: true
+
+releases:
+  - name: cert-manager
+    namespace: cert-manager
+    createNamespace: true
+    chart: cert-manager/cert-manager
+    version: v1.14.0
+    set:
+      - name: installCRDs
+        value: true
+
+  - name: ingress-nginx
+    namespace: ingress-nginx
+    createNamespace: true
+    chart: ingress-nginx/ingress-nginx
+    version: 4.9.0
+    values:
+      - charts/ingress-nginx/values.yaml
+
+  - name: postgresql
+    namespace: data
+    chart: bitnami/postgresql
+    version: 13.2.x
+    values:
+      - charts/postgresql/values.yaml
+    secrets:
+      - charts/postgresql/secrets.yaml # Helm secrets (encrypted)
+
+  - name: myapp
+    namespace: production
+    chart: ./charts/myapp
+    values:
+      - charts/myapp/values.yaml
+      - charts/myapp/values-{{ .Environment.Name }}.yaml # environment-specific
+    needs:
+      - postgresql
+      - ingress-nginx
+```
 
 ## Helm Secrets Plugin
 
+Encrypt values files with SOPS for safe GitOps storage.
+
 ```bash
 # Install
-helm plugin install https://github.com/jkroepke/helm-secrets
+helm plugin install https://github.com/jkroepke/helm-secrets --version v4.5.1
 
-# Encrypt a values file with SOPS + AWS KMS
-sops --encrypt --kms arn:aws:kms:us-east-1:123456789:key/my-key \
-  values.secrets.yaml > values.secrets.enc.yaml
+# Install SOPS
+brew install sops
 
-# Install with encrypted values
-helm secrets install my-app ./mychart \
+# Create SOPS config (.sops.yaml)
+cat > .sops.yaml <<EOF
+creation_rules:
+  - path_regex: .*secrets.*
+    kms: arn:aws:kms:us-east-1:123456:key/my-key-id
+EOF
+
+# Encrypt a values file
+sops -e charts/myapp/secrets.yaml > charts/myapp/secrets.enc.yaml
+
+# Use encrypted values with helm secrets
+helm secrets install myrelease ./mychart \
   -f values.yaml \
-  -f values.secrets.enc.yaml
+  -f secrets.enc.yaml
 ```
 
----
-
-## OCI Registries for Charts
-
-Helm 3.8+ supports storing charts in OCI registries (Docker Hub, GHCR, ECR, etc.).
+## Chart Testing
 
 ```bash
-# Login to OCI registry
-helm registry login ghcr.io --username myuser --password $GITHUB_TOKEN
-
-# Push chart to OCI registry
-helm package ./mychart
-helm push mychart-1.2.3.tgz oci://ghcr.io/myorg/charts
-
-# Install from OCI registry
-helm install my-app oci://ghcr.io/myorg/charts/mychart --version 1.2.3
-
-# ECR
-aws ecr create-repository --repository-name helm-charts/my-app
-aws ecr get-login-password --region us-east-1 \
-  | helm registry login --username AWS --password-stdin \
-    123456789.dkr.ecr.us-east-1.amazonaws.com
-helm push mychart-1.2.3.tgz oci://123456789.dkr.ecr.us-east-1.amazonaws.com/helm-charts
-```
-
----
-
-## Testing Charts
-
-```bash
-# Lint — check for issues
+# Lint the chart (syntax and best-practice check)
 helm lint ./mychart
-helm lint ./mychart -f values.production.yaml
+helm lint ./mychart -f values-prod.yaml
 
-# Dry-run / template rendering
-helm template my-app ./mychart > rendered.yaml
-helm template my-app ./mychart -f values.production.yaml | kubectl apply --dry-run=server -f -
+# Render templates locally
+helm template myrelease ./mychart -f values-prod.yaml
 
-# Install and run tests
-helm install my-app ./mychart
-helm test my-app
+# Render and pipe to kubectl dry-run
+helm template myrelease ./mychart | kubectl apply --dry-run=server -f -
 
-# Test with a dedicated test pod
+# Run chart tests (requires pods defined in templates/tests/)
+helm test myrelease
+helm test myrelease --logs    # show test pod logs
+
+# Install with test validation
+helm install myrelease ./mychart && helm test myrelease
 ```
 
 ```yaml
@@ -564,25 +698,25 @@ helm test my-app
 apiVersion: v1
 kind: Pod
 metadata:
-  name: "{{ include "my-app.fullname" . }}-test"
+  name: {{ include "myapp.fullname" . }}-test-connection
   annotations:
-    "helm.sh/hook": test
-    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
   containers:
     - name: wget
-      image: busybox:1.35
-      command:
-        - wget
-        - --spider
-        - "http://{{ include "my-app.fullname" . }}:{{ .Values.service.port }}/health"
+      image: busybox
+      command: ['wget', '--spider', '-q',
+                '{{ include "myapp.fullname" . }}:{{ .Values.service.port }}/health']
 ```
 
-:::tip[helm template for debugging]
-`helm template` renders all templates to stdout without connecting to Kubernetes. Use it to verify your templates render correctly before installing, or pipe through `kubectl diff` to preview changes:
+:::tip[chart-testing (ct)]
+For CI, use the `chart-testing` tool (`ct`) which automates linting, installing, and testing changed charts across multiple K8s versions:
 
 ```bash
-helm template my-app ./mychart -f values.prod.yaml | kubectl diff -f -
+ct lint --chart-dirs charts/
+ct install --chart-dirs charts/
 ```
+
 :::

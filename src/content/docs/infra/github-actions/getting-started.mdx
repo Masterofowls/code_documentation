@@ -1,56 +1,61 @@
 ---
 title: Getting Started with GitHub Actions
-description: Write your first workflow, understand YAML structure, and use checkout, setup-node, and essential actions.
+description: Write your first GitHub Actions workflow — CI pipeline for Node.js with checkout, setup, install, test, and lint steps.
 sidebar:
   order: 2
 tags: [devops, ci-cd]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
-
-GitHub Actions workflows live in your repository — no external service account needed. This page walks you through the directory structure, YAML syntax, and a complete working CI workflow.
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
 ## The `.github/workflows/` Directory
 
-All workflow files must be placed inside `.github/workflows/` at the root of your repository. GitHub automatically detects any `.yml` or `.yaml` file in this directory.
+GitHub Actions workflows are YAML files stored in `.github/workflows/` at the root of your repository. GitHub automatically discovers and registers every `.yml` or `.yaml` file in that directory.
 
 ```
 your-repo/
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml          # Runs on push/PR
-│       ├── release.yml     # Runs on tag push
-│       └── nightly.yml     # Runs on schedule
+│       ├── ci.yml          # runs on push/PR
+│       ├── release.yml     # runs on version tags
+│       └── nightly.yml     # scheduled cron job
 ├── src/
 └── package.json
 ```
 
-A repository can have as many workflow files as needed. Each workflow is independent and can have different triggers, runners, and job definitions.
+You can have multiple workflow files — they all run independently and in parallel when their triggers fire.
 
-## Workflow YAML Structure
+## Anatomy of a Workflow File
 
-Every GitHub Actions workflow file shares the same top-level structure:
+Every workflow has three top-level sections:
 
 ```yaml
-name: CI                     # Optional: display name in the Actions tab
+name: CI # Display name in GitHub UI
 
-on:                          # Required: event trigger(s)
+on: # Trigger(s) — what starts this workflow
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
 
-jobs:                        # Required: one or more jobs
-  build:                     # Job ID (used for dependencies)
-    runs-on: ubuntu-latest   # Runner label
-    steps:                   # Ordered list of steps
-      - name: Checkout
-        uses: actions/checkout@v4
+jobs: # One or more jobs to run
+  build: # Job ID (used for references)
+    runs-on: ubuntu-latest # Runner OS
+    steps: # Ordered list of tasks
+      - uses: actions/checkout@v4
+      - run: echo "Hello, world!"
 ```
-
-The three required top-level keys are `on`, and `jobs`. `name` is optional but strongly recommended for readability in the GitHub UI.
 
 ## Your First CI Workflow
 
-Here is a complete Node.js CI workflow that runs on every push and pull request:
+A practical Node.js CI pipeline that runs on every push and pull request:
 
 ```yaml
 name: CI
@@ -78,7 +83,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-          cache: 'npm'
+          cache: npm
 
       - name: Install dependencies
         run: npm ci
@@ -93,42 +98,45 @@ jobs:
         run: npm run build
 ```
 
-This workflow:
-1. Triggers on pushes to `main`/`develop` and on any PR targeting those branches
-2. Runs three parallel jobs — one per Node.js version — using a matrix strategy
-3. Caches npm dependencies automatically via `setup-node`'s `cache: 'npm'` option
-4. Runs lint, test, and build in sequence within each job
+:::tip[Use `npm ci` in CI]
+Always use `npm ci` instead of `npm install` in CI pipelines. It installs exact versions from `package-lock.json`, is faster, and fails if the lockfile is out of sync with `package.json`.
+:::
 
-## Trigger Syntax in Detail
+## Trigger Syntax (`on:`)
 
-### Push and Pull Request
+### Push Triggers
 
 ```yaml
 on:
   push:
     branches:
       - main
-      - 'releases/**'     # Glob pattern
+      - 'release/**' # glob pattern
     branches-ignore:
       - 'dependabot/**'
     paths:
-      - 'src/**'          # Only trigger when src/ changes
+      - 'src/**' # only trigger when src/ changes
       - 'package.json'
     paths-ignore:
-      - '**.md'           # Skip markdown-only changes
+      - '**.md' # ignore markdown changes
     tags:
-      - 'v*'              # Trigger on version tags
-
-  pull_request:
-    types:
-      - opened
-      - synchronize       # New commits pushed to PR
-      - reopened
-    branches:
-      - main
+      - 'v*' # trigger on version tags
 ```
 
-### Manual Trigger (workflow_dispatch)
+### Pull Request Triggers
+
+```yaml
+on:
+  pull_request:
+    branches: [main]
+    types:
+      - opened
+      - synchronize # new commits pushed to PR
+      - reopened
+      - ready_for_review
+```
+
+### Manual Trigger with Inputs
 
 ```yaml
 on:
@@ -137,42 +145,36 @@ on:
       environment:
         description: 'Target environment'
         required: true
-        default: 'staging'
+        default: staging
         type: choice
-        options:
-          - staging
-          - production
-      debug_mode:
-        description: 'Enable debug logging'
+        options: [staging, production]
+      run_migrations:
+        description: 'Run database migrations'
         required: false
         type: boolean
         default: false
       version:
-        description: 'Version to deploy'
+        description: 'Version tag to deploy'
         required: true
         type: string
 ```
 
-Access inputs in the workflow with `${{ inputs.environment }}`.
-
-### Schedule (Cron)
+### Scheduled Trigger (Cron)
 
 ```yaml
 on:
   schedule:
-    - cron: '0 2 * * 1-5'   # 2 AM UTC, Monday–Friday
-    - cron: '0 6 * * 0'     # 6 AM UTC, Sundays
+    - cron: '0 2 * * 1-5' # 2 AM UTC, Monday-Friday
+    - cron: '0 8 * * 0' # 8 AM UTC, every Sunday
 ```
 
-Cron format: `minute hour day-of-month month day-of-week`. Scheduled workflows only run on the **default branch**.
-
-:::caution[Schedule precision]
-GitHub does not guarantee exact schedule execution. During periods of high load, scheduled workflows may be delayed by several minutes. Do not use schedules for time-critical operations.
+:::caution[Schedule Minimum Interval]
+The minimum cron interval is **5 minutes**. Scheduled workflows only run on the **default branch**. They may be delayed during high-load periods on GitHub's infrastructure.
 :::
 
 ## Job Dependencies with `needs`
 
-Jobs run in parallel by default. Use `needs:` to create a dependency chain:
+Jobs run in parallel by default. Use `needs` to create a dependency chain:
 
 ```yaml
 jobs:
@@ -180,184 +182,222 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: npm run lint
+      - run: npm ci && npm run lint
 
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: npm test
+      - run: npm ci && npm test
 
   build:
     runs-on: ubuntu-latest
-    needs: [lint, test]     # Both must pass first
+    needs: [lint, test] # waits for both lint and test to succeed
     steps:
       - uses: actions/checkout@v4
-      - run: npm run build
+      - run: npm ci && npm run build
 
   deploy:
     runs-on: ubuntu-latest
-    needs: build            # Runs after build
+    needs: build # waits for build
     steps:
       - run: echo "Deploying..."
 ```
 
 ## Step Types: `uses` vs `run`
 
-Every step is either an **action** (`uses:`) or a **shell command** (`run:`):
+### Using a Pre-built Action (`uses`)
 
 ```yaml
-steps:
-  # Action step — runs a prebuilt action
-  - name: Checkout code
-    uses: actions/checkout@v4
-    with:
-      fetch-depth: 0        # Full git history
+- name: Checkout code
+  uses: actions/checkout@v4 # GitHub official action
+  with:
+    fetch-depth: 0 # full history (default: 1)
+    token: ${{ secrets.PAT }} # custom token if needed
 
-  # Shell step — runs inline shell command(s)
-  - name: Print Node version
-    run: node --version
+- name: Set up Node.js
+  uses: actions/setup-node@v4
+  with:
+    node-version: '20'
+    node-version-file: '.nvmrc' # read version from .nvmrc
+    cache: 'npm' # or 'yarn' or 'pnpm'
+    registry-url: 'https://registry.npmjs.org'
 
-  # Multi-line shell step
-  - name: Build and verify
-    run: |
-      npm run build
-      ls -la dist/
-      echo "Build complete"
-
-  # Shell step with specific shell
-  - name: PowerShell step
-    shell: pwsh
-    run: Write-Host "Hello from PowerShell"
+- name: Cache dependencies
+  uses: actions/cache@v4
+  with:
+    path: ~/.npm
+    key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
+    restore-keys: |
+      ${{ runner.os }}-npm-
 ```
 
-## Essential Actions
+### Running Shell Commands (`run`)
 
-### `actions/checkout@v4`
+```yaml
+- name: Single-line command
+  run: npm test
 
-Checks out your repository code onto the runner. Almost every workflow starts with this step.
+- name: Multi-line script
+  run: |
+    echo "Running database migrations..."
+    npm run migrate
+    echo "Migration complete"
+
+- name: With working directory
+  run: npm install
+  working-directory: ./packages/api
+
+- name: Explicit shell
+  run: |
+    Write-Host "Windows PowerShell step"
+    Get-ChildItem
+  shell: pwsh
+
+- name: Python step
+  run: |
+    import json, os
+    print(json.dumps({"runner": os.environ.get("RUNNER_OS")}))
+  shell: python
+```
+
+## Environment Variables
+
+Environment variables can be set at three levels — workflow, job, and step:
+
+```yaml
+name: Env Demo
+
+env: # workflow-level (available to all jobs/steps)
+  NODE_ENV: test
+  API_BASE_URL: https://api.example.com
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env: # job-level (available to all steps in this job)
+      DATABASE_URL: postgres://localhost/testdb
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build with step-level env
+        run: npm run build
+        env: # step-level (only this step)
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          BUILD_VERSION: ${{ github.sha }}
+
+      - name: Access env vars
+        run: |
+          echo "Node env: $NODE_ENV"
+          echo "DB: $DATABASE_URL"
+          echo "SHA: $BUILD_VERSION"
+```
+
+## Step Control Options
+
+### `continue-on-error`
+
+Allow subsequent steps to run even if this step fails:
+
+```yaml
+- name: Run optional lint check
+  run: npm run lint:strict
+  continue-on-error: true # workflow continues even if this fails
+
+- name: Always runs after lint
+  run: echo "Lint check done"
+```
+
+### `timeout-minutes`
+
+Cap how long a step or job can run:
+
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20 # job-level timeout
+
+    steps:
+      - name: Run e2e tests
+        run: npm run test:e2e
+        timeout-minutes: 15 # step-level timeout
+```
+
+### `if` Conditions
+
+Conditionally run steps or jobs:
+
+```yaml
+- name: Deploy to production
+  if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+  run: ./deploy.sh production
+
+- name: Notify on failure
+  if: failure()
+  uses: actions/github-script@v7
+  with:
+    script: |
+      github.rest.issues.createComment({
+        issue_number: context.issue.number,
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        body: '❌ CI failed on this PR'
+      })
+```
+
+## Working with `actions/checkout@v4`
+
+The checkout action clones your repository onto the runner:
 
 ```yaml
 - uses: actions/checkout@v4
   with:
-    # Number of commits to fetch. 0 = full history (needed for git log, tags)
-    fetch-depth: 1          # Default: 1 (shallow clone, fastest)
+    # Repository to check out (default: current repo)
+    repository: ${{ github.repository }}
 
-    # Check out a specific ref (branch, tag, SHA)
-    ref: ${{ github.event.pull_request.head.sha }}
+    # Branch/tag/SHA to checkout (default: the triggering ref)
+    ref: ${{ github.head_ref }}
 
-    # Use a different token (e.g., to push back to repo)
-    token: ${{ secrets.GITHUB_TOKEN }}
+    # Number of commits to fetch (0 = full history)
+    fetch-depth: 0
+
+    # Fetch tags even when fetch-depth > 0
+    fetch-tags: true
 
     # Check out submodules
     submodules: recursive
+
+    # Use a PAT instead of GITHUB_TOKEN
+    token: ${{ secrets.MY_PAT }}
 
     # Persist credentials for subsequent git commands
     persist-credentials: true
 ```
 
-### `actions/setup-node@v4`
-
-Installs a specific Node.js version and optionally enables dependency caching.
+## Working with `actions/setup-node@v4`
 
 ```yaml
 - uses: actions/setup-node@v4
   with:
-    node-version: '20'        # Exact version
-    # node-version: '20.x'   # Latest 20.x patch
-    # node-version-file: '.nvmrc'  # Read from file
+    # Exact version, range, or 'lts/*'
+    node-version: '20.x'
 
-    # Enable caching for npm, yarn, or pnpm
-    cache: 'npm'
-    # cache-dependency-path: 'subdir/package-lock.json'
+    # Read version from .nvmrc or .node-version
+    node-version-file: '.nvmrc'
 
-    # Use a specific registry
+    # Enable built-in caching (npm, yarn, or pnpm)
+    cache: npm
+
+    # Path to package-lock for cache key (auto-detected if not set)
+    cache-dependency-path: package-lock.json
+
+    # Configure npm registry for publishing
     registry-url: 'https://registry.npmjs.org'
+    scope: '@my-org'
 ```
 
-After `setup-node` with `cache: 'npm'`, the action automatically caches `~/.npm` based on `package-lock.json`. Subsequent runs restore the cache, skipping the network download.
-
-## Step Configuration Options
-
-### `working-directory`
-
-Run a step in a subdirectory:
-
-```yaml
-- name: Run tests in backend
-  working-directory: ./backend
-  run: npm test
-```
-
-### `continue-on-error`
-
-Allow a step to fail without failing the job:
-
-```yaml
-- name: Lint (non-blocking)
-  continue-on-error: true
-  run: npm run lint
-```
-
-### `timeout-minutes`
-
-Prevent a hung step from running forever:
-
-```yaml
-- name: Integration tests
-  timeout-minutes: 30
-  run: npm run test:integration
-```
-
-The default job timeout is 6 hours. Individual step timeouts override the job default.
-
-### `if` Conditions on Steps
-
-Run a step only under certain conditions:
-
-```yaml
-steps:
-  - name: Run on main only
-    if: github.ref == 'refs/heads/main'
-    run: ./deploy.sh
-
-  - name: Run on failure
-    if: failure()
-    run: ./notify-failure.sh
-
-  - name: Always run cleanup
-    if: always()
-    run: ./cleanup.sh
-```
-
-## Environment Variables
-
-Define environment variables at the workflow, job, or step level:
-
-```yaml
-name: CI
-
-env:
-  NODE_ENV: test            # Available to all jobs
-  API_URL: https://api.dev
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    env:
-      DATABASE_URL: sqlite://test.db   # Available to all steps in this job
-    steps:
-      - name: Run with step-level env
-        env:
-          DEBUG: 'true'               # Only this step
-        run: |
-          echo "NODE_ENV=$NODE_ENV"
-          echo "DEBUG=$DEBUG"
-```
-
-Environment variables at a narrower scope override those at a wider scope (step > job > workflow).
-
-## A Complete Real-World CI Workflow
+## Complete Real-World CI Example
 
 ```yaml
 name: CI Pipeline
@@ -369,48 +409,49 @@ on:
     types: [opened, synchronize, reopened]
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  lint-and-typecheck:
-    name: Lint & Type Check
+  quality:
+    name: Code Quality
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: 20
+          cache: npm
 
       - run: npm ci
 
-      - name: Lint
-        run: npm run lint
-
-      - name: Type check
-        run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm run type-check
+      - run: npm run format:check
 
   test:
-    name: Test Suite
+    name: Tests
     runs-on: ubuntu-latest
-    needs: lint-and-typecheck
+    timeout-minutes: 15
+    needs: quality
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: 20
+          cache: npm
 
       - run: npm ci
 
       - name: Run tests with coverage
-        run: npm test -- --coverage
+        run: npm run test:coverage
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: coverage-report
           path: coverage/
@@ -419,43 +460,22 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: test
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: 20
+          cache: npm
 
       - run: npm ci
+      - run: npm run build
 
-      - name: Build production bundle
-        run: npm run build
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
           retention-days: 1
 ```
-
-:::tip[Use `npm ci` instead of `npm install`]
-`npm ci` is faster in CI environments — it installs exactly what's in `package-lock.json`, never updates it, and clears `node_modules` first. Always use `npm ci` in CI workflows.
-:::
-
-## Next Steps
-
-<CardGrid>
-  <Card title="Workflow Triggers" icon="setting">
-    Deep dive into all event types, concurrency, matrix strategy, and permissions.
-
-    [Workflows →](/infra/github-actions/workflows)
-</Card>
-  <Card title="Jobs & Steps" icon="list-format">
-    Service containers, caching, artifacts, job outputs, and the full step API.
-
-    [Jobs & Steps →](/infra/github-actions/jobs-steps)
-</Card>
-</CardGrid>

@@ -1,361 +1,257 @@
 ---
 title: Docker Compose
-description: Define and orchestrate multi-container applications with Docker Compose v2 — services, networks, volumes, override files, and full-stack examples.
+description: Define and run multi-container applications with Docker Compose v2 — services, networks, volumes, overrides, and full-stack examples.
 sidebar:
   order: 4
 tags: [devops, docker]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
 # Docker Compose
 
-Docker Compose is a tool for defining and running multi-container Docker applications. With a single YAML file, you configure your application's services, networks, and volumes — then bring everything up with one command.
+Docker Compose lets you define and run multi-container applications from a single YAML file. Instead of juggling multiple `docker run` commands, you declare all services, networks, and volumes in `compose.yml` and manage them with a single command.
 
-:::tip[Compose v2 vs v1]
-Docker Compose v2 is integrated directly into the Docker CLI as `docker compose` (a plugin). The legacy standalone `docker-compose` (v1, written in Python) is deprecated. Always use `docker compose` (no hyphen) for new projects.
+:::tip[Compose v2]
+`docker compose` (with a space) is the modern v2 plugin, written in Go and bundled with Docker Desktop and Docker Engine. The older `docker-compose` (with a hyphen, v1) was a separate Python tool and is now deprecated. Always use `docker compose`.
 :::
 
----
-
-## `compose.yml` Structure
+## compose.yml Structure
 
 ```yaml
-# compose.yml (also accepted: docker-compose.yml, docker-compose.yaml)
-name: my-project                    # Optional: override project name
+# compose.yml (formerly docker-compose.yml)
+name: myapp # project name (default: directory name)
 
-services:
-  web:                              # Service name
-    image: nginx:alpine
-    ports:
-      - "80:80"
-
-networks:
-  default:                          # Networks section
-    driver: bridge
-
-volumes:
-  db-data:                          # Named volumes section
-
-configs:                            # Docker configs (Swarm / Compose v2.3+)
-  nginx_config:
-    file: ./nginx.conf
-
-secrets:                            # Docker secrets
-  db_password:
-    file: ./secrets/db_password.txt
-```
-
----
-
-## Service Configuration
-
-### Core Options
-
-```yaml
-services:
-  api:
-    # Image to use (mutually exclusive with 'build' — or use both)
-    image: node:20-alpine
-
-    # Build configuration
-    build:
-      context: .                    # Build context path
-      dockerfile: Dockerfile.prod   # Dockerfile path (default: Dockerfile)
-      args:
-        NODE_ENV: production
-        APP_VERSION: "1.0.0"
-      target: runner                # Multi-stage build target
-      cache_from:
-        - my-registry/api:latest
-      labels:
-        com.example.version: "1.0"
-
-    # Container name (overrides generated name)
-    container_name: my-api
-
-    # Command to run (overrides CMD in Dockerfile)
-    command: ["node", "dist/server.js"]
-
-    # Entrypoint (overrides ENTRYPOINT in Dockerfile)
-    entrypoint: ["/sbin/tini", "--"]
-
-    # Working directory
-    working_dir: /app
-
-    # User
-    user: "1001:1001"
-```
-
-### Ports
-
-```yaml
 services:
   web:
-    ports:
-      - "80:80"                     # host:container
-      - "443:443"
-      - "127.0.0.1:8080:80"        # Bind to specific host interface
-      - "3000"                      # Random host port maps to 3000
-      - target: 80                  # Long-form syntax
-        published: 8080
-        protocol: tcp
-        mode: host
+    # ... service definition
+
+networks:
+  frontend:
+    # ... network definition
+
+volumes:
+  db-data:
+    # ... volume definition
+
+configs: # Docker Swarm / Compose v2.3+
+  nginx-config:
+    file: ./nginx.conf
+
+secrets: # Docker Swarm / Compose v2.3+
+  db-password:
+    file: ./secrets/db-password.txt
 ```
 
-### Environment Variables
+## Service Definition
 
 ```yaml
 services:
-  api:
-    # Inline values
+  app:
+    # ── Image ────────────────────────────────────────────────────
+    image: node:20-alpine # use existing image
+    build: # or build from Dockerfile
+      context: . # build context directory
+      dockerfile: Dockerfile.prod # optional custom Dockerfile name
+      target: runtime # multi-stage build target
+      args:
+        BUILD_VERSION: '1.2.3' # build ARGs
+      cache_from:
+        - myregistry/myapp:cache
+      labels:
+        com.example.version: '1.2.3'
+
+    # ── Container settings ───────────────────────────────────────
+    container_name: myapp # custom container name
+    hostname: app # container hostname
+
+    # ── Ports ────────────────────────────────────────────────────
+    ports:
+      - '3000:3000' # host:container
+      - '127.0.0.1:9229:9229' # bind to localhost only
+      - '8080-8090:8080-8090' # range
+
+    # ── Environment ──────────────────────────────────────────────
     environment:
       NODE_ENV: production
-      PORT: "3000"
-      DATABASE_URL: postgres://postgres:password@db:5432/mydb
-
-    # From host environment (variable must exist on host)
-    environment:
-      - NODE_ENV                    # Takes value from host
-      - DATABASE_URL
-
-    # From a .env file
+      PORT: '3000'
+      DB_HOST: db # service name resolves via DNS
     env_file:
-      - .env
-      - .env.production             # Later files override earlier ones
+      - .env # load from file
+      - .env.production # merged (later overrides earlier)
 
-    # Combination
-    environment:
-      - NODE_ENV=production
-    env_file:
-      - .env.secrets
-```
-
-### Volumes in Services
-
-```yaml
-services:
-  api:
+    # ── Volumes ──────────────────────────────────────────────────
     volumes:
-      # Named volume
-      - api-data:/app/data
+      - app-data:/app/data # named volume
+      - ./src:/app/src:ro # bind mount, read-only
+      - /etc/localtime:/etc/localtime:ro # host path
 
-      # Bind mount (long form)
-      - type: bind
-        source: ./src
-        target: /app/src
-        read_only: false
+    # ── Dependencies ─────────────────────────────────────────────
+    depends_on:
+      db:
+        condition: service_healthy # wait for health check to pass
+      redis:
+        condition: service_started # just wait for container to start
 
-      # Bind mount (short form)
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    # ── Restart policy ───────────────────────────────────────────
+    restart: unless-stopped
+    # Options: "no", "always", "on-failure", "unless-stopped"
+    # on-failure with limit:
+    # restart: "on-failure:3"
 
-      # tmpfs (in-memory)
-      - type: tmpfs
-        target: /tmp
-
-      # Named volume with options
-      - type: volume
-        source: db-data
-        target: /var/lib/postgresql/data
-        volume:
-          nocopy: true              # Don't copy container data to volume on creation
-```
-
-### Health Checks
-
-```yaml
-services:
-  api:
+    # ── Health check ─────────────────────────────────────────────
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:3000/health']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s             # Don't count failures during initial startup
-      # Disable inherited healthcheck:
-      # test: ["NONE"]
-```
+      start_period: 40s
 
-### Dependencies and Restart Policies
+    # ── Command/Entrypoint ───────────────────────────────────────
+    command: ['node', 'dist/server.js']
+    entrypoint: ['/sbin/tini', '--']
 
-```yaml
-services:
-  api:
-    depends_on:
-      db:
-        condition: service_healthy  # Wait for healthy status
-      redis:
-        condition: service_started  # Wait for container to start (default)
-      migrations:
-        condition: service_completed_successfully  # Wait for exit 0
+    # ── Resources ────────────────────────────────────────────────
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
 
-    restart: unless-stopped         # no | always | on-failure | unless-stopped
-    # restart: on-failure:3         # Retry up to 3 times
-
-    # Stop grace period (default: 10s)
-    stop_grace_period: 30s
-
-  db:
-    image: postgres:16-alpine
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  migrations:
-    image: my-app
-    command: ["npm", "run", "db:migrate"]
-    restart: "no"
-    depends_on:
-      db:
-        condition: service_healthy
-```
-
-### Profiles
-
-```yaml
-services:
-  web:
-    image: nginx
-    # No profile — always starts
-
-  debug-tools:
-    image: nicolaka/netshoot
-    profiles:
-      - debug                       # Only starts with --profile debug
-
-  docs:
-    image: my-docs
-    profiles:
-      - docs
-```
-
-```bash
-# Start all services including debug profile
-docker compose --profile debug up
-
-# Start multiple profiles
-docker compose --profile debug --profile docs up
-```
-
----
-
-## Networks
-
-### Default Network
-
-By default, Compose creates a single bridge network named `<project>_default`. All services join it and can reach each other by service name.
-
-```yaml
-services:
-  web:
-    image: nginx
-    # Can reach 'api' at http://api:3000
-
-  api:
-    image: my-api
-    # Can reach 'db' at postgres://db:5432
-```
-
-### Custom Networks
-
-```yaml
-services:
-  nginx:
+    # ── Networks ─────────────────────────────────────────────────
     networks:
       - frontend
       - backend
 
-  api:
-    networks:
-      - backend
-      - db-net
+    # ── Profiles ─────────────────────────────────────────────────
+    profiles:
+      - debug # only starts when --profile debug is used
 
-  db:
-    networks:
-      - db-net
+    # ── User ─────────────────────────────────────────────────────
+    user: '1001:1001'
 
-networks:
+    # ── Logging ──────────────────────────────────────────────────
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+
+    # ── Working directory ─────────────────────────────────────────
+    working_dir: /app
+
+    # ── Stdin / TTY ──────────────────────────────────────────────
+    stdin_open: true # -i flag
+    tty: true # -t flag
+```
+
+## Networks
+
+```yaml
+services:
   frontend:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16
+    networks:
+      - public-net
+      - internal-net
+    # Network alias (other containers can reach this service by alias)
+    networks:
+      internal-net:
+        aliases:
+          - frontend-service
 
   backend:
-    driver: bridge
-
-  db-net:
-    driver: bridge
-    internal: true                  # No external access
-
-  # Use a pre-existing external network
-  existing-net:
-    external: true
-    name: my-existing-network
-```
-
-### Network Aliases
-
-```yaml
-services:
-  api:
     networks:
-      backend:
-        aliases:
-          - app-server
-          - api.internal
+      - internal-net
+
+networks:
+  public-net:
+    driver: bridge
+
+  internal-net:
+    driver: bridge
+    internal: true          # no external access — isolated network
+
+  existing-net:
+    external: true          # use a network created outside Compose
+    name: my-existing-network
+
+  overlay-net:
+    driver: overlay         # for Docker Swarm multi-host networking
+    attachable: true        # allow standalone containers to attach
+
+  custom-bridge:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: my_bridge
+    ipam:
+      config:
+        - subnet: "172.28.0.0/16"
+          gateway: "172.28.0.1"
 ```
 
----
+:::tip[Service Name DNS]
+In a user-defined network, containers resolve each other by **service name**. `app` can reach `db` at the hostname `db` — no need to hardcode IPs.
+:::
 
-## Named Volumes
+## Named Volumes vs Bind Mounts
 
 ```yaml
 services:
   db:
+    image: postgres:16-alpine
     volumes:
+      # Named volume — managed by Docker, survives container removal
       - postgres-data:/var/lib/postgresql/data
 
-  redis:
-    volumes:
-      - redis-data:/data
+      # Bind mount — maps host directory into container
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+
+      # tmpfs — in-memory, not persisted
+      - type: tmpfs
+        target: /tmp
 
 volumes:
-  postgres-data:                    # Managed by Docker
+  postgres-data: # declare named volume
     driver: local
+    labels:
+      com.example.description: 'PostgreSQL data'
 
-  redis-data:
-    driver: local
-
-  # Use an external (pre-existing) volume
+  # Use existing external volume (not managed by Compose)
   external-vol:
     external: true
     name: my-existing-volume
-
-  # NFS volume
-  nfs-data:
-    driver: local
-    driver_opts:
-      type: nfs
-      o: addr=192.168.1.100,rw
-      device: ":/exports/data"
 ```
-
----
 
 ## Override Files
 
-Compose automatically merges `compose.override.yml` with `compose.yml`. Use this for dev/production splits.
+Compose merges multiple files. Use this pattern for dev/prod differences:
+
+```
+compose.yml              # base configuration (shared)
+compose.override.yml     # auto-loaded in dev (not committed)
+compose.prod.yml         # production overrides
+compose.test.yml         # test overrides
+```
+
+**`compose.yml`** — base:
 
 ```yaml
-# compose.yml — base configuration (committed to git)
 services:
-  api:
-    image: my-api:${TAG:-latest}
+  app:
+    build: .
     environment:
       NODE_ENV: production
+    restart: unless-stopped
 
   db:
     image: postgres:16-alpine
@@ -366,257 +262,339 @@ volumes:
   db-data:
 ```
 
+**`compose.override.yml`** — dev additions (auto-loaded):
+
 ```yaml
-# compose.override.yml — development overrides (committed or gitignored)
 services:
-  api:
-    build: .                        # Build from source in dev
-    volumes:
-      - ./src:/app/src              # Live reload
+  app:
+    build:
+      target: development # use dev build stage
     environment:
       NODE_ENV: development
+      DEBUG: '*'
+    volumes:
+      - .:/app # hot-reload: mount source
+      - /app/node_modules # preserve container's node_modules
     ports:
-      - "9229:9229"                 # Node debugger
+      - '3000:3000'
+      - '9229:9229' # Node debugger
+    command: ['npm', 'run', 'dev']
+    restart: 'no'
 
   db:
     ports:
-      - "5432:5432"                 # Expose DB locally in dev
+      - '5432:5432' # expose DB port for dev tools
 ```
 
+**`compose.prod.yml`** — production:
+
 ```yaml
-# compose.prod.yml — production overrides
 services:
-  api:
+  app:
+    image: myregistry/myapp:${TAG:-latest}
     deploy:
       replicas: 3
       resources:
         limits:
-          cpus: "0.5"
           memory: 512M
-    restart: always
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+
+  db:
+    # No ports exposed in production
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/db-password
+    secrets:
+      - db-password
+
+secrets:
+  db-password:
+    external: true
 ```
 
 ```bash
-# Development (auto-merges compose.override.yml)
+# Development (uses compose.yml + compose.override.yml automatically)
 docker compose up
 
-# Production (explicit files, no override)
+# Production
 docker compose -f compose.yml -f compose.prod.yml up -d
 
-# Override project name
-docker compose -p myproject up
+# Testing
+docker compose -f compose.yml -f compose.test.yml run --rm tests
 ```
 
----
-
-## Docker Compose CLI
+## Docker Compose CLI Reference
 
 ```bash
-# Start all services (detached)
+# Start all services (build if needed)
+docker compose up
+
+# Start in background (detached)
 docker compose up -d
 
 # Build images before starting
-docker compose up -d --build
+docker compose up --build
 
-# Pull latest images before starting
-docker compose up -d --pull always
+# Start specific services
+docker compose up app db
 
-# Stop and remove containers, networks (keep volumes)
+# Stop and remove containers, networks
 docker compose down
 
-# Also remove volumes (DATA LOSS)
-docker compose down -v
+# Also remove volumes (caution: data loss)
+docker compose down --volumes
 
 # Also remove images
 docker compose down --rmi all
 
-# List services and their status
+# List running services
 docker compose ps
 
-# View logs
+# Show logs
 docker compose logs
-docker compose logs -f api         # Follow logs for one service
-docker compose logs --tail 50 api
 
-# Execute command in a running container
-docker compose exec api sh
+# Follow logs for all services
+docker compose logs -f
+
+# Follow logs for specific service
+docker compose logs -f app
+
+# Execute command in running service
+docker compose exec app sh
 docker compose exec db psql -U postgres
 
-# Run a one-off command (creates a new container)
-docker compose run --rm api npm run db:seed
-docker compose run --rm --no-deps api npm test
+# Run one-off command (creates new container, removed after)
+docker compose run --rm app node scripts/migrate.js
 
 # Build images
 docker compose build
-docker compose build api           # Build specific service
-docker compose build --no-cache
+docker compose build --no-cache app
 
-# Pull images
+# Pull latest images
 docker compose pull
 
-# Restart services
-docker compose restart api
-
 # Scale a service
-docker compose up -d --scale api=3
+docker compose up -d --scale app=3
 
-# Show running processes in containers
-docker compose top
+# Restart services
+docker compose restart app
 
-# Validate and view config
+# Show service configuration (merged)
 docker compose config
-docker compose config --services
-docker compose config --volumes
+
+# Show running processes in services
+docker compose top
 ```
 
-:::caution[docker compose run vs exec]
-`docker compose run` creates a **new** container. `docker compose exec` runs a command in an **existing** running container. For one-off tasks like migrations, use `run --rm` to avoid leaving behind stopped containers.
-:::
+## Full-Stack Example
 
----
-
-## Full Stack Example
-
-A production-ready stack: Node.js API + PostgreSQL + Redis + Nginx reverse proxy.
+A complete application: Node.js API + PostgreSQL + Redis + Nginx reverse proxy.
 
 ```yaml
 # compose.yml
-name: myapp
+name: fullstack-app
 
 services:
+  # ── Nginx Reverse Proxy ────────────────────────────────────────
   nginx:
     image: nginx:1.25-alpine
     ports:
-      - "80:80"
-      - "443:443"
+      - '80:80'
+      - '443:443'
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/certs:/etc/nginx/certs:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - certbot-certs:/etc/letsencrypt:ro
+      - nginx-logs:/var/log/nginx
     depends_on:
-      api:
+      app:
         condition: service_healthy
-    restart: unless-stopped
     networks:
       - frontend
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'nginx', '-t']
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
-  api:
+  # ── Application ────────────────────────────────────────────────
+  app:
     build:
       context: .
-      target: production
+      target: runtime
     environment:
       NODE_ENV: production
-      PORT: 3000
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-      REDIS_URL: redis://redis:6379
+      PORT: '3000'
+      DB_HOST: db
+      DB_PORT: '5432'
+      DB_NAME: ${POSTGRES_DB:-appdb}
+      DB_USER: ${POSTGRES_USER:-appuser}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: '6379'
     env_file:
       - .env
+    volumes:
+      - app-uploads:/app/uploads
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
-    restart: unless-stopped
     networks:
       - frontend
       - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:3000/health']
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '5'
     deploy:
       resources:
         limits:
+          cpus: '1.0'
           memory: 512M
-          cpus: "0.5"
 
+  # ── PostgreSQL ────────────────────────────────────────────────
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_DB: ${POSTGRES_DB:-appdb}
+      POSTGRES_USER: ${POSTGRES_USER:-appuser}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
+      PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - backend
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -U ${POSTGRES_USER:-appuser} -d ${POSTGRES_DB:-appdb}',
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
-    restart: unless-stopped
-    networks:
-      - backend
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
 
+  # ── Redis ─────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
     volumes:
       - redis-data:/data
+    networks:
+      - backend
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ['CMD', 'redis-cli', 'ping']
       interval: 10s
       timeout: 5s
-      retries: 3
-    restart: unless-stopped
-    networks:
-      - backend
-
-  migrations:
-    build:
-      context: .
-      target: production
-    command: ["npm", "run", "db:migrate"]
-    environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-    env_file:
-      - .env
-    depends_on:
-      db:
-        condition: service_healthy
-    restart: "no"
-    networks:
-      - backend
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: '5m'
+        max-file: '2'
 
 networks:
   frontend:
     driver: bridge
   backend:
     driver: bridge
-    internal: true                  # DB and Redis not reachable from outside
+    internal: true # no external network access
 
 volumes:
   postgres-data:
   redis-data:
+  app-uploads:
+  certbot-certs:
+  nginx-logs:
+```
+
+## Profiles — Optional Services
+
+```yaml
+services:
+  app:
+    image: myapp:latest
+    # No profile — always starts
+
+  db:
+    image: postgres:16-alpine
+    # No profile — always starts
+
+  pgadmin:
+    image: dpage/pgadmin4
+    profiles:
+      - tools # only starts with: docker compose --profile tools up
+
+  mailhog:
+    image: mailhog/mailhog
+    profiles:
+      - tools
+      - debug
+
+  debug-proxy:
+    image: mitmproxy/mitmproxy
+    profiles:
+      - debug
 ```
 
 ```bash
-# .env file
-POSTGRES_USER=myapp
-POSTGRES_PASSWORD=supersecretpassword
-POSTGRES_DB=myapp_production
-TAG=1.2.3
-```
-
-```bash
-# Start the full stack
+# Start base services only
 docker compose up -d
 
-# Check everything is healthy
-docker compose ps
+# Start with tools profile
+docker compose --profile tools up -d
 
-# View all logs
-docker compose logs -f
+# Start with multiple profiles
+docker compose --profile tools --profile debug up -d
+```
 
-# Run database migrations
-docker compose run --rm migrations
+:::caution[compose.override.yml in Git]
+Do not commit `compose.override.yml` if it contains developer-specific settings. Add it to `.gitignore`. Instead, provide a `compose.override.yml.example` that developers copy and customise locally.
+:::
 
-# Scale the API
-docker compose up -d --scale api=3
+## Environment Variable Interpolation
+
+```yaml
+# compose.yml — uses shell env vars and .env file
+services:
+  app:
+    image: myapp:${APP_VERSION:-latest} # default to "latest" if not set
+    environment:
+      DB_URL: postgresql://${DB_USER}:${DB_PASSWORD}@db/${DB_NAME}
+```
+
+```bash
+# .env file (loaded automatically)
+APP_VERSION=2.1.0
+DB_USER=myuser
+DB_PASSWORD=secret
+DB_NAME=mydb
+```
+
+Compose loads `.env` from the directory where you run `docker compose`. You can override:
+
+```bash
+docker compose --env-file .env.staging up -d
 ```

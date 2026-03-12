@@ -1,464 +1,439 @@
 ---
-title: Bash Variables & Parameter Expansion
-description: Arrays, associative arrays, parameter expansion, here-docs, IFS, nameref, and all expansion modifiers in Bash.
+title: Bash Variables
+description: Variable types, arrays, associative arrays, parameter expansion, here-docs, IFS, namerefs, and indirect references.
 sidebar:
   order: 3
 tags: [cli, shell, scripting]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
-# Bash Variables & Parameter Expansion
+# Bash Variables
 
 ## Variable Types
 
 ```bash
-# Scalar (regular variable)
+# Scalar (string by default)
 name="Alice"
 count=42
 
-# Integer (declare -i enforces integer type)
-declare -i num=10
-num="5+3"    # Evaluated as arithmetic: num=8
-num="hello"  # Becomes 0
-
-# Lowercase/Uppercase enforcement (Bash 4.0+)
-declare -l lower_name="HELLO"   # Converts to lowercase: "hello"
-declare -u upper_name="hello"   # Converts to uppercase: "HELLO"
+# Integer (declare -i)
+declare -i num=42
+declare -i result
+result=num*2+1    # arithmetic context, no $(( )) needed
 
 # Readonly
-declare -r CONSTANT="immutable"
-readonly MAX_RETRIES=3
+declare -r MAX=100
+readonly MIN=0
 
-# Export to environment
-declare -x DB_HOST="localhost"  # Same as: export DB_HOST="localhost"
+# Export (environment variable)
+declare -x PATH="/usr/local/bin:$PATH"
+export EDITOR=vim
 
-# Nameref (reference to another variable, Bash 4.3+)
-declare -n ref=name
-ref="Bob"    # Sets name="Bob"
+# Lowercase conversion (Bash 4+)
+declare -l lowercase_var="HELLO"
+echo "$lowercase_var"    # hello
 
-# Show variable type and attributes
-declare -p name      # declare -- name="Bob"
-declare -p CONSTANT  # declare -r CONSTANT="immutable"
+# Uppercase conversion (Bash 4+)
+declare -u uppercase_var="hello"
+echo "$uppercase_var"    # HELLO
+
+# Nameref — reference another variable by name (Bash 4.3+)
+declare -n ref=name      # ref is a reference to variable 'name'
+echo "$ref"              # same as echo "$name"
+ref="Bob"                # modifies $name
+
+# Print variable attributes
+declare -p name           # declare -- name="Alice"
+declare -p count          # declare -- count="42"
 ```
 
-## Arrays
+## Arrays (Indexed)
 
 ```bash
-# Indexed array creation
+# Declaration and initialization
+declare -a fruits               # declare empty array
 fruits=("apple" "banana" "cherry" "date")
-declare -a colors   # Declare without initializing
+numbers=(1 2 3 4 5)
 
-# Sparse array (gaps are allowed)
-arr[0]="first"
-arr[5]="sixth"    # arr[1..4] don't exist
+# Create from command output
+lines=( $(ls *.txt) )           # ❌ word splits, glob expands, breaks on spaces
+readarray -t lines < <(ls *.txt)  # ✅ correct way (mapfile/readarray)
 
 # Access elements
-echo "${fruits[0]}"    # apple (0-indexed)
-echo "${fruits[1]}"    # banana
-echo "${fruits[-1]}"   # date (last element, Bash 4.2+)
-echo "${fruits[-2]}"   # cherry (second to last)
+echo "${fruits[0]}"             # apple (0-indexed)
+echo "${fruits[1]}"             # banana
+echo "${fruits[-1]}"            # date (last element, Bash 4.3+)
+echo "${fruits[-2]}"            # cherry (second to last)
 
-# Get all elements
-echo "${fruits[@]}"    # apple banana cherry date (each as separate word)
-echo "${fruits[*]}"    # "apple banana cherry date" (joined by IFS[0])
-# Use [@] — preserves elements with spaces
+# All elements
+echo "${fruits[@]}"             # apple banana cherry date (separate words)
+echo "${fruits[*]}"             # apple banana cherry date (joined by IFS)
+# ALWAYS use [@] over [*] to preserve element boundaries:
+for item in "${fruits[@]}"; do
+  echo "$item"
+done
 
-# Number of elements
-echo "${#fruits[@]}"   # 4
+# Array length
+echo "${#fruits[@]}"            # 4 (number of elements)
+echo "${#fruits[0]}"            # 5 (length of first element)
 
-# Indices (useful for sparse arrays)
-echo "${!fruits[@]}"   # 0 1 2 3
-
-# Slicing: ${arr[@]:start:length}
-echo "${fruits[@]:1:2}"  # banana cherry (2 elements starting at index 1)
-echo "${fruits[@]:1}"    # banana cherry date (from index 1 to end)
+# Indices
+echo "${!fruits[@]}"            # 0 1 2 3 (all indices)
 
 # Append to array
 fruits+=("elderberry")
-fruits+=("fig" "grape")
+fruits+=("fig" "grape")         # append multiple
 
-# Remove an element (leaves gap in indexed array)
-unset 'fruits[1]'        # Removes banana; index 1 is now empty
+# Modify element
+fruits[0]="avocado"
+
+# Delete element (creates sparse array — index still exists but is empty)
+unset 'fruits[1]'               # remove index 1
+echo "${fruits[@]}"             # avocado cherry date elderberry (no banana)
+echo "${!fruits[@]}"            # 0 2 3 4 (gap at 1)
 
 # Re-index after deletion
-fruits=("${fruits[@]}")  # Recreate without gaps
+fruits=("${fruits[@]}")         # re-create contiguous array
 
-# Iterate over array
-for fruit in "${fruits[@]}"; do
-  echo "Fruit: $fruit"
-done
+# Slicing: ${array[@]:offset:length}
+echo "${fruits[@]:1:2}"         # elements 1 and 2
+echo "${fruits[@]:2}"           # elements from index 2 onwards
+
+# Copy an array
+copy=("${fruits[@]}")
 
 # Iterate with index
 for i in "${!fruits[@]}"; do
-  echo "$i: ${fruits[$i]}"
+  echo "Index $i: ${fruits[$i]}"
 done
-
-# Array length and element length
-echo "${#fruits[@]}"      # Number of elements
-echo "${#fruits[0]}"      # Length of first element string
-
-# Array as function argument (pass by serialization)
-process_items() {
-  local -a items=("$@")   # Receive as "$@"
-  for item in "${items[@]}"; do
-    echo "Processing: $item"
-  done
-}
-process_items "${fruits[@]}"
-
-# mapfile/readarray — read lines from file/stdin into array
-mapfile -t lines < /etc/hosts           # Read file into array (strip newlines with -t)
-readarray -t words <<< "one two three"  # From string (splits on newlines, not spaces)
-mapfile -t files < <(find . -name "*.sh" -type f)  # From command output
 ```
 
 ## Associative Arrays (Hash Maps)
 
-Requires Bash 4.0+.
+Associative arrays require Bash 4.0+.
 
 ```bash
-# Declare (REQUIRED for associative arrays)
+# Declare (MUST use declare -A for associative arrays)
 declare -A user
-declare -A config=([host]="localhost" [port]="5432" [name]="mydb")
+user=([name]="Alice" [email]="alice@example.com" [role]="admin")
 
-# Assign values
-user[name]="Alice"
-user[email]="alice@example.com"
-user[age]=30
+# Create incrementally
+declare -A config
+config[database]="postgres://localhost/myapp"
+config[redis]="redis://localhost:6379"
+config[max_workers]=8
 
-# Read values
-echo "${user[name]}"          # Alice
-echo "${user[nonexistent]}"   # (empty string, no error)
-
-# All keys
-echo "${!user[@]}"            # name email age (order not guaranteed)
-
-# All values
-echo "${user[@]}"             # Alice alice@example.com 30
-
-# Number of pairs
-echo "${#user[@]}"            # 3
+# Access
+echo "${config[database]}"
 
 # Check if key exists
-[[ -v user[email] ]] && echo "email key exists"
+if [[ -v config[database] ]]; then
+  echo "database key exists"
+fi
 
-# Iterate over key-value pairs
-for key in "${!user[@]}"; do
-  echo "$key = ${user[$key]}"
+# All keys
+echo "${!config[@]}"            # database redis max_workers
+
+# All values
+echo "${config[@]}"
+
+# Number of entries
+echo "${#config[@]}"            # 3
+
+# Delete a key
+unset 'config[redis]'
+
+# Iterate over keys and values
+for key in "${!config[@]}"; do
+  echo "$key = ${config[$key]}"
 done
 
-# Remove a key
-unset 'user[age]'
-
-# Merge two associative arrays
-declare -A merged
-for k in "${!config[@]}"; do merged[$k]="${config[$k]}"; done
-for k in "${!user[@]}";   do merged[$k]="${user[$k]}";   done
+# Build from output
+declare -A colors
+while IFS='=' read -r name hex; do
+  colors["$name"]="$hex"
+done < colors.txt               # file: red=#FF0000
 ```
-
-:::tip[Associative Arrays Need declare -A]
-You MUST use `declare -A` before using an associative array. Without it, Bash treats `arr[key]` as an indexed array with key as an arithmetic expression — `arr[one]` becomes `arr[0]` since "one" evaluates to 0.
-:::
 
 ## Parameter Expansion
 
-### Default and Assignment Values
+Parameter expansion is Bash's powerful string manipulation mechanism.
+
+### Default Values
 
 ```bash
 name=""
-unset title
+dir=""
 
-# ${var:-default} — use default if var is unset or empty
-echo "${name:-Alice}"      # Alice (name is empty, use default)
-echo "${title:-Untitled}"  # Untitled (title is unset, use default)
-echo "${name}"             # (still empty — didn't assign)
+# ${var:-default}  — use default if var is unset or empty
+echo "${name:-anonymous}"       # anonymous (name is empty)
+echo "${missing:-fallback}"     # fallback (missing is unset)
+echo "$name"                    # still empty (doesn't modify)
 
-# ${var:=default} — use AND ASSIGN default if var is unset or empty
-echo "${name:=Alice}"      # Alice (assigned to name)
-echo "${name}"             # Alice (now set!)
+# ${var:=default}  — assign default if var is unset or empty
+echo "${dir:=/tmp}"             # /tmp (assigns to dir)
+echo "$dir"                     # /tmp (now set!)
 
-# ${var:+alternate} — use alternate if var IS set and non-empty
-echo "${name:+Hello, $name}"  # Hello, Alice (name is set)
-echo "${title:+set}"          # (empty — title is unset)
+# ${var:+alternate}  — use alternate if var IS set (opposite of :-)
+echo "${name:+User: $name}"     # empty (name is empty)
+name="Alice"
+echo "${name:+User: $name}"     # User: Alice
 
-# ${var:?error_message} — error and exit if var is unset or empty
-: "${REQUIRED_VAR:?REQUIRED_VAR must be set}"   # Exits with error if unset
-: "${API_KEY:?Please set API_KEY in .env}"
+# ${var:?error_msg}  — error and exit if var is unset or empty
+: "${DATABASE_URL:?DATABASE_URL environment variable is required}"
+# ↑ exits with error if DATABASE_URL is unset
+
+# Without colon: only tests for unset (not empty)
+# ${var-default}  ${var=default}  ${var+alt}  ${var?err}
 ```
 
-### Substring Operations
+### String Length and Substring
 
 ```bash
 str="Hello, World!"
 
-# ${var:offset:length} — substring extraction
-echo "${str:7}"        # World!   (from position 7 to end)
-echo "${str:7:5}"      # World    (5 chars from position 7)
-echo "${str: -6}"      # World!   (last 6 chars — space required before -)
-echo "${str: -6:5}"    # World    (5 chars from position -6)
+# Length
+echo "${#str}"                  # 13
 
-# String length
-echo "${#str}"         # 13
-
-# Array length
-arr=(a b c d)
-echo "${#arr[@]}"      # 4
-echo "${#arr[0]}"      # 1 (length of first element)
+# Substring: ${var:offset:length}
+echo "${str:7}"                 # World!
+echo "${str:7:5}"               # World
+echo "${str: -6}"               # orld! (space before - avoids ambiguity)
+echo "${str: -6:5}"             # orld!
 ```
 
-### Pattern Removal
+### Prefix/Suffix Removal
 
 ```bash
-path="/home/user/docs/file.txt"
+path="/usr/local/bin/python3.11"
+filename="report_2024_01.csv"
 
-# ${var#pattern} — remove shortest prefix matching pattern
-echo "${path#*/}"      # home/user/docs/file.txt
+# Remove shortest prefix: ${var#pattern}
+echo "${path#/usr/}"            # local/bin/python3.11
+echo "${filename#*_}"           # 2024_01.csv  (removes up to first _)
 
-# ${var##pattern} — remove longest prefix matching pattern
-echo "${path##*/}"     # file.txt  (basename equivalent)
+# Remove longest prefix: ${var##pattern}
+echo "${path##*/}"              # python3.11  (basename)
+echo "${filename##*_}"          # 01.csv  (removes up to last _)
 
-# ${var%pattern} — remove shortest suffix matching pattern
-echo "${path%.*}"      # /home/user/docs/file (remove extension)
+# Remove shortest suffix: ${var%pattern}
+echo "${path%/*}"               # /usr/local/bin  (dirname)
+echo "${filename%.csv}"         # report_2024_01  (remove extension)
+echo "${filename%_*}"           # report_2024  (removes from last _)
 
-# ${var%%pattern} — remove longest suffix matching pattern
-echo "${path%%/*}"     # (empty — removes everything from first /)
-
-# Practical examples
-filename="${path##*/}"           # file.txt
-basename="${filename%.*}"        # file
-extension="${filename##*.}"      # txt
-directory="${path%/*}"           # /home/user/docs
+# Remove longest suffix: ${var%%pattern}
+echo "${filename%%_*}"          # report  (removes from first _)
 ```
 
-### Pattern Substitution
+### Search and Replace
 
 ```bash
-str="Hello Hello Hello"
+str="banana"
 
-# ${var/search/replace} — replace first match
-echo "${str/Hello/Hi}"     # Hi Hello Hello
+# Replace first occurrence: ${var/search/replace}
+echo "${str/a/o}"               # bonana
 
-# ${var//search/replace} — replace ALL matches
-echo "${str//Hello/Hi}"    # Hi Hi Hi
+# Replace all occurrences: ${var//search/replace}
+echo "${str//a/o}"              # bonono
 
-# ${var/#search/replace} — replace if at start (prefix)
-echo "${str/#Hello/Hi}"    # Hi Hello Hello
+# Replace prefix: ${var/#search/replace}
+echo "${str/#ban/van}"          # vanilla → vanana
 
-# ${var/%search/replace} — replace if at end (suffix)
-echo "${str/%Hello/Hi}"    # Hello Hello Hi
+# Replace suffix: ${var/%search/replace}
+echo "${str/%ana/one}"          # banone
 
-# Remove (replace with empty)
-echo "${str// /}"          # HelloHelloHello (remove all spaces)
-
-# With glob patterns
-files="a.txt b.log c.txt d.log"
-echo "${files//*.log/}"    # Remove all .log files (pattern matching)
-
-# Change extension
-for f in *.txt; do
-  newname="${f%.txt}.md"   # Replace .txt with .md
-  mv "$f" "$newname"
-done
+# Delete (replace with nothing)
+echo "${str//a/}"               # bnn
 ```
 
-### Case Conversion (Bash 4.0+)
+### Case Modification (Bash 4+)
 
 ```bash
-str="Hello World"
+text="hello WORLD"
 
-# ${var^} — uppercase first character
-echo "${str^}"    # Hello World (already capitalized)
+echo "${text^}"                 # Hello WORLD (capitalize first char)
+echo "${text^^}"                # HELLO WORLD (uppercase all)
+echo "${text,}"                 # hello WORLD (lowercase first char)
+echo "${text,,}"                # hello world (lowercase all)
 
-# ${var^^} — uppercase all characters
-echo "${str^^}"   # HELLO WORLD
-
-# ${var,} — lowercase first character
-echo "${str,}"    # hello World
-
-# ${var,,} — lowercase all characters
-echo "${str,,}"   # hello world
-
-# ${var~} — toggle case of first char (Bash 5.1+)
-echo "${str~}"    # hELLO wORLD (Bash 5.1+ only)
-
-# With pattern (apply only to matching chars)
-echo "${str^^[aeiou]}"  # HEllO WOrld (uppercase vowels only)
+# With pattern (convert matching characters)
+echo "${text^^[aeiou]}"         # hEllO wOrld (uppercase vowels only)
 ```
 
-### Transformation Operators (Bash 4.4+)
+## Here-Strings and Here-Docs
 
 ```bash
-name="Alice O'Brien"
+# Here-string: pass single string as stdin
+grep "error" <<< "this has an error in it"
+base64 --decode <<< "SGVsbG8="
 
-# ${var@Q} — shell-quoted form (safe for re-use in shell)
-echo "${name@Q}"     # 'Alice O'\''Brien' (properly quoted)
+# Read from variable
+read -r line <<< "single line string"
 
-# ${var@E} — expand escape sequences like $'...'
-str=$'Hello\tWorld'
-echo "${str@E}"      # Hello	World (tab expanded)
+# Here-doc: pass multi-line string as stdin
+cat <<EOF
+Line 1
+Line 2
+Line $USER
+EOF
+# ↑ Expands variables and command substitutions
 
-# ${var@P} — expand as PS1 prompt
-echo "${PS1@P}"      # Current prompt string (resolved)
-
-# ${var@A} — declare command to recreate variable
-arr=(1 2 3)
-echo "${arr[@]@A}"   # declare -a arr=([0]="1" [1]="2" [2]="3")
-
-# ${var@a} — variable attributes (flags)
-declare -r CONST="x"
-echo "${CONST@a}"    # r (readonly)
-```
-
-## Here-Documents
-
-```bash
-# Basic heredoc — content is expanded
-name="World"
-cat << EOF
-Hello, $name!
-Today is $(date '+%Y-%m-%d')
+# Quoted here-doc: no expansion (single-quoted delimiter)
+cat <<'EOF'
+Literal $HOME
+No $(expansion) here
 EOF
 
-# Quoted delimiter — NO expansion (literal content)
-cat << 'EOF'
-Hello, $name!    # Not expanded
-$(date)          # Not expanded
-EOF
-
-# Indented heredoc (<<- strips leading TABS only, not spaces)
-if true; then
-  cat <<- EOF
-	This line has a tab prefix that is stripped
-	So does this line
+# Indented here-doc (strip leading tabs, NOT spaces): <<-
+cat <<-EOF
+	Indented with tabs
+	This is cleaner
 	EOF
-fi
+# ↑ Leading tabs are removed from body and closing delimiter
 
-# Heredoc to a variable
-sql_query=$(cat << 'EOF'
-SELECT u.id, u.name, u.email
-FROM users u
-WHERE u.active = 1
-ORDER BY u.name;
+# Assign to variable
+readme=$(cat <<EOF
+# My Project
+Version: $VERSION
+Built: $(date)
 EOF
 )
-
-# Heredoc with a command
-mysql -u root -p mydb << 'SQL'
-DROP TABLE IF EXISTS temp_table;
-CREATE TABLE temp_table AS SELECT * FROM users WHERE created_at < '2020-01-01';
-SQL
-```
-
-## Here-Strings
-
-```bash
-# <<< "string" — pass string as stdin
-grep "pattern" <<< "This is a test string with pattern in it"
-
-# Practical uses
-read -r first_word <<< "hello world"   # first_word="hello"
-IFS='.' read -ra parts <<< "1.2.3.4"  # parts=(1 2 3 4)
-
-# Equivalent to echo "string" | command, but in current process (no subshell)
-# Better for performance with built-ins
 ```
 
 ## IFS — Internal Field Separator
 
+`IFS` controls how bash splits words in unquoted expansions and `read` commands.
+
 ```bash
-# IFS is used for word splitting and read
-# Default IFS contains: space, tab, newline
-echo "${IFS@Q}"   # Bash 4.4+: ' \t\n'
+# Default IFS: space + tab + newline
+echo "$IFS" | cat -A    # shows the invisible characters
 
-# Change IFS for splitting
-data="Alice:30:Engineer"
-IFS=':' read -ra fields <<< "$data"
-echo "${fields[0]}"   # Alice
-echo "${fields[1]}"   # 30
-echo "${fields[2]}"   # Engineer
+# Read CSV line
+IFS=',' read -r name age city <<< "Alice,30,New York"
+echo "Name: $name, Age: $age, City: $city"
 
-# Restore IFS after changing
+# Split string into array
+IFS=':' read -ra parts <<< "$PATH"
+for dir in "${parts[@]}"; do
+  echo "$dir"
+done
+
+# Read a file line by line (safe with spaces in names)
+while IFS= read -r line; do
+  echo "Line: $line"
+done < /etc/hosts
+
+# Read tab-separated data
+while IFS=$'\t' read -r col1 col2 col3; do
+  echo "$col1 | $col2 | $col3"
+done < data.tsv
+
+# Temporarily change IFS
+(
+  IFS=','
+  for word in $csv_string; do
+    echo "$word"
+  done
+)  # IFS restored after subshell
+
+# Change and restore manually
 old_ifs="$IFS"
 IFS=','
-# ... use comma splitting ...
+# ... processing ...
 IFS="$old_ifs"
-
-# Or use a subshell to avoid pollution
-(
-  IFS=':'
-  read -ra parts <<< "a:b:c"
-  echo "${parts[@]}"   # a b c
-)  # IFS restored when subshell exits
-
-# IFS for joining arrays
-arr=(a b c d)
-IFS=','; joined="${arr[*]}"; IFS=$' \t\n'  # joined="a,b,c,d"
-# Or with printf:
-printf '%s,' "${arr[@]}" | sed 's/,$//'    # a,b,c,d (remove trailing comma)
-# Or with a loop:
-joined=$(IFS=','; echo "${arr[*]}")         # Clean one-liner
-
-# Read loop with IFS
-while IFS=':' read -r user _ uid gid _ home shell; do
-  echo "User: $user, Home: $home, Shell: $shell"
-done < /etc/passwd
-
-# Disable word splitting (useful with set -u)
-IFS=''  # No splitting — each character is its own field
 ```
 
-## Nameref (Variable References)
+:::caution[IFS and set -u]
+With `set -u`, using `IFS=` (empty IFS) to prevent word splitting is safe. But beware: changing `IFS` globally affects all word splitting until restored. Prefer subshells or local scope via functions.
+:::
+
+## Nameref (declare -n)
 
 ```bash
-# Nameref — declare -n creates a reference to another variable (Bash 4.3+)
-declare -n ref=name     # ref is now an alias for the 'name' variable
-name="Alice"
-echo "$ref"             # Alice
-ref="Bob"
-echo "$name"            # Bob (modified through nameref)
+# Nameref allows a variable to act as a reference to another variable (Bash 4.3+)
+declare -n ref=myvar
+myvar="hello"
+echo "$ref"         # hello
+ref="world"
+echo "$myvar"       # world (modified through nameref)
 
-# Use case: pass array by reference to a function
-append_to_array() {
-  declare -n _arr="$1"   # _arr is a reference to the array named by $1
-  local item="$2"
-  _arr+=("$item")
+# Useful in functions to return data
+function fill_array() {
+  local -n arr_ref=$1   # nameref to the caller's array
+  arr_ref=("one" "two" "three")
 }
 
-my_list=()
-append_to_array my_list "apple"
-append_to_array my_list "banana"
-echo "${my_list[@]}"    # apple banana
+my_array=()
+fill_array my_array
+echo "${my_array[@]}"   # one two three
 
-# Return value via nameref
-get_config() {
-  declare -n _result="$1"
-  _result="value from function"
+# Nameref with associative arrays
+function configure() {
+  local -n config_ref=$1
+  config_ref[host]="localhost"
+  config_ref[port]="5432"
 }
 
-get_config output
-echo "$output"   # value from function
+declare -A db_config
+configure db_config
+echo "${db_config[host]}"   # localhost
 ```
 
 ## Indirect Reference
 
 ```bash
-# Old-style indirect reference (Bash 3+)
-var_name="greeting"
-greeting="Hello, World!"
+# ${!varname} — indirect reference: value of a variable whose name is in varname
+color="red"
+red="#FF0000"
+green="#00FF00"
 
-echo "${!var_name}"    # Hello, World! (dereference through var_name)
+echo "${!color}"    # #FF0000 (value of variable named by $color)
 
-# With arrays
-declare -A config=([host]="localhost" [port]="5432")
-key="host"
-echo "${config[$key]}"  # localhost
-
-# Dynamic variable names (use with care — nameref is better in Bash 4.3+)
-for color in red green blue; do
-  declare "color_${color}=255"
+# Useful for dynamic variable names
+for env in dev staging prod; do
+  varname="DB_HOST_${env^^}"    # DB_HOST_DEV, DB_HOST_STAGING, etc.
+  echo "$env: ${!varname}"      # indirect reference
 done
-echo "${!color_red}"    # Won't work — need eval for old-style
-eval "echo \$color_${color}"   # Works but eval is dangerous
-# Better: use associative arrays instead
+
+# List variables matching a prefix
+echo "${!BASH*}"    # all variables starting with BASH
+# BASH BASHOPTS BASHPID BASH_ALIASES BASH_ARGC ...
+```
+
+## mapfile / readarray
+
+```bash
+# Read lines of a file into an array (Bash 4.0+)
+mapfile -t lines < /etc/hosts      # -t strips newlines (recommended)
+readarray -t lines < /etc/hosts    # synonym for mapfile
+
+echo "${#lines[@]}"  # number of lines
+echo "${lines[0]}"   # first line
+
+# Read from command output
+mapfile -t processes < <(ps aux | tail -n +2)
+
+# Read limited number of lines
+mapfile -t -n 10 first_ten < bigfile.txt
+
+# With callback function (called for each line)
+mapfile -t -C mycallback -c 1 < file.txt  # call mycallback every 1 line
+
+# Read starting at a specific index
+mapfile -t -O 5 arr < file.txt   # start filling from index 5
+
+# Practical: read CSV into array
+mapfile -t csv_lines < data.csv
+for line in "${csv_lines[@]}"; do
+  IFS=',' read -ra fields <<< "$line"
+  echo "Name: ${fields[0]}, Age: ${fields[1]}"
+done
 ```

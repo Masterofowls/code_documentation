@@ -1,531 +1,585 @@
 ---
-title: Writing Dockerfiles
-description: Master Dockerfile instructions, layer caching, multi-stage builds, base image selection, security hardening, and complete real-world examples.
+title: Dockerfile
+description: Write optimised Dockerfiles with multi-stage builds, layer caching, security hardening, and complete language examples.
 sidebar:
   order: 3
 tags: [devops, docker]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
-# Writing Dockerfiles
+# Dockerfile
 
-A `Dockerfile` is a text document containing all the commands needed to assemble a Docker image. Understanding how to write efficient, secure Dockerfiles is one of the most valuable Docker skills.
-
----
+A `Dockerfile` is a text file containing sequential instructions that Docker reads to build an image. Each instruction creates a new read-only **layer** in the image filesystem. Understanding how layers work is the key to writing fast, lean Dockerfiles.
 
 ## Dockerfile Instructions Reference
 
-### `FROM` — Base Image
+### FROM — Base Image
 
-Every Dockerfile must begin with `FROM`. It sets the base image for subsequent instructions.
-
-```dockerfile
-FROM ubuntu:22.04
-FROM node:20-alpine
-FROM scratch                    # Empty base — for statically compiled binaries
-FROM node:20-alpine AS builder  # Named stage for multi-stage builds
-```
-
-### `RUN` — Execute Commands
-
-Executes commands in a new layer on top of the current image and commits the result.
+Every Dockerfile must start with `FROM`. It sets the base image for subsequent instructions.
 
 ```dockerfile
-# Shell form (runs in /bin/sh -c on Linux)
-RUN apt-get update && apt-get install -y curl
+# Pinned tag (recommended for reproducibility)
+FROM node:20.11.1-alpine3.19
 
-# Exec form (no shell processing, preferred for clarity)
-RUN ["apt-get", "install", "-y", "curl"]
+# Digest pinning (strongest — survives tag mutation)
+FROM node:20-alpine@sha256:a1b2c3d4...
 
-# Chain commands to minimize layers
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-       curl \
-       git \
-       ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# Scratch — empty image for compiled binaries (Go, Rust)
+FROM scratch
+
+# Named build stage (multi-stage builds)
+FROM node:20-alpine AS builder
+FROM nginx:alpine AS runtime
 ```
 
-:::tip[Clean up in the same RUN]
-Always clean package manager caches in the same `RUN` instruction. If you clean in a separate layer, the original cache layer is preserved in the image, wasting space.
+:::caution[Never use `latest` in production]
+`latest` is a moving target. If the base image updates and introduces a breaking change, your build silently breaks. Always pin to a specific tag or digest.
 :::
 
-### `COPY` and `ADD`
+### RUN — Execute Commands
 
 ```dockerfile
-# COPY — preferred for most cases
+# Single command (creates one layer)
+RUN apt-get update
+
+# Chained commands (best practice — single layer, smaller image)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      curl \
+      ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# Use heredoc syntax (BuildKit, Docker 1.20+)
+RUN <<EOF
+apt-get update
+apt-get install -y curl
+rm -rf /var/lib/apt/lists/*
+EOF
+
+# Shell vs exec form
+RUN echo hello           # shell form: /bin/sh -c "echo hello"
+RUN ["echo", "hello"]    # exec form: no shell, no variable expansion
+```
+
+### COPY and ADD
+
+```dockerfile
+# COPY — preferred for local files
 COPY package.json package-lock.json ./
 COPY src/ ./src/
-COPY --chown=node:node . .         # Set ownership on copy
+COPY --chown=node:node . .
 
-# ADD — has extra features (auto-extract archives, URL fetch)
-# Prefer COPY unless you specifically need these features
-ADD archive.tar.gz /app/           # Auto-extracted
-ADD https://example.com/file.txt . # URL download (use curl/wget in RUN instead)
+# COPY from another build stage
+COPY --from=builder /app/dist ./dist
+
+# ADD — use only for tar extraction or URL fetching (COPY otherwise)
+ADD https://example.com/file.tar.gz /tmp/
+ADD archive.tar.gz /app/   # auto-extracts tar
 ```
 
-### `WORKDIR` — Set Working Directory
+:::tip[Prefer COPY over ADD]
+`ADD` has implicit behaviours (URL fetching, tar extraction) that make Dockerfiles harder to reason about. Use `COPY` for all local file copies. Use `RUN curl` for URL fetching so intent is explicit.
+:::
+
+### WORKDIR — Set Working Directory
 
 ```dockerfile
-WORKDIR /app                       # Creates dir if it doesn't exist
-WORKDIR /usr/local/src             # Absolute path recommended
+# Creates directory if it doesn't exist
+WORKDIR /app
+
+# All subsequent COPY, RUN, CMD paths are relative to WORKDIR
+COPY package.json .     # copies to /app/package.json
+RUN npm install         # runs in /app
+
+# Avoid using RUN cd /path — use WORKDIR instead
 ```
 
-### `ENV` and `ARG`
+### ENV and ARG — Variables
 
 ```dockerfile
-# ENV — runtime environment variable (persists in container)
+# ENV — set at build AND runtime (baked into image)
 ENV NODE_ENV=production
-ENV PORT=3000 HOST=0.0.0.0        # Multiple on one line
+ENV PORT=3000
 
-# ARG — build-time variable (not available in running container)
+# ARG — set at build time only (not in final image)
+ARG BUILD_VERSION
+ARG REGISTRY=docker.io
+
+# Use ARG in RUN commands
+RUN echo "Building version: ${BUILD_VERSION}"
+
+# ARG with default value
 ARG NODE_VERSION=20
-ARG BUILD_DATE
-FROM node:${NODE_VERSION}-alpine
 
-# ARG before FROM is only available in FROM
-# ARG after FROM is available in subsequent instructions
-ARG APP_VERSION
-ENV APP_VERSION=${APP_VERSION}    # Promote ARG to ENV for runtime access
+# Dynamic base image using ARG
+ARG BASE_IMAGE=node:20-alpine
+FROM ${BASE_IMAGE}
 ```
 
-### `EXPOSE`
+:::caution[ARG vs ENV for secrets]
+Neither `ARG` nor `ENV` is safe for secrets — both are visible in `docker history`. Use `--secret` mount (BuildKit) for build-time secrets.
+:::
 
-Documents which ports the container will listen on. **Does not actually publish ports** — use `-p` at runtime.
+### EXPOSE — Document Ports
 
 ```dockerfile
+# Documents which port the container listens on (informational only)
 EXPOSE 3000
-EXPOSE 80/tcp
+EXPOSE 8080/tcp
 EXPOSE 53/udp
+
+# Does NOT actually publish the port — use -p flag with docker run
 ```
 
-### `VOLUME`
-
-Declares a mount point that should be externally mounted. Creates an anonymous volume if not mounted at runtime.
-
-```dockerfile
-VOLUME /app/data
-VOLUME ["/var/log", "/var/db"]
-```
-
-### `USER` — Non-Root Security
+### USER — Run as Non-Root
 
 ```dockerfile
 # Create a non-root user and switch to it
-RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
-USER appuser
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 nextjs
 
-# Or use numeric IDs for clarity
-RUN addgroup -S -g 1001 app && adduser -S -u 1001 -G app app
+USER nextjs
+
+# Or use numeric UID/GID directly
 USER 1001:1001
 ```
 
-### `LABEL`
-
-Metadata as key-value pairs. Useful for automation, maintenance, and tooling.
+### LABEL — Image Metadata
 
 ```dockerfile
 LABEL maintainer="team@example.com"
-LABEL org.opencontainers.image.title="My App"
-LABEL org.opencontainers.image.version="1.0.0"
 LABEL org.opencontainers.image.source="https://github.com/org/repo"
-LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.version="1.2.3"
+LABEL org.opencontainers.image.description="My application"
+LABEL build_date="2024-01-15"
 ```
 
-### `HEALTHCHECK`
+### HEALTHCHECK — Container Health
 
 ```dockerfile
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+# HTTP health check
+HEALTHCHECK --interval=30s \
+            --timeout=10s \
+            --start-period=40s \
+            --retries=3 \
   CMD curl -f http://localhost:3000/health || exit 1
 
-# Disable inherited healthcheck
+# TCP health check (when curl not available)
+HEALTHCHECK --interval=15s --timeout=5s \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
+
+# Disable inherited health check
 HEALTHCHECK NONE
 ```
 
-### `ENTRYPOINT` and `CMD`
+### ENTRYPOINT and CMD
 
 ```dockerfile
-# ENTRYPOINT — the executable (cannot be overridden without --entrypoint flag)
+# CMD — default arguments, overridable at runtime
+CMD ["node", "server.js"]
+CMD ["nginx", "-g", "daemon off;"]
+
+# ENTRYPOINT — fixed executable, CMD provides default args
+ENTRYPOINT ["node"]
+CMD ["server.js"]         # docker run myapp → runs: node server.js
+                          # docker run myapp other.js → runs: node other.js
+
+# Shell form (not recommended — can't receive Unix signals properly)
+ENTRYPOINT node server.js
+
+# Exec form (recommended)
 ENTRYPOINT ["node", "server.js"]
 
-# CMD — default arguments (can be overridden by docker run args)
-CMD ["--port", "3000"]
-
-# Together: ENTRYPOINT + CMD provides executable + default args
-ENTRYPOINT ["nginx", "-g"]
-CMD ["daemon off;"]
-
-# Shell form (runs in sh -c — avoids signal issues, prefer exec form)
-ENTRYPOINT node server.js    # Avoid: SIGTERM won't reach Node
-```
-
-:::caution[ENTRYPOINT + CMD interaction]
-When both are defined in exec form, CMD provides default arguments to ENTRYPOINT. If you override CMD at runtime (`docker run my-image --debug`), the full command becomes `[ENTRYPOINT, "--debug"]`.
-:::
-
-### `SHELL`, `ONBUILD`, `STOPSIGNAL`
-
-```dockerfile
-# SHELL — change the default shell for RUN/CMD/ENTRYPOINT shell form
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-
-# ONBUILD — triggers instruction in child images that use this as base
-ONBUILD COPY . /app
-ONBUILD RUN npm install
-
-# STOPSIGNAL — signal sent to container to stop it
-STOPSIGNAL SIGTERM
-STOPSIGNAL SIGQUIT
-```
-
----
-
-## Layer Caching
-
-Docker caches each instruction as a layer. If nothing has changed up to a given layer, Docker reuses the cache. **Order matters enormously.**
-
-### The Wrong Way
-
-```dockerfile
-# BAD: Copying everything first invalidates cache on any source change
-FROM node:20-alpine
-WORKDIR /app
-COPY . .                    # ← Any file change busts all subsequent cache
-RUN npm ci                  # ← Re-runs on every source code change!
-CMD ["node", "server.js"]
-```
-
-### The Right Way
-
-```dockerfile
-# GOOD: Copy dependency files first, install, then copy source
-FROM node:20-alpine
-WORKDIR /app
-COPY package.json package-lock.json ./   # ← Only changes when deps change
-RUN npm ci                               # ← Cache hit on most source changes
-COPY . .                                 # ← Source change only affects this layer
-CMD ["node", "server.js"]
-```
-
-**Cache invalidation rules:**
-- `COPY` or `ADD` — invalidated if file content or metadata changes
-- `RUN` — invalidated if preceding instructions changed
-- `ENV`/`ARG` — invalidated if value changes
-- `FROM` — invalidated if base image digest changes
-
-:::tip[BuildKit cache mounts]
-Use BuildKit cache mounts for package managers to persist the cache across builds without embedding it in the layer:
-```dockerfile
-RUN --mount=type=cache,target=/root/.npm \
-    npm ci
-```
-:::
-
----
-
-## Multi-Stage Builds
-
-Multi-stage builds allow you to use multiple `FROM` instructions, copying only what you need between stages. This dramatically reduces final image size.
-
-```dockerfile
-# Stage 1: Build
-FROM node:20-alpine AS builder
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-RUN npm run build
-
-# Stage 2: Production runtime (lean image)
-FROM node:20-alpine AS production
-WORKDIR /app
-
-# Create non-root user
-RUN addgroup -S -g 1001 app && adduser -S -u 1001 -G app app
-
-# Copy ONLY the built artifacts from the builder stage
-COPY --from=builder --chown=app:app /app/dist ./dist
-COPY --from=builder --chown=app:app /app/node_modules ./node_modules
-COPY --from=builder --chown=app:app /app/package.json ./
-
-USER app
-EXPOSE 3000
-HEALTHCHECK --interval=30s --timeout=5s CMD wget -qO- http://localhost:3000/health || exit 1
-CMD ["node", "dist/server.js"]
-```
-
-```bash
-# Build the final (default last) stage
-docker build -t my-app .
-
-# Build a specific stage (useful for CI testing)
-docker build --target builder -t my-app:builder .
-docker build --target production -t my-app:prod .
-```
-
-### Copy from External Images
-
-```dockerfile
-FROM alpine AS final
-# Copy a binary from a pre-built official image
-COPY --from=golang:1.22-alpine /usr/local/go /usr/local/go
-```
-
----
-
-## `.dockerignore`
-
-Like `.gitignore`, this file prevents files from being sent to the build context (and thus from being copied into images via `COPY . .`).
-
-```
-# .dockerignore
-.git
-.gitignore
-node_modules
-npm-debug.log
-dist
-build
-.DS_Store
-*.md
-.env
-.env.*
-!.env.example
-coverage
-.nyc_output
-.cache
-*.log
-Dockerfile*
-docker-compose*
-.dockerignore
-```
-
-:::tip[Build context size]
-A large build context slows down every build. Run `docker build` and watch the "Sending build context" line. If it's large, your `.dockerignore` needs work.
-:::
-
----
-
-## Base Image Selection
-
-| Base | Size | Best For |
-|---|---|---|
-| `ubuntu:22.04` | ~70 MB | Full Linux environment, APT packages |
-| `debian:bookworm-slim` | ~75 MB | Lighter Debian, fewer packages pre-installed |
-| `alpine:3.19` | ~5 MB | Minimal size; uses musl libc (can cause issues) |
-| `node:20-alpine` | ~60 MB | Node.js on Alpine |
-| `node:20-slim` | ~200 MB | Node.js on Debian Slim |
-| `gcr.io/distroless/nodejs20` | ~120 MB | No shell, no package manager — very secure |
-| `scratch` | 0 B | Statically compiled binaries (Go, Rust) |
-
-:::caution[Alpine and musl libc]
-Alpine uses `musl libc` instead of `glibc`. Some native Node.js modules (and Python C extensions) expect glibc. If you see segfaults or mysterious errors with Alpine, switch to `-slim` or `-debian` variants.
-:::
-
----
-
-## Security: Non-Root Users
-
-Running containers as root is a significant security risk. Always create and use a non-root user.
-
-```dockerfile
-# Debian/Ubuntu style
-RUN groupadd --gid 1001 appgroup \
-    && useradd --uid 1001 --gid appgroup --shell /bin/bash --create-home appuser
-USER appuser
-
-# Alpine style
-RUN addgroup -S -g 1001 app && adduser -S -u 1001 -G app app
-USER 1001
-
-# Node.js official images include a 'node' user
-USER node
-```
-
----
-
-## tini as PID 1
-
-In containers, PID 1 has special responsibilities (reaping zombie processes, forwarding signals). Using your app as PID 1 can cause problems. Use `tini` as a proper init process.
-
-```dockerfile
-FROM node:20-alpine
-# tini is included in node:alpine — enable with --init flag
-# or install it:
+# Using tini as PID 1 (handles zombie processes and signal forwarding)
 RUN apk add --no-cache tini
 ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "server.js"]
 ```
 
-```bash
-# Alternatively, use --init flag at runtime
-docker run --init my-app
+### VOLUME, STOPSIGNAL, ONBUILD, SHELL
+
+```dockerfile
+# VOLUME — creates a mount point (better to declare in compose/run)
+VOLUME ["/data"]
+VOLUME /var/log/app
+
+# STOPSIGNAL — signal sent to container on docker stop
+STOPSIGNAL SIGTERM
+STOPSIGNAL SIGQUIT
+
+# ONBUILD — triggers in child images
+ONBUILD COPY package.json .
+ONBUILD RUN npm install
+
+# SHELL — change default shell for RUN commands
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+RUN set -eux; echo "now using bash"
 ```
 
----
+## Layer Caching
 
-## Build Secrets
+Docker caches each layer. If an instruction and all layers before it are unchanged, Docker uses the cached layer — dramatically speeding up builds. **Order your instructions from least to most frequently changing.**
 
-Pass secrets to the build process without embedding them in image layers.
+```dockerfile
+# BAD: source code changes invalidate npm install cache
+FROM node:20-alpine
+WORKDIR /app
+COPY . .                    # ← changes every time
+RUN npm ci                  # ← re-runs every time (slow!)
+CMD ["node", "server.js"]
+
+# GOOD: copy package files first, install, then copy source
+FROM node:20-alpine
+WORKDIR /app
+COPY package.json package-lock.json ./  # ← only changes when deps change
+RUN npm ci                               # ← cached when deps unchanged
+COPY . .                                 # ← source changes don't bust install cache
+CMD ["node", "server.js"]
+```
+
+:::tip[Cache-busting pattern]
+Always copy dependency manifest files (`package.json`, `requirements.txt`, `go.mod`, `Gemfile`) before copying source code. The `npm install` / `pip install` / `go mod download` layer will only re-run when those files change.
+:::
+
+## Multi-Stage Builds
+
+Multi-stage builds let you use one image for building and a smaller image for the final artifact — eliminating build tools, source code, and test dependencies from the production image.
+
+```dockerfile
+# ─── Stage 1: Build ────────────────────────────────────────────
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY . .
+RUN npm run build
+
+# ─── Stage 2: Production ───────────────────────────────────────
+FROM node:20-alpine AS runtime
+
+# Install only production deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --only=production && npm cache clean --force
+
+# Copy built artifacts from builder stage
+COPY --from=builder /app/dist ./dist
+
+# Non-root user
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 nodeuser
+USER nodeuser
+
+EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD wget -qO- http://localhost:3000/health || exit 1
+
+CMD ["node", "dist/server.js"]
+```
+
+### Building Specific Stages
+
+```bash
+# Build only to the "builder" stage (useful for testing)
+docker build --target builder -t myapp:builder .
+
+# Build the final (default) stage
+docker build -t myapp:latest .
+```
+
+## .dockerignore
+
+Create a `.dockerignore` file in your build context to exclude files. Smaller build context = faster builds and smaller images.
+
+```
+# .dockerignore
+node_modules/
+.git/
+.gitignore
+*.md
+.env
+.env.*
+dist/
+build/
+coverage/
+.nyc_output/
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+*.test.ts
+*.spec.ts
+```
+
+## Base Image Selection
+
+| Base                         | Size   | Use Case                                             |
+| ---------------------------- | ------ | ---------------------------------------------------- |
+| `ubuntu:22.04`               | ~77MB  | Full environment, max compatibility                  |
+| `debian:bookworm-slim`       | ~74MB  | Lighter Debian, apt available                        |
+| `alpine:3.19`                | ~7MB   | Minimal, musl libc (may have compat issues)          |
+| `node:20-slim`               | ~220MB | Slim Debian, Node preinstalled                       |
+| `node:20-alpine`             | ~50MB  | Alpine + Node (very common)                          |
+| `gcr.io/distroless/nodejs20` | ~115MB | No shell, no package manager, minimal attack surface |
+| `scratch`                    | 0MB    | Empty — for statically compiled binaries only        |
+
+:::tip[Distroless for Production]
+Google's distroless images contain only the application and runtime, with no shell or package manager. This minimises the attack surface significantly. Use them in the final stage of multi-stage builds.
+
+```dockerfile
+FROM gcr.io/distroless/nodejs20-debian12
+COPY --from=builder /app/dist /app
+CMD ["/app/server.js"]
+```
+
+:::
+
+## Build Secrets (BuildKit)
+
+Never put secrets in `ARG` or `ENV` — they're visible in `docker history`. Use BuildKit's `--secret` flag:
 
 ```dockerfile
 # syntax=docker/dockerfile:1
-FROM alpine
-RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
-    npm install
+FROM python:3.12-slim
+
+# Mount secret at build time — NOT baked into the layer
+RUN --mount=type=secret,id=pip_token \
+    pip install \
+      --extra-index-url https://$(cat /run/secrets/pip_token)@pypi.example.com/simple \
+      private-package
 ```
 
 ```bash
-docker build --secret id=npmrc,src=$HOME/.npmrc .
+# Pass secret at build time
+docker build \
+  --secret id=pip_token,src=./pip_token.txt \
+  -t myapp .
 ```
 
----
+### SSH Agent Forwarding
 
-## BuildKit and `buildx`
+```dockerfile
+# syntax=docker/dockerfile:1
+FROM python:3.12-slim
 
-BuildKit is Docker's modern build engine — faster, more features, better caching.
+RUN --mount=type=ssh \
+    pip install git+ssh://git@github.com/org/private-repo.git
+```
 
 ```bash
-# Enable BuildKit
-DOCKER_BUILDKIT=1 docker build .
+docker build --ssh default -t myapp .
+```
 
-# Or set in daemon.json
-# { "features": { "buildkit": true } }
+## Using BuildKit and Buildx
 
-# buildx — extends BuildKit with multi-platform and more
+```bash
+# Enable BuildKit (Docker 23.0+ enables by default)
+DOCKER_BUILDKIT=1 docker build -t myapp .
+
+# Or set in Docker config
+echo '{"features":{"buildkit":true}}' > ~/.docker/daemon.json
+
+# buildx — extended build capabilities
+docker buildx build -t myapp .
+
+# Build with cache export (speeds up CI)
 docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  --tag myrepo/myapp:latest \
-  --push \
-  .
-
-# Create a builder instance
-docker buildx create --name mybuilder --use
-docker buildx inspect --bootstrap
+  --cache-from type=registry,ref=myregistry/myapp:cache \
+  --cache-to type=registry,ref=myregistry/myapp:cache,mode=max \
+  -t myapp .
 ```
-
----
 
 ## Linting with hadolint
 
 ```bash
-# Install
-brew install hadolint           # macOS
-docker run --rm -i hadolint/hadolint < Dockerfile  # Docker
+# Install hadolint
+brew install hadolint          # macOS
+winget install hadolint        # Windows
 
-# Check your Dockerfile
+# Lint a Dockerfile
 hadolint Dockerfile
 
+# Lint in CI (exit code 1 on warnings)
+hadolint --failure-threshold warning Dockerfile
+
 # Ignore specific rules
-hadolint --ignore DL3008 --ignore DL3009 Dockerfile
+hadolint --ignore DL3008 --ignore SC2035 Dockerfile
 ```
 
-Common hadolint rules:
-- `DL3007` — Use pinned tags, not `latest`
-- `DL3008` — Pin apt-get package versions
-- `DL3015` — Avoid `apt-get upgrade`
-- `DL3025` — Use exec form of CMD
-- `SC2086` — Shell quoting issues
+## Complete Language Examples
 
----
+<Tabs>
+  <TabItem label="Node.js">
+    ```dockerfile
+    # syntax=docker/dockerfile:1
+    FROM node:20.11.1-alpine3.19 AS base
 
-## Complete Examples
+    # ── Dependencies ─────────────────────────────────────────────
+    FROM base AS deps
+    WORKDIR /app
+    COPY package.json package-lock.json ./
+    RUN npm ci
 
-### Node.js Application
+    # ── Builder ──────────────────────────────────────────────────
+    FROM base AS builder
+    WORKDIR /app
+    COPY --from=deps /app/node_modules ./node_modules
+    COPY . .
+    RUN npm run build
+
+    # ── Production runner ─────────────────────────────────────────
+    FROM base AS runner
+    WORKDIR /app
+
+    ENV NODE_ENV=production
+
+    RUN addgroup --system --gid 1001 nodejs && \
+        adduser --system --uid 1001 nodeuser
+
+    COPY --from=builder --chown=nodeuser:nodejs /app/dist ./dist
+    COPY --from=deps --chown=nodeuser:nodejs /app/node_modules ./node_modules
+    COPY --chown=nodeuser:nodejs package.json ./
+
+    USER nodeuser
+
+    EXPOSE 3000
+    STOPSIGNAL SIGTERM
+
+    HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+      CMD wget -qO- http://localhost:3000/health || exit 1
+
+    CMD ["node", "dist/server.js"]
+    ```
+
+</TabItem>
+  <TabItem label="Python">
+    ```dockerfile
+    # syntax=docker/dockerfile:1
+    FROM python:3.12.2-slim-bookworm AS base
+
+    ENV PYTHONDONTWRITEBYTECODE=1 \
+        PYTHONUNBUFFERED=1 \
+        PIP_NO_CACHE_DIR=1 \
+        PIP_DISABLE_PIP_VERSION_CHECK=1
+
+    # ── Builder ──────────────────────────────────────────────────
+    FROM base AS builder
+
+    RUN apt-get update && \
+        apt-get install -y --no-install-recommends gcc && \
+        rm -rf /var/lib/apt/lists/*
+
+    WORKDIR /app
+    COPY requirements.txt .
+    RUN pip install --prefix=/install -r requirements.txt
+
+    # ── Runtime ──────────────────────────────────────────────────
+    FROM base AS runtime
+
+    RUN useradd --system --uid 1001 --create-home appuser
+
+    WORKDIR /app
+
+    COPY --from=builder /install /usr/local
+    COPY --chown=appuser:appuser . .
+
+    USER appuser
+
+    EXPOSE 8000
+    STOPSIGNAL SIGINT
+
+    HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+      CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+
+    CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ```
+
+</TabItem>
+  <TabItem label="Go">
+    ```dockerfile
+    # syntax=docker/dockerfile:1
+
+    # ── Builder ──────────────────────────────────────────────────
+    FROM golang:1.22-alpine AS builder
+
+    RUN apk add --no-cache git ca-certificates tzdata
+
+    WORKDIR /app
+
+    COPY go.mod go.sum ./
+    RUN go mod download
+
+    COPY . .
+
+    RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+        go build \
+          -ldflags="-w -s -X main.version=$(git describe --tags --always)" \
+          -o /bin/app \
+          ./cmd/server
+
+    # ── Runtime (scratch — no OS, minimal attack surface) ────────
+    FROM scratch
+
+    COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+    COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+    COPY --from=builder /bin/app /app
+
+    EXPOSE 8080
+    STOPSIGNAL SIGTERM
+
+    HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+      CMD ["/app", "healthcheck"]
+
+    ENTRYPOINT ["/app"]
+    ```
+
+</TabItem>
+</Tabs>
+
+## Non-Root User and Security
 
 ```dockerfile
-# syntax=docker/dockerfile:1
-FROM node:20-alpine AS deps
-WORKDIR /app
-COPY package*.json ./
-RUN --mount=type=cache,target=/root/.npm \
-    npm ci --only=production
-
-FROM node:20-alpine AS builder
-WORKDIR /app
-COPY package*.json ./
-RUN --mount=type=cache,target=/root/.npm \
-    npm ci
-COPY . .
-RUN npm run build
-
-FROM node:20-alpine AS runner
-WORKDIR /app
-ENV NODE_ENV=production
-
-RUN addgroup -S -g 1001 nodejs \
-    && adduser -S -u 1001 -G nodejs nextjs
-
-COPY --from=builder --chown=nextjs:nodejs /app/dist ./dist
-COPY --from=deps --chown=nextjs:nodejs /app/node_modules ./node_modules
-COPY --chown=nextjs:nodejs package.json ./
-
-USER nextjs
-EXPOSE 3000
-ENV PORT=3000 HOST=0.0.0.0
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -qO- http://localhost:3000/health || exit 1
-
-ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node", "dist/server.js"]
-```
-
-### Python Application
-
-```dockerfile
-# syntax=docker/dockerfile:1
-FROM python:3.12-slim AS builder
-WORKDIR /app
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY requirements.txt ./
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --user --no-cache-dir -r requirements.txt
-
-FROM python:3.12-slim AS runner
-WORKDIR /app
-
-RUN addgroup --system --gid 1001 appgroup \
-    && adduser --system --uid 1001 --gid 1001 appuser
-
-COPY --from=builder --chown=appuser:appgroup /root/.local /home/appuser/.local
-COPY --chown=appuser:appgroup . .
-
+# Alpine
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 USER appuser
-ENV PATH=/home/appuser/.local/bin:$PATH \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
 
-EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:8000/health || exit 1
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Debian/Ubuntu
+RUN groupadd --system --gid 1001 appgroup && \
+    useradd --system --uid 1001 --gid appgroup --no-create-home appuser
+USER 1001:1001
 ```
 
-### Go Application (scratch)
+:::caution[Root containers are dangerous]
+A process escaping a root container has root access on the host. Always drop to a non-root user before your CMD/ENTRYPOINT. Many Kubernetes security policies (PodSecurityAdmission) will reject root containers.
+:::
+
+## Using tini as PID 1
+
+When Docker starts a container, the `ENTRYPOINT`/`CMD` process runs as **PID 1**. PID 1 is responsible for reaping zombie child processes and forwarding Unix signals. Node.js, Python, and most apps aren't designed to do this correctly.
+
+`tini` is a minimal init system that handles these responsibilities:
 
 ```dockerfile
-# syntax=docker/dockerfile:1
-FROM golang:1.22-alpine AS builder
-WORKDIR /app
+# Alpine
+RUN apk add --no-cache tini
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "server.js"]
 
-COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download
-
-COPY . .
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -ldflags="-w -s" -o server ./cmd/server
-
-# Final stage: zero dependencies
-FROM scratch
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder /app/server /server
-EXPOSE 8080
-ENTRYPOINT ["/server"]
+# Or use Docker's built-in init
+# docker run --init myapp
 ```

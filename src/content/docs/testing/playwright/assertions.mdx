@@ -1,188 +1,253 @@
 ---
 title: Playwright Assertions
-description: Web-first assertions that auto-retry until conditions are met — toBeVisible, toHaveText, toHaveURL, visual screenshots, soft assertions, and custom expect messages.
+description: Master Playwright's web-first assertions — toBeVisible, toHaveText, toHaveURL, visual screenshot comparison, soft assertions, and custom expect messages.
 sidebar:
   order: 5
 tags: [testing, javascript]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
-Playwright's assertions are **web-first** — they automatically retry until the expected condition is true or the timeout expires. This eliminates the most common source of flaky tests: assertions evaluated before the UI has finished updating.
+Playwright's `expect` API provides **web-first assertions** that automatically retry until the condition is met or the timeout expires. This is the key difference from traditional assertions — you never need explicit waits before an assertion.
 
 ## Web-First Assertions
 
-Traditional assertion libraries (Jest's `expect`, Node's `assert`) evaluate immediately and fail if the condition isn't true at that instant. Playwright's `expect` from `@playwright/test` retries automatically:
+Traditional assertions fail immediately if the condition isn't met. Web-first assertions poll the DOM repeatedly until success or timeout:
 
 ```typescript
-// ❌ Brittle — fails if the element isn't visible at this exact millisecond
-const isVisible = await page.getByText('Success').isVisible();
-expect(isVisible).toBe(true);  // standard expect — no retry
+// ❌ Brittle — fails if DOM hasn't updated yet
+const text = await page.getByRole('status').textContent();
+expect(text).toBe('Saved'); // may run before the save completes
 
-// ✅ Resilient — retries until visible or timeout expires
-await expect(page.getByText('Success')).toBeVisible(); // Playwright expect
+// ✅ Web-first — retries until 'Saved' appears or timeout
+await expect(page.getByRole('status')).toHaveText('Saved');
 ```
 
-The default retry timeout for assertions is `5000ms` (5 seconds). Configure globally:
+Configure the default assertion timeout in `playwright.config.ts`:
 
 ```typescript
-// playwright.config.ts
-use: {
-  actionTimeout: 15000,  // action methods (click, fill, etc.)
-},
-expect: {
-  timeout: 8000,         // assertion retries
-},
+export default defineConfig({
+  expect: {
+    timeout: 5000, // 5 seconds (default)
+  },
+});
 ```
 
-Override per assertion:
+Override per-assertion:
 
 ```typescript
-await expect(page.getByText('Loaded')).toBeVisible({ timeout: 15000 });
+await expect(page.getByRole('progressbar')).toBeHidden({ timeout: 30000 });
 ```
 
 ## Visibility Assertions
 
 ```typescript
-// toBeVisible — element exists in DOM AND is visible
+// Element is visible in the viewport
 await expect(page.getByRole('dialog')).toBeVisible();
+await expect(page.getByText('Welcome back!')).toBeVisible();
 
-// toBeHidden — element is either not in DOM or hidden (display:none, visibility:hidden)
+// Element is hidden (or not in DOM)
 await expect(page.getByRole('dialog')).toBeHidden();
-
-// Practical patterns
-await expect(page.getByTestId('loading-spinner')).toBeVisible();
-await page.getByRole('button', { name: 'Submit' }).click();
 await expect(page.getByTestId('loading-spinner')).toBeHidden();
-await expect(page.getByText('Submitted successfully!')).toBeVisible();
 
-// toBeAttached — in DOM but possibly not visible
-await expect(page.getByRole('tooltip')).toBeAttached();
+// Element is attached to the DOM (may be hidden)
+await expect(page.getByTestId('hidden-section')).toBeAttached();
+await expect(page.getByTestId('removed-section')).not.toBeAttached();
 
-// toBeDetached — not present in DOM at all
-await expect(page.locator('#deleted-element')).toBeDetached();
+// Wait for element to be visible then assert
+await expect(page.getByRole('alert')).toBeVisible({ timeout: 10000 });
 ```
 
 ## State Assertions
 
 ```typescript
-// toBeEnabled / toBeDisabled
+// Enabled / Disabled
 await expect(page.getByRole('button', { name: 'Submit' })).toBeEnabled();
 await expect(page.getByRole('button', { name: 'Submit' })).toBeDisabled();
 
-// toBeChecked / not.toBeChecked
-await expect(page.getByRole('checkbox', { name: 'Accept terms' })).toBeChecked();
-await expect(page.getByRole('checkbox', { name: 'Subscribe' })).not.toBeChecked();
+// Checked / Unchecked (checkbox, radio)
+await expect(page.getByLabel('Remember me')).toBeChecked();
+await expect(page.getByLabel('Subscribe')).not.toBeChecked();
+await expect(page.getByLabel('Monthly')).toBeChecked({ checked: true });
 
-// toBeChecked with indeterminate state
-await expect(page.getByRole('checkbox')).toBeChecked({ checked: false });
+// Editable (not readonly, not disabled)
+await expect(page.getByLabel('Name')).toBeEditable();
+await expect(page.getByLabel('Account ID')).not.toBeEditable();
 
-// toBeFocused — element has keyboard focus
-await page.getByLabel('Email').click();
-await expect(page.getByLabel('Email')).toBeFocused();
-
-// toBeEmpty — input value or text content is empty
+// Empty (no value, no text content)
 await expect(page.getByLabel('Search')).toBeEmpty();
-await expect(page.getByRole('list')).toBeEmpty(); // list has no items
+await expect(page.getByRole('listbox')).not.toBeEmpty();
 
-// toBeInViewport — element is visible within the viewport
-await expect(page.getByRole('main')).toBeInViewport();
+// Focused
+await expect(page.getByLabel('Email')).toBeFocused();
 ```
 
 ## Text Assertions
 
+### toHaveText
+
+Checks the text content of an element:
+
 ```typescript
-// toHaveText — element's text content
+// Exact match (default when string)
 await expect(page.getByRole('heading')).toHaveText('Dashboard');
-await expect(page.getByRole('heading')).toHaveText(/dashboard/i);  // regex
-await expect(page.getByRole('heading')).toHaveText('Dashboard', { exact: false });
 
-// Multiple elements — pass an array
+// Substring match with regex
+await expect(page.getByRole('status')).toHaveText(/saved/i);
+
+// Partial match (string — normalized whitespace)
+await expect(page.getByRole('paragraph')).toHaveText('Hello, Alice');
+
+// Array of texts (for multiple elements)
 const items = page.getByRole('listitem');
-await expect(items).toHaveText(['First item', 'Second item', 'Third item']);
-await expect(items).toHaveText([/first/i, /second/i, /third/i]);
+await expect(items).toHaveText(['Apple', 'Banana', 'Cherry']);
+await expect(items).toHaveText([/apple/i, /banana/i, /cherry/i]);
+```
 
-// toContainText — substring match (looser than toHaveText)
-await expect(page.getByRole('paragraph')).toContainText('Welcome');
-await expect(page.getByRole('paragraph')).toContainText(/welcome/i);
+### toContainText
 
-// toContainText with array
-const rows = page.getByRole('row');
-await expect(rows).toContainText(['Alice', 'Bob']); // each row contains the text
+Checks that the element contains the given text (substring):
 
-// toHaveValue — current value of form inputs
+```typescript
+await expect(page.getByRole('article')).toContainText('Alice');
+await expect(page.getByRole('article')).toContainText(/posted \d+ days ago/);
+
+// Multiple elements — each must contain corresponding text
+await expect(page.getByRole('listitem')).toContainText(['Apple', 'Cherry']);
+```
+
+### toHaveValue
+
+Checks the value of an `<input>`, `<textarea>`, or `<select>`:
+
+```typescript
 await expect(page.getByLabel('Email')).toHaveValue('alice@example.com');
-await expect(page.getByLabel('Age')).toHaveValue('30');
-await expect(page.getByLabel('Bio')).toHaveValue(/some text/);
+await expect(page.getByLabel('Bio')).toHaveValue(/experienced developer/);
+await expect(page.getByLabel('Country')).toHaveValue('US');
 
-// toHaveValues — for multi-select
-await expect(page.getByLabel('Languages')).toHaveValues(['js', 'ts']);
+// Empty input
+await expect(page.getByLabel('Search')).toHaveValue('');
+```
+
+### toHaveValues
+
+Checks the selected values of a multi-select:
+
+```typescript
+await expect(page.getByLabel('Skills')).toHaveValues([
+  'typescript',
+  'react',
+  'testing',
+]);
 ```
 
 ## Attribute and Class Assertions
 
+### toHaveAttribute
+
 ```typescript
-// toHaveAttribute — check an HTML attribute value
-await expect(page.getByRole('link', { name: 'Home' })).toHaveAttribute('href', '/');
-await expect(page.getByRole('img', { name: 'Logo' })).toHaveAttribute('src', /logo/);
-await expect(page.getByRole('textbox')).toHaveAttribute('disabled');    // attribute present
-await expect(page.getByRole('textbox')).not.toHaveAttribute('readonly');
+// Check an attribute value
+await expect(page.getByRole('link', { name: 'Home' })).toHaveAttribute(
+  'href',
+  '/',
+);
+await expect(page.getByRole('img')).toHaveAttribute('alt', 'Profile photo');
+await expect(page.getByRole('textbox')).toHaveAttribute('type', 'email');
 
-// toHaveClass — element's class list
-await expect(page.getByRole('button', { name: 'Primary' })).toHaveClass('btn-primary');
-await expect(page.getByRole('button')).toHaveClass(/active/);  // regex
-// Exact class string match (all classes, exact order)
-await expect(page.locator('.card')).toHaveClass('card card--featured is-visible');
+// Regex match
+await expect(page.getByRole('link')).toHaveAttribute('href', /\/products\/\d+/);
 
-// toHaveCSS — computed CSS property value
-await expect(page.getByRole('main')).toHaveCSS('display', 'flex');
-await expect(page.locator('.error-text')).toHaveCSS('color', 'rgb(255, 0, 0)');
+// Attribute exists (any value)
+await expect(page.getByRole('button')).toHaveAttribute('aria-expanded');
 
-// toHaveId — element's id attribute
-await expect(page.getByRole('main')).toHaveId('main-content');
+// Attribute does not exist
+await expect(page.getByRole('button')).not.toHaveAttribute('disabled');
 ```
 
-## Count and Structure Assertions
+### toHaveClass
 
 ```typescript
-// toHaveCount — number of matching elements
+// Has a specific class
+await expect(page.getByRole('button')).toHaveClass('btn-primary');
+
+// Has multiple classes (checks for all)
+await expect(page.getByRole('button')).toHaveClass('btn btn-primary active');
+
+// Regex match
+await expect(page.getByRole('alert')).toHaveClass(/error/);
+
+// Exact class attribute match
+await expect(page.getByRole('button')).toHaveClass('btn btn-primary', {
+  exact: true,
+});
+```
+
+## Count Assertion
+
+```typescript
+// Check the number of matching elements
 await expect(page.getByRole('listitem')).toHaveCount(5);
-await expect(page.getByRole('row')).toHaveCount(11); // 1 header + 10 data rows
+await expect(page.getByRole('row')).toHaveCount(11); // 10 data rows + 1 header
 
-// After adding an item:
-await page.getByRole('button', { name: 'Add' }).click();
-await expect(page.getByRole('listitem')).toHaveCount(6);
+// At least one element
+await expect(page.getByRole('option')).not.toHaveCount(0);
 ```
 
-## Page-Level Assertions
+## URL and Title Assertions
 
 ```typescript
-// toHaveURL — current page URL
-await expect(page).toHaveURL('https://app.example.com/dashboard');
-await expect(page).toHaveURL(/\/dashboard/);
-await expect(page).toHaveURL('**/dashboard');  // glob pattern
+// Check the page URL
+await expect(page).toHaveURL('/dashboard');
+await expect(page).toHaveURL('https://myapp.example.com/dashboard');
+await expect(page).toHaveURL(/\/users\/\d+/);
 
-// toHaveTitle — page document title
+// Check the page title
 await expect(page).toHaveTitle('Dashboard — My App');
-await expect(page).toHaveTitle(/My App/);
+await expect(page).toHaveTitle(/Dashboard/);
 ```
 
-## Visual Regression — toHaveScreenshot
+## Viewport Visibility
 
-Playwright can capture and compare screenshots to detect visual regressions:
+```typescript
+// Check element is within the visible viewport
+await expect(page.getByRole('banner')).toBeInViewport();
+await expect(page.getByRole('contentinfo')).not.toBeInViewport();
+
+// With ratio (% of element that must be in viewport)
+await expect(page.getByRole('img')).toBeInViewport({ ratio: 0.5 }); // at least 50% visible
+```
+
+## Visual Screenshot Comparison
+
+Playwright's built-in screenshot assertion compares pixel-by-pixel against stored reference screenshots:
 
 ```typescript
 // Full page screenshot
-await expect(page).toHaveScreenshot('homepage.png');
+await expect(page).toHaveScreenshot('home-page.png');
 
 // Element screenshot
-await expect(page.getByRole('main')).toHaveScreenshot('main-content.png');
+await expect(page.getByRole('article')).toHaveScreenshot('product-card.png');
 
-// With comparison options
+// With tolerance options
 await expect(page).toHaveScreenshot('dashboard.png', {
-  threshold: 0.1,       // allow up to 10% per-pixel difference
-  maxDiffPixels: 100,   // or allow up to 100 differing pixels
-  maxDiffPixelRatio: 0.02,  // or up to 2% of all pixels
+  maxDiffPixels: 200, // allow up to 200 different pixels
+  threshold: 0.2, // 20% color difference tolerance per pixel
+  maxDiffPixelRatio: 0.01, // allow 1% of pixels to differ
+});
+
+// Mask dynamic regions (timestamps, ads, avatars)
+await expect(page).toHaveScreenshot('profile.png', {
+  mask: [
+    page.getByTestId('last-updated'),
+    page.getByRole('img', { name: 'Avatar' }),
+  ],
 });
 
 // Clip to a specific area
@@ -190,130 +255,122 @@ await expect(page).toHaveScreenshot('header.png', {
   clip: { x: 0, y: 0, width: 1280, height: 80 },
 });
 
-// Mask dynamic areas (timestamps, avatars, etc.)
-await expect(page).toHaveScreenshot('profile.png', {
-  mask: [
-    page.getByTestId('timestamp'),
-    page.getByRole('img', { name: 'User avatar' }),
-  ],
-});
-
-// Animations — wait for them to complete before comparing
-await page.waitForTimeout(500); // let animations settle
-await expect(page).toHaveScreenshot('animated-element.png', {
-  animations: 'disabled',  // or 'allow'
-});
+// Full page (scrolls and stitches)
+await expect(page).toHaveScreenshot('full-page.png', { fullPage: true });
 ```
 
-On first run, Playwright generates baseline screenshots in a `__screenshots__` directory. On subsequent runs, it compares against the baseline. Update baselines with:
+Update reference screenshots when the UI intentionally changes:
 
 ```bash
 npx playwright test --update-snapshots
 ```
 
-:::caution[Screenshot Snapshots and CI]
-Screenshots may differ between operating systems (macOS, Linux, Windows) due to font rendering, anti-aliasing, and pixel density. Store baseline screenshots generated on the same OS as your CI environment. Consider using the Playwright Docker image for consistent rendering.
+:::tip[Snapshot Storage]
+Reference screenshots are stored in `tests/__snapshots__/` (or alongside the test file). Commit them to source control. Review screenshot diffs in CI the same way you review code diffs — they represent visual changes to your UI.
 :::
 
 ## API Response Assertions
 
 ```typescript
-// toBeOK — response status is 2xx
-const response = await page.request.get('/api/users');
-await expect(response).toBeOK();
+import { expect, request } from '@playwright/test';
 
-// Check status code explicitly
-expect(response.status()).toBe(200);
-expect(response.status()).toBe(201);
+// In an API test using the request fixture
+test('API returns correct user', async ({ request }) => {
+  const response = await request.get('/api/users/1');
 
-// Check response body
-const body = await response.json();
-expect(body).toMatchObject({ users: expect.arrayContaining([]) });
+  await expect(response).toBeOK(); // status 200-299
+  expect(response.status()).toBe(200);
+  expect(response.headers()['content-type']).toContain('application/json');
+
+  const body = await response.json();
+  expect(body).toMatchObject({ id: 1, name: 'Alice' });
+});
+
+// Combined page + API assertion
+test('creating a user reflects in the UI', async ({ page, request }) => {
+  const response = await request.post('/api/users', {
+    data: { name: 'Bob', email: 'bob@example.com' },
+  });
+  await expect(response).toBeOK();
+
+  await page.goto('/admin/users');
+  await expect(page.getByText('Bob')).toBeVisible();
+});
 ```
 
-## Soft Assertions
+## Soft Assertions — Non-Blocking Failures
 
-Soft assertions continue test execution even when they fail, collecting all failures and reporting them at the end:
+Soft assertions continue test execution even when the assertion fails. All soft assertion failures are reported together at the end:
 
 ```typescript
-test('profile page has all required elements', async ({ page }) => {
-  await page.goto('/profile');
+test('product page has all required elements', async ({ page }) => {
+  await page.goto('/products/42');
 
   // These won't stop the test if they fail
-  await expect.soft(page.getByRole('heading', { name: 'My Profile' })).toBeVisible();
-  await expect.soft(page.getByLabel('Display Name')).toHaveValue('Alice Johnson');
-  await expect.soft(page.getByLabel('Email')).toHaveValue('alice@example.com');
-  await expect.soft(page.getByRole('img', { name: 'Profile photo' })).toBeVisible();
-  await expect.soft(page.getByRole('button', { name: 'Edit Profile' })).toBeEnabled();
+  await expect.soft(page.getByRole('heading')).toBeVisible();
+  await expect.soft(page.getByRole('img', { name: /product/i })).toBeVisible();
+  await expect.soft(page.getByText(/\$\d+\.\d{2}/)).toBeVisible();
+  await expect
+    .soft(page.getByRole('button', { name: 'Add to cart' }))
+    .toBeEnabled();
+  await expect
+    .soft(page.getByRole('button', { name: 'Add to cart' }))
+    .toBeVisible();
 
-  // Hard assertion at the end — fails if any soft assertion failed
-  expect(test.info().errors).toHaveLength(0);
+  // This IS a hard assertion — stops the test if navigation doesn't work
+  await page.getByRole('button', { name: 'Add to cart' }).click();
+  await expect(page).toHaveURL('/cart');
 });
 ```
 
 :::tip[When to Use Soft Assertions]
-Use soft assertions when validating multiple independent properties of a page (e.g., a smoke test that checks many elements). Use hard assertions when a failure makes subsequent steps meaningless (e.g., checking the modal is visible before asserting its content).
+Use `expect.soft` when checking multiple independent properties of the same page where you want a full picture of what's failing. Use hard `expect` for assertions that are prerequisites for subsequent steps — no point continuing if the button isn't there.
 :::
 
-## Custom Assertion Messages
+## Custom Expect Messages
 
-Add context to assertion failures:
-
-```typescript
-// Custom message as the last argument
-await expect(
-  page.getByRole('alert'),
-  'Error alert should not be visible after successful submission'
-).not.toBeVisible();
-
-await expect(
-  page.getByRole('heading'),
-  `Expected to be on the dashboard, current URL: ${page.url()}`
-).toHaveText('Dashboard');
-
-// With object syntax
-await expect(
-  page.getByRole('button', { name: 'Save' }),
-  { message: 'Save button should be enabled after filling all required fields' }
-).toBeEnabled();
-```
-
-## Negation with not
-
-Every assertion can be negated with `.not`:
+Add a description to any assertion for clearer failure messages:
 
 ```typescript
-await expect(page.getByRole('dialog')).not.toBeVisible();
-await expect(page.getByRole('button', { name: 'Delete' })).not.toBeDisabled();
-await expect(page.getByText('Error')).not.toBeAttached();
-await expect(page.getByLabel('Email')).not.toBeEmpty();
-await expect(page.getByRole('checkbox')).not.toBeChecked();
+await expect(
+  page.getByRole('button', { name: 'Checkout' }),
+  'Checkout button should be visible in the cart page header',
+).toBeVisible();
+
+await expect(
+  page.getByLabel('Total'),
+  `Cart total should show $${expectedTotal}`,
+).toHaveValue(`$${expectedTotal}`);
 ```
 
-## Complete Assertions Reference
+When the assertion fails, the custom message appears in the error output:
 
-| Assertion | Description |
-|---|---|
-| `toBeVisible()` | Element is in DOM and visible |
-| `toBeHidden()` | Element is hidden or not in DOM |
-| `toBeEnabled()` | Form element is enabled |
-| `toBeDisabled()` | Form element is disabled |
-| `toBeChecked()` | Checkbox/radio is checked |
-| `toBeFocused()` | Element has keyboard focus |
-| `toBeEmpty()` | Input value or text content is empty |
-| `toBeAttached()` | Element is in the DOM |
-| `toBeDetached()` | Element is not in the DOM |
-| `toBeInViewport()` | Element is in visible viewport |
-| `toHaveText(str)` | Element text matches |
-| `toContainText(str)` | Element text contains substring |
-| `toHaveValue(str)` | Input's current value |
-| `toHaveValues(arr)` | Multi-select values |
-| `toHaveAttribute(name, val)` | HTML attribute value |
-| `toHaveClass(str)` | CSS class name |
-| `toHaveCSS(prop, val)` | Computed CSS value |
-| `toHaveId(str)` | Element id attribute |
-| `toHaveCount(n)` | Number of matching elements |
-| `toHaveURL(url)` | Current page URL |
-| `toHaveTitle(str)` | Page document title |
-| `toHaveScreenshot(name)` | Visual regression snapshot |
-| `toBeOK()` | Response status is 2xx |
+```
+Error: Checkout button should be visible in the cart page header
+
+Call log:
+  - expect.toBeVisible with timeout 5000ms
+  - waiting for getByRole('button', { name: 'Checkout' })
+```
+
+## Polling with expect.poll
+
+For conditions that aren't tied to a DOM element, use `expect.poll`:
+
+```typescript
+// Poll a function until it returns a truthy value
+await expect
+  .poll(
+    async () => {
+      const response = await page.request.get('/api/job/status');
+      const body = await response.json();
+      return body.status;
+    },
+    {
+      message: 'Job should complete within 60 seconds',
+      timeout: 60000,
+      intervals: [1000, 2000, 5000], // custom polling intervals
+    },
+  )
+  .toBe('completed');
+```

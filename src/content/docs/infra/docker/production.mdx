@@ -1,475 +1,483 @@
 ---
 title: Docker in Production
-description: Production-grade Docker — Dockerfile hardening, resource limits, logging drivers, restart policies, secrets management, health checks, container security, and graceful shutdown.
+description: Harden Docker containers for production — resource limits, logging, secrets, health checks, security profiles, and graceful shutdown.
 sidebar:
   order: 8
 tags: [devops, docker]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
 # Docker in Production
 
-Running Docker containers in production requires a mindset shift from local development. This guide covers the practices, configurations, and tooling needed to run containers reliably, securely, and observably in production environments.
-
----
+Running Docker in production requires a different mindset from development. This guide covers the hardening, observability, and reliability practices that separate production-ready containers from development ones.
 
 ## Production Dockerfile Best Practices
-
-A production-ready Dockerfile follows these principles:
 
 ```dockerfile
 # syntax=docker/dockerfile:1
 
-# 1. Pin to a specific digest, not just a tag
+# ── 1. Pin base image to digest (not just tag) ─────────────────
+FROM node:20.11.1-alpine3.19@sha256:a1b2c3...
+# Falls back to tag pinning if digest not feasible:
 FROM node:20.11.1-alpine3.19
 
-# 2. Apply meaningful labels (OCI standard)
-LABEL org.opencontainers.image.title="My API"
-LABEL org.opencontainers.image.description="Production API server"
-LABEL org.opencontainers.image.version="${APP_VERSION}"
-LABEL org.opencontainers.image.vendor="My Company"
-LABEL org.opencontainers.image.licenses="MIT"
+# ── 2. Set build metadata ──────────────────────────────────────
+LABEL org.opencontainers.image.source="https://github.com/org/repo"
+LABEL org.opencontainers.image.revision="${GIT_SHA}"
+LABEL org.opencontainers.image.version="${VERSION}"
 
-# 3. Set working directory
+# ── 3. Non-root user ───────────────────────────────────────────
+RUN addgroup --system --gid 1001 appgroup && \
+    adduser  --system --uid 1001 --ingroup appgroup --no-create-home appuser
+
 WORKDIR /app
 
-# 4. Install dependencies first (better caching)
-COPY package*.json ./
+# ── 4. Install deps with reproducible lockfile ─────────────────
+COPY package.json package-lock.json ./
 RUN npm ci --only=production && npm cache clean --force
 
-# 5. Copy application code
-COPY --chown=node:node . .
+# ── 5. Copy application files with correct ownership ──────────
+COPY --chown=appuser:appgroup . .
 
-# 6. Drop to non-root user
-USER node
+# ── 6. Switch to non-root ──────────────────────────────────────
+USER appuser
 
-# 7. Expose only necessary port
-EXPOSE 3000
+# ── 7. No secrets in ENV / COPY ────────────────────────────────
+# Use runtime env vars, Docker secrets, or secret mounts
 
-# 8. Set HEALTHCHECK
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+# ── 8. Health check ────────────────────────────────────────────
+HEALTHCHECK --interval=30s \
+            --timeout=10s \
+            --start-period=60s \
+            --retries=3 \
   CMD wget -qO- http://localhost:3000/health || exit 1
 
-# 9. Use exec form for proper signal handling
-# 10. Use tini for PID 1 (included in node:alpine as 'tini')
+# ── 9. Signal handling (tini as PID 1) ─────────────────────────
+RUN apk add --no-cache tini
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node", "server.js"]
+
+# ── 10. Minimal, explicit startup command ──────────────────────
+CMD ["node", "dist/server.js"]
+
+# ── 11. Correct stop signal ────────────────────────────────────
+STOPSIGNAL SIGTERM
 ```
-
-**Checklist:**
-- [ ] Pinned base image tag (not `:latest`)
-- [ ] `LABEL` with OCI metadata
-- [ ] Non-root `USER`
-- [ ] `HEALTHCHECK` defined
-- [ ] Exec form `ENTRYPOINT`/`CMD` (not shell form)
-- [ ] No secrets in any layer
-- [ ] Minimal base image (alpine/slim/distroless)
-- [ ] Multi-stage build (dev deps excluded)
-- [ ] `.dockerignore` excludes `.git`, `node_modules`, etc.
-
----
 
 ## Resource Limits
 
-Without resource limits, a single runaway container can consume all host resources and bring down other workloads.
+Without resource limits, a runaway container can starve other containers and destabilise the host.
 
 ```bash
-# Memory limit: container is OOM-killed if it exceeds this
-docker run -d --memory="512m" nginx
+# Memory limit (container OOM-killed if exceeded)
+docker run -d --memory="512m" myapp
 
-# Memory + swap (total memory including swap)
-docker run -d --memory="512m" --memory-swap="1g" nginx
+# Soft memory limit (container can exceed this but prefers to stay below)
+docker run -d --memory="512m" --memory-reservation="256m" myapp
 
-# CPU limit (fractional cores)
-docker run -d --cpus="1.5" nginx
+# CPU limit (1.5 = 1.5 CPU cores)
+docker run -d --cpus="1.5" myapp
 
-# CPU shares (relative weight, default 1024)
-docker run -d --cpu-shares=512 low-priority-app
+# CPU shares (relative weight — default 1024)
+docker run -d --cpu-shares=512 myapp       # half the weight of default
 
-# CPU pinning (bind to specific CPUs)
-docker run -d --cpuset-cpus="0,1" nginx
+# PID limit (prevent fork bombs)
+docker run -d --pids-limit=100 myapp
 
-# Process limit (prevent fork bombs)
-docker run -d --pids-limit=100 nginx
+# Swap (set equal to memory to disable swap)
+docker run -d --memory="512m" --memory-swap="512m" myapp
 
-# Block I/O throttle
-docker run -d --device-write-bps /dev/sda:10mb nginx
-docker run -d --device-read-bps  /dev/sda:10mb nginx
+# OOM kill score adjustment
+docker run -d --oom-score-adj=200 myapp   # more likely to be killed under pressure
+
+# Combined limits
+docker run -d \
+  --memory="512m" \
+  --memory-reservation="256m" \
+  --cpus="1.0" \
+  --pids-limit=200 \
+  --restart unless-stopped \
+  myapp:latest
 ```
 
 ```yaml
-# In docker-compose / Swarm deploy
+# Compose with resource limits
 services:
-  api:
-    image: my-api
+  app:
+    image: myapp:latest
     deploy:
       resources:
         limits:
-          cpus: "0.5"
+          cpus: '1.0'
           memory: 512M
-          pids: 100
+          pids: 200
         reservations:
-          cpus: "0.25"
-          memory: 256M
+          cpus: '0.25'
+          memory: 128M
 ```
 
-:::tip[Set both limits and reservations]
-`limits` = maximum allowed, `reservations` = guaranteed minimum. Setting reservations helps the scheduler place containers on nodes with enough resources and prevents over-subscription.
+:::tip[Memory OOM Kills]
+When a container exceeds its memory limit, the Linux kernel OOM killer terminates the container process. Set up proper alerting on OOM kills — they're often silent. Check with `docker inspect --format '{{.State.OOMKilled}}'` or `docker stats`.
 :::
-
----
 
 ## Logging Drivers
 
-Docker supports multiple logging drivers. The default `json-file` is fine for development; production deployments often route to a centralized logging system.
-
-### json-file (Default)
-
 ```bash
-# Run with size-limited json-file logging
+# Default: json-file (stored on host disk)
 docker run -d \
   --log-driver json-file \
   --log-opt max-size=10m \
-  --log-opt max-file=3 \
-  nginx
+  --log-opt max-file=5 \
+  myapp
+
+# Syslog
+docker run -d \
+  --log-driver syslog \
+  --log-opt syslog-address=tcp://syslog-server:514 \
+  --log-opt tag="myapp-{{.Name}}" \
+  myapp
+
+# Fluentd / Fluent Bit
+docker run -d \
+  --log-driver fluentd \
+  --log-opt fluentd-address=localhost:24224 \
+  --log-opt tag="docker.{{.Name}}" \
+  myapp
+
+# AWS CloudWatch
+docker run -d \
+  --log-driver=awslogs \
+  --log-opt awslogs-region=us-east-1 \
+  --log-opt awslogs-group=/myapp/prod \
+  --log-opt awslogs-stream=app-container \
+  --log-opt awslogs-create-group=true \
+  myapp
+
+# Splunk
+docker run -d \
+  --log-driver=splunk \
+  --log-opt splunk-token=YOUR-TOKEN \
+  --log-opt splunk-url=https://splunk.example.com:8088 \
+  myapp
+
+# none — disable logging (for high-throughput services that self-log)
+docker run -d --log-driver none myapp
 ```
 
+### Configure Daemon-Wide Logging
+
 ```json
-// /etc/docker/daemon.json — set defaults for all containers
+// /etc/docker/daemon.json
 {
   "log-driver": "json-file",
   "log-opts": {
     "max-size": "10m",
-    "max-file": "3",
-    "compress": "true"
+    "max-file": "5",
+    "compress": "true",
+    "labels": "production_status",
+    "env": "os,customer"
   }
 }
 ```
 
-### Centralized Logging
-
-<Tabs>
-  <TabItem label="syslog">
-    ```bash
-    docker run -d \
-      --log-driver syslog \
-      --log-opt syslog-address=udp://log-server:514 \
-      --log-opt syslog-facility=daemon \
-      --log-opt tag="{{.Name}}" \
-      nginx
-    ```
-  </TabItem>
-  <TabItem label="fluentd">
-    ```bash
-    docker run -d \
-      --log-driver fluentd \
-      --log-opt fluentd-address=localhost:24224 \
-      --log-opt tag="docker.{{.Name}}" \
-      nginx
-    ```
-  </TabItem>
-  <TabItem label="AWS CloudWatch">
-    ```bash
-    docker run -d \
-      --log-driver awslogs \
-      --log-opt awslogs-region=us-east-1 \
-      --log-opt awslogs-group=/myapp/production \
-      --log-opt awslogs-stream="{{.Name}}" \
-      --log-opt awslogs-create-group=true \
-      nginx
-    ```
-  </TabItem>
-  <TabItem label="journald">
-    ```bash
-    # Route to systemd journal (Linux only)
-    docker run -d \
-      --log-driver journald \
-      --log-opt tag="{{.Name}}/{{.ID}}" \
-      nginx
-
-    # Read logs
-    journalctl CONTAINER_NAME=my-container
-    ```
-  </TabItem>
-</Tabs>
-
-:::caution[Logging driver and `docker logs`]
-When using drivers other than `json-file` or `journald`, the `docker logs` command may not work or return an error. Logs are only available through the external system (CloudWatch, fluentd, etc.).
-:::
-
----
+```bash
+sudo systemctl reload docker
+```
 
 ## Restart Policies
 
 ```bash
-# Do not restart (default)
-docker run --restart=no nginx
+# No restart (default)
+docker run --restart no myapp
 
-# Always restart (even on manual stop — use unless-stopped instead)
-docker run --restart=always nginx
+# Always restart (even on explicit docker stop — starts on daemon restart)
+docker run --restart always myapp
 
-# Restart unless explicitly stopped
-docker run --restart=unless-stopped nginx
+# Unless explicitly stopped (best for long-running services)
+docker run --restart unless-stopped myapp
 
-# Restart on failure, with a retry limit
-docker run --restart=on-failure:3 nginx
+# On failure only, max 3 retries
+docker run --restart on-failure:3 myapp
 
-# Check restart policy
-docker inspect --format '{{.HostConfig.RestartPolicy}}' my-container
+# Production recommendation
+docker run -d \
+  --restart unless-stopped \
+  --name myapp \
+  myapp:latest
 ```
 
-| Policy | Behavior |
-|---|---|
-| `no` | Never restart (default) |
-| `always` | Always restart, even after `docker stop` + daemon restart |
-| `unless-stopped` | Restart unless manually stopped; persists across daemon restarts |
-| `on-failure[:N]` | Restart only on non-zero exit; optional max retry count |
+```yaml
+# Compose restart policies
+services:
+  app:
+    restart: unless-stopped # recommended for services
 
-**Use `unless-stopped`** for most production services. Use `on-failure:3` for tasks that should retry a limited number of times.
+  worker:
+    restart: on-failure # restart on crash, not on explicit stop
 
----
+  migration:
+    restart: 'no' # run once and stop
+```
 
-## Secrets Management
+## Health Checks
 
-Never bake secrets into images or environment variables that appear in `docker inspect`.
+### Dockerfile HEALTHCHECK
 
-### Docker Secrets (Swarm)
+```dockerfile
+# HTTP endpoint health check
+HEALTHCHECK --interval=30s \
+            --timeout=10s \
+            --start-period=60s \
+            --retries=3 \
+  CMD curl -f http://localhost:3000/health || exit 1
+
+# Using wget (smaller footprint than curl)
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
+
+# TCP check (no HTTP required)
+HEALTHCHECK --interval=15s --timeout=5s \
+  CMD nc -z localhost 5432 || exit 1
+
+# Native application health check (no external tools)
+HEALTHCHECK --interval=30s --timeout=10s \
+  CMD node -e "require('http').get('http://localhost:3000/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+
+# Disable inherited health check
+HEALTHCHECK NONE
+```
+
+### Compose Health Check Override
+
+```yaml
+services:
+  app:
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:3000/health']
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+  postgres:
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+```
 
 ```bash
-# Create a secret from a file
-echo "supersecretpassword" | docker secret create db_password -
+# Check container health status
+docker inspect --format '{{.State.Health.Status}}' myapp
+# starting | healthy | unhealthy
 
-# Create from stdin
-docker secret create ssl_cert ./ssl.crt
+# View health check history
+docker inspect --format '{{json .State.Health}}' myapp | python3 -m json.tool
 
-# List secrets
-docker secret ls
-
-# Use in a Swarm service
-docker service create \
-  --name api \
-  --secret db_password \
-  --secret ssl_cert \
-  my-api
-# Secrets are mounted at /run/secrets/<name>
+# Wait for healthy status
+until [ "$(docker inspect --format '{{.State.Health.Status}}' myapp)" = "healthy" ]; do
+  echo "Waiting for container to be healthy..."
+  sleep 5
+done
 ```
+
+## Docker Secrets
 
 ### Compose Secrets
 
 ```yaml
 # compose.yml
 services:
-  api:
+  app:
+    image: myapp:latest
     secrets:
       - db_password
       - api_key
     environment:
-      # Read from file mounted by secrets
       DB_PASSWORD_FILE: /run/secrets/db_password
-
-secrets:
-  db_password:
-    file: ./secrets/db_password.txt    # From file
-
-  api_key:
-    environment: API_KEY               # From host environment variable
-```
-
-```bash
-# In application code, read the secret from file:
-```
-
-```javascript
-const fs = require('fs');
-const dbPassword = fs.readFileSync('/run/secrets/db_password', 'utf8').trim();
-```
-
----
-
-## Health Checks
-
-Health checks allow Docker to determine if your application is actually healthy (not just running).
-
-### In Dockerfile
-
-```dockerfile
-# HTTP health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-  CMD curl -f http://localhost:3000/health || exit 1
-
-# TCP check (no curl available)
-HEALTHCHECK --interval=30s --timeout=5s \
-  CMD nc -z localhost 3000 || exit 1
-
-# Application-native check
-HEALTHCHECK --interval=30s --timeout=10s \
-  CMD node healthcheck.js || exit 1
-
-# Disable inherited healthcheck from base image
-HEALTHCHECK NONE
-```
-
-### In docker-compose
-
-```yaml
-services:
-  api:
-    image: my-api
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s   # Grace period before first check; failures don't count
+      API_KEY_FILE: /run/secrets/api_key
 
   db:
     image: postgres:16
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d mydb"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
+    secrets:
+      - db_password
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt # file on host
+
+  api_key:
+    environment: API_KEY # from environment variable
 ```
 
-### Health Check States
-
 ```bash
-# Inspect health status
-docker inspect --format '{{.State.Health.Status}}' my-container
-# starting | healthy | unhealthy | none
+# Create secrets directory (never commit to git)
+mkdir -p secrets
+echo "supersecretpassword" > secrets/db_password.txt
+chmod 600 secrets/db_password.txt
+echo "secrets/" >> .gitignore
 
-# View health check log
-docker inspect --format '{{json .State.Health}}' my-container | jq
+# Start
+docker compose up -d
 
-# Watch health status
-watch docker inspect --format '{{.State.Health.Status}}' my-container
+# In the container, secrets are available at /run/secrets/
+docker exec app cat /run/secrets/db_password
 ```
 
-:::tip[Health check endpoint design]
-Your `/health` endpoint should:
-- Return `200 OK` if fully ready to serve traffic
-- Return `503 Service Unavailable` if degraded
-- Check actual dependencies (DB connection, cache, etc.)
-- Respond in &lt;2 seconds (health check timeout is typically 5–10s)
-- Not require authentication
-:::
+### Reading Secrets in Application Code
 
----
+```javascript
+// Node.js — read secret from file
+const fs = require('fs');
 
-## Container Security
+function getSecret(secretName) {
+  const secretFile = process.env[`${secretName}_FILE`];
+  if (secretFile) {
+    return fs.readFileSync(secretFile, 'utf8').trim();
+  }
+  return process.env[secretName]; // fallback to env var
+}
 
-### Linux Capabilities
+const dbPassword = getSecret('DB_PASSWORD');
+```
 
-Containers run with a default set of Linux capabilities. For maximum security, drop all and add only what's needed.
+```python
+# Python
+import os
+
+def get_secret(name: str) -> str:
+    file_var = os.environ.get(f"{name}_FILE")
+    if file_var:
+        with open(file_var) as f:
+            return f.read().strip()
+    return os.environ[name]
+
+db_password = get_secret("DB_PASSWORD")
+```
+
+## Container Security Hardening
 
 ```bash
-# Drop all capabilities, add only what's needed
+# Drop all Linux capabilities, add back only what's needed
 docker run -d \
   --cap-drop ALL \
-  --cap-add NET_BIND_SERVICE \   # Bind to ports < 1024
-  --cap-add CHOWN \              # Change file ownership
-  nginx
+  --cap-add NET_BIND_SERVICE \
+  --cap-add CHOWN \
+  myapp
 
-# Common capabilities to add selectively:
-# NET_BIND_SERVICE  — bind to privileged ports
-# CHOWN             — change file ownership
-# SETUID/SETGID     — change process UID/GID
-# NET_RAW           — raw sockets (ping)
-```
-
-### Read-Only Root Filesystem
-
-```bash
-# Make root filesystem read-only (prevent writes outside volumes/tmpfs)
+# Read-only root filesystem
 docker run -d \
   --read-only \
-  --tmpfs /tmp \
-  --tmpfs /var/run \
-  -v app-data:/app/data \
-  my-api
-```
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --tmpfs /var/cache:rw,noexec \
+  myapp
 
-### Security Options
-
-```bash
 # Prevent privilege escalation
 docker run -d \
-  --security-opt no-new-privileges \
-  nginx
+  --security-opt no-new-privileges:true \
+  myapp
 
-# Apply seccomp profile (restrict syscalls)
+# Custom seccomp profile
 docker run -d \
-  --security-opt seccomp=/path/to/seccomp.json \
-  nginx
-
-# Disable seccomp (not recommended for production)
-docker run -d \
-  --security-opt seccomp=unconfined \
-  nginx
+  --security-opt seccomp=/path/to/custom-seccomp.json \
+  myapp
 
 # AppArmor profile
 docker run -d \
-  --security-opt apparmor=docker-nginx \
-  nginx
+  --security-opt apparmor=docker-default \
+  myapp
 
-# User namespace remapping (run as root inside but non-root on host)
-# Configure in /etc/docker/daemon.json:
-# { "userns-remap": "default" }
+# Combine all hardening options
+docker run -d \
+  --name myapp \
+  --cap-drop ALL \
+  --cap-add NET_BIND_SERVICE \
+  --read-only \
+  --tmpfs /tmp \
+  --security-opt no-new-privileges:true \
+  --security-opt seccomp=/etc/docker/seccomp-default.json \
+  --user 1001:1001 \
+  --memory="512m" \
+  --cpus="1.0" \
+  --pids-limit=200 \
+  --restart unless-stopped \
+  myapp:latest
 ```
 
-### Full Security Hardening Example
-
 ```yaml
-# compose.yml production security settings
+# Compose security options
 services:
-  api:
-    image: my-api:1.0.0
-    read_only: true
-    tmpfs:
-      - /tmp
-      - /app/tmp
-    security_opt:
-      - no-new-privileges:true
-      - seccomp:./seccomp/default.json
+  app:
     cap_drop:
       - ALL
     cap_add:
       - NET_BIND_SERVICE
-    user: "1001:1001"
-    volumes:
-      - app-data:/app/data     # Only writable path
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=65536k
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:/etc/docker/seccomp-default.json
+    user: '1001:1001'
 ```
 
----
+### Linux Capabilities Reference
 
-## Monitoring with cAdvisor and Prometheus
+| Capability          | Purpose                       | Needed For                 |
+| ------------------- | ----------------------------- | -------------------------- |
+| `NET_BIND_SERVICE`  | Bind to ports < 1024          | Web servers on port 80/443 |
+| `CHOWN`             | Change file ownership         | App setup scripts          |
+| `DAC_OVERRIDE`      | Bypass file permission checks | Rarely needed              |
+| `SETUID` / `SETGID` | Change user/group ID          | Privilege dropping         |
+| `SYS_PTRACE`        | Process tracing               | Debuggers, profilers       |
+| `NET_ADMIN`         | Network configuration         | VPN, custom routing        |
+
+:::caution[Read-Only Filesystem]
+When using `--read-only`, your application must not write to the root filesystem. Use `--tmpfs` for directories that need temporary writes (`/tmp`, `/var/run`, `/var/cache`). Any writes to other paths will fail with "Read-only file system".
+:::
+
+## Monitoring
+
+### cAdvisor
 
 ```yaml
-# compose.yml monitoring stack
+# docker-compose.monitoring.yml
 services:
   cadvisor:
-    image: gcr.io/cadvisor/cadvisor:latest
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
     ports:
-      - "8080:8080"
+      - '8080:8080'
     volumes:
       - /:/rootfs:ro
-      - /var/run:/var/run:rw
+      - /var/run:/var/run:ro
       - /sys:/sys:ro
-      - /var/lib/docker:/var/lib/docker:ro
-    restart: unless-stopped
-
-  prometheus:
-    image: prom/prometheus:latest
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    devices:
+      - /dev/kmsg
+    privileged: true
     restart: unless-stopped
 ```
 
-### Docker Daemon Metrics
+### Prometheus Docker Metrics
 
 ```json
 // /etc/docker/daemon.json
@@ -480,93 +488,135 @@ services:
 ```
 
 ```yaml
-# prometheus.yml
+# Prometheus scrape config
 scrape_configs:
   - job_name: docker
     static_configs:
-      - targets: ["localhost:9323"]
+      - targets: ['localhost:9323']
+
   - job_name: cadvisor
     static_configs:
-      - targets: ["cadvisor:8080"]
+      - targets: ['cadvisor:8080']
 ```
 
----
+### docker stats
+
+```bash
+# Live stats for all containers
+docker stats
+
+# Stats snapshot (non-streaming)
+docker stats --no-stream
+
+# Custom format
+docker stats --no-stream \
+  --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}"
+
+# Watch specific containers
+docker stats myapp postgres redis
+```
 
 ## Graceful Shutdown
 
-Your application must handle `SIGTERM` gracefully, completing in-flight requests before exiting.
-
-```javascript
-// Node.js graceful shutdown
-const server = app.listen(3000);
-
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down gracefully');
-  server.close(() => {
-    console.log('HTTP server closed');
-    // Close DB connections, flush buffers, etc.
-    process.exit(0);
-  });
-
-  // Force exit after 30 seconds
-  setTimeout(() => {
-    console.error('Forced shutdown after timeout');
-    process.exit(1);
-  }, 30000);
-});
-```
-
-```python
-# Python graceful shutdown (FastAPI)
-import signal, sys
-
-def handle_sigterm(*args):
-    print("SIGTERM received, shutting down...")
-    sys.exit(0)
-
-signal.signal(signal.SIGTERM, handle_sigterm)
-```
-
-### Docker Stop Grace Period
+Containers receive `SIGTERM` when stopped. Your application must handle it properly to avoid data loss or dropped connections.
 
 ```bash
-# docker stop sends SIGTERM, waits 10 seconds, then sends SIGKILL
-docker stop my-container                    # 10s grace period (default)
-docker stop --time 30 my-container          # 30s grace period
+# Docker stop — sends SIGTERM, waits (default 10s), then SIGKILL
+docker stop myapp
+
+# Custom grace period (seconds)
+docker stop --time 30 myapp
+
+# Compose stop grace period
 ```
 
 ```yaml
-# In compose.yml
 services:
-  api:
-    stop_grace_period: 30s        # Override default 10s
-    stop_signal: SIGTERM          # Signal to send (default: SIGTERM)
+  app:
+    stop_grace_period: 30s # how long before SIGKILL
+    stop_signal: SIGTERM
 ```
 
-:::caution[Shell form and SIGTERM]
-If your Dockerfile uses shell form `CMD node server.js`, the process runs as a child of `/bin/sh`. Docker's SIGTERM goes to `sh`, which may not forward it to your app. Always use **exec form** `CMD ["node", "server.js"]` so your app is PID 1 and receives signals directly.
-:::
+### Node.js Graceful Shutdown
 
----
+```javascript
+const server = app.listen(3000);
+
+function gracefulShutdown(signal) {
+  console.log(`Received ${signal}, shutting down gracefully`);
+
+  server.close(async () => {
+    console.log('HTTP server closed');
+    await db.disconnect();
+    await redis.quit();
+    console.log('All connections closed. Exiting.');
+    process.exit(0);
+  });
+
+  // Force exit after grace period
+  setTimeout(() => {
+    console.error('Graceful shutdown timed out, forcing exit');
+    process.exit(1);
+  }, 25000);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+```
+
+### Python Graceful Shutdown (FastAPI/uvicorn)
+
+```python
+import signal
+import sys
+import asyncio
+
+async def shutdown(loop, signal_type=None):
+    if signal_type:
+        print(f"Received exit signal {signal_type.name}")
+
+    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    for task in tasks:
+        task.cancel()
+
+    await asyncio.gather(*tasks, return_exceptions=True)
+    loop.stop()
+
+loop = asyncio.get_event_loop()
+for sig in (signal.SIGTERM, signal.SIGINT):
+    loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(shutdown(loop, s)))
+```
 
 ## Production Checklist
 
-| Category | Check |
-|---|---|
-| **Image** | Pinned base image tag |
-| **Image** | Non-root user |
-| **Image** | Multi-stage build (no dev deps in runtime) |
-| **Image** | Minimal base (alpine/slim/distroless) |
-| **Image** | No secrets in layers or environment |
-| **Runtime** | Memory and CPU limits set |
-| **Runtime** | `--restart unless-stopped` |
-| **Runtime** | `--read-only` with tmpfs for writable paths |
-| **Runtime** | `--cap-drop ALL` + only needed caps |
-| **Runtime** | `--security-opt no-new-privileges` |
-| **Logging** | Log driver with rotation (`max-size`, `max-file`) |
-| **Health** | `HEALTHCHECK` in Dockerfile |
-| **Health** | `/health` endpoint in application |
-| **Signals** | App handles SIGTERM gracefully |
-| **Signals** | Exec form CMD/ENTRYPOINT (not shell form) |
-| **Secrets** | Secrets via Docker secrets or env files, not image |
-| **Monitoring** | cAdvisor + Prometheus metrics |
+```bash
+# Before deploying to production, verify:
+
+# 1. Image is pinned to a specific tag or digest
+docker inspect myapp:latest | grep -i "repodigest"
+
+# 2. No root process
+docker inspect --format '{{.Config.User}}' myapp:latest
+
+# 3. Health check defined
+docker inspect --format '{{.Config.Healthcheck}}' myapp:latest
+
+# 4. Resource limits set
+docker inspect --format '{{.HostConfig.Memory}}' mycontainer
+
+# 5. Restart policy set
+docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' mycontainer
+
+# 6. No capabilities beyond necessary
+docker inspect --format '{{.HostConfig.CapAdd}}' mycontainer
+
+# 7. Logging configured
+docker inspect --format '{{.HostConfig.LogConfig}}' mycontainer
+
+# 8. No secrets in env vars (or image layers)
+docker history myapp:latest | grep -i "password\|secret\|token\|key"
+```
+
+:::tip[Container Security Scanning]
+Add image scanning to your CI/CD pipeline with Trivy or Docker Scout. Fail builds on HIGH/CRITICAL CVEs before they reach production. See the [Registry](/infra/docker/registry) page for scanning setup.
+:::

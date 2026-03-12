@@ -1,103 +1,129 @@
 ---
 title: Getting Started with Kubernetes
-description: Install kubectl, set up a local cluster with minikube/kind/k3d, master essential commands, and deploy your first application.
+description: Install kubectl, set up a local cluster, master essential commands, and deploy your first application to Kubernetes.
 sidebar:
   order: 2
 tags: [devops, kubernetes]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
 # Getting Started with Kubernetes
 
-This guide covers installing `kubectl`, choosing a local cluster tool, and mastering the commands you'll use every day when working with Kubernetes.
-
----
+This guide walks you through installing kubectl, choosing a local Kubernetes cluster, and learning the essential commands for daily Kubernetes work.
 
 ## Installing kubectl
-
-`kubectl` is the Kubernetes command-line tool. It communicates with the cluster API server.
 
 <Tabs>
   <TabItem label="macOS">
     ```bash
-    # Homebrew
+    # Homebrew (recommended)
     brew install kubectl
 
+    # Or download directly
+    curl -LO "https://dl.k8s.io/release/$(curl -s https://dl.k8s.io/release/stable.txt)/bin/darwin/amd64/kubectl"
+    chmod +x kubectl
+    sudo mv kubectl /usr/local/bin/
+
     # Verify
     kubectl version --client
     ```
-  </TabItem>
+
+</TabItem>
   <TabItem label="Linux">
     ```bash
-    # Download latest stable release
-    curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-
-    # Install
+    # Download latest stable
+    curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    chmod +x kubectl
     sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
 
-    # Verify
+    # Or via package manager (Debian/Ubuntu)
+    sudo apt-get install -y apt-transport-https ca-certificates curl
+    curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.30/deb/Release.key \
+      | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.30/deb/ /' \
+      | sudo tee /etc/apt/sources.list.d/kubernetes.list
+    sudo apt-get update && sudo apt-get install -y kubectl
+
     kubectl version --client
     ```
-  </TabItem>
+
+</TabItem>
   <TabItem label="Windows">
     ```powershell
-    # Winget
+    # winget
     winget install Kubernetes.kubectl
 
-    # Or with chocolatey
+    # Chocolatey
     choco install kubernetes-cli
+
+    # Or scoop
+    scoop install kubectl
 
     # Verify
     kubectl version --client
     ```
-  </TabItem>
-</Tabs>
 
----
+</TabItem>
+</Tabs>
 
 ## Local Cluster Options
 
-| Tool | Description | Best For |
-|---|---|---|
-| **minikube** | Full K8s in a VM or container | General learning, addons ecosystem |
-| **kind** | K8s inside Docker containers | CI, multi-node testing |
-| **k3d** | k3s inside Docker | Lightweight, fast startup |
-| **Docker Desktop** | Built-in K8s toggle | macOS/Windows users already using Docker Desktop |
-| **k3s** | Lightweight K8s for Linux | Edge, Raspberry Pi, minimal resource use |
-
 <Tabs>
   <TabItem label="minikube">
+    The original local Kubernetes. Runs a single-node cluster in a VM or container.
+
     ```bash
-    # Install
-    brew install minikube        # macOS
-    # Linux: curl/install from GitHub
+    # Install (macOS)
+    brew install minikube
 
-    # Start a cluster
+    # Start cluster (uses Docker by default)
     minikube start
-    minikube start --cpus 4 --memory 8192 --kubernetes-version v1.29.0
+    minikube start --driver=docker
+    minikube start --cpus=4 --memory=8192 --disk-size=50g
 
-    # Useful commands
-    minikube status
-    minikube dashboard          # Open K8s dashboard in browser
-    minikube addons list
+    # With specific Kubernetes version
+    minikube start --kubernetes-version=v1.30.0
+
+    # Enable addons
     minikube addons enable ingress
     minikube addons enable metrics-server
-    minikube tunnel              # Expose LoadBalancer services locally
+    minikube addons enable dashboard
+
+    # Open dashboard
+    minikube dashboard
+
+    # Tunnel for LoadBalancer services
+    minikube tunnel
+
+    # Stop / delete
     minikube stop
     minikube delete
     ```
-  </TabItem>
+
+</TabItem>
   <TabItem label="kind">
+    Kubernetes IN Docker — runs cluster nodes as Docker containers. Fast to create/destroy, great for CI.
+
     ```bash
     # Install
     brew install kind
 
-    # Create a single-node cluster
+    # Create cluster (single node)
     kind create cluster
 
-    # Create a multi-node cluster
-    cat > kind-config.yaml << 'EOF'
+    # Create with custom name
+    kind create cluster --name dev
+
+    # Multi-node cluster
+    cat > kind-config.yaml <<EOF
     kind: Cluster
     apiVersion: kind.x-k8s.io/v1alpha4
     nodes:
@@ -105,417 +131,454 @@ This guide covers installing `kubectl`, choosing a local cluster tool, and maste
       - role: worker
       - role: worker
     EOF
-    kind create cluster --config kind-config.yaml --name my-cluster
+    kind create cluster --config kind-config.yaml
 
-    # Load a local Docker image into kind
-    kind load docker-image my-app:latest
+    # Load local Docker image into kind
+    kind load docker-image myapp:latest
 
     # List clusters
     kind get clusters
 
     # Delete cluster
-    kind delete cluster --name my-cluster
+    kind delete cluster
+    kind delete cluster --name dev
     ```
-  </TabItem>
+
+</TabItem>
   <TabItem label="k3d">
+    k3s (lightweight K8s) running in Docker. Even lighter than kind, great for local dev.
+
     ```bash
     # Install
     brew install k3d
 
-    # Create a cluster
-    k3d cluster create mycluster
+    # Create cluster
+    k3d cluster create dev
 
-    # Multi-server + agent cluster
-    k3d cluster create mycluster \
-      --servers 1 \
-      --agents 3 \
-      --port "80:80@loadbalancer" \
-      --port "443:443@loadbalancer"
+    # With load balancer and port mapping
+    k3d cluster create dev \
+      --port "8080:80@loadbalancer" \
+      --port "8443:443@loadbalancer"
+
+    # Multi-node
+    k3d cluster create dev --agents 2
 
     # Import local image
-    k3d image import my-app:latest --cluster mycluster
+    k3d image import myapp:latest -c dev
 
     # List clusters
     k3d cluster list
 
-    # Delete
-    k3d cluster delete mycluster
+    # Delete cluster
+    k3d cluster delete dev
     ```
-  </TabItem>
+
+</TabItem>
+  <TabItem label="Docker Desktop">
+    Docker Desktop includes a built-in single-node Kubernetes cluster.
+
+    ```
+    Settings → Kubernetes → Enable Kubernetes → Apply & Restart
+    ```
+
+    ```bash
+    # Switch to Docker Desktop context
+    kubectl config use-context docker-desktop
+
+    # Verify
+    kubectl cluster-info
+    ```
+
+    :::tip[Easiest for Beginners]
+    Docker Desktop Kubernetes is the easiest way to get started if you already use Docker Desktop. No additional installation required.
+    :::
+
+</TabItem>
 </Tabs>
 
----
+## kubectl Configuration (kubeconfig)
 
-## kubectl Configuration
-
-### kubeconfig
-
-kubectl reads cluster configuration from `~/.kube/config` (or `$KUBECONFIG` env var). This file contains cluster endpoints, credentials, and contexts.
+kubectl uses a `~/.kube/config` file to store cluster connection information.
 
 ```bash
-# View your kubeconfig
+# View current kubeconfig
 kubectl config view
 
-# View raw kubeconfig (including credentials)
+# View raw kubeconfig (including secrets)
 kubectl config view --raw
 
-# Use a different kubeconfig file
-kubectl --kubeconfig /path/to/config get pods
-KUBECONFIG=/path/to/config kubectl get pods
-
-# Merge multiple kubeconfigs
-KUBECONFIG=~/.kube/config:~/.kube/cluster2 kubectl config view --merge --flatten > ~/.kube/merged-config
-```
-
-### Contexts
-
-A context binds a cluster, user, and namespace together.
-
-```bash
-# List all contexts
+# List all contexts (cluster + user + namespace combinations)
 kubectl config get-contexts
 
-# Show current context
-kubectl config current-context
-
-# Switch to a different context
+# Switch context
 kubectl config use-context my-cluster
 kubectl config use-context docker-desktop
+kubectl config use-context minikube
 
 # Rename a context
 kubectl config rename-context old-name new-name
 
-# Delete a context
-kubectl config delete-context my-old-cluster
+# Show current context
+kubectl config current-context
 
-# Create/update a context
-kubectl config set-context my-context \
-  --cluster=my-cluster \
-  --user=my-user \
-  --namespace=production
+# Set default namespace for current context
+kubectl config set-context --current --namespace=myapp
+
+# Merge kubeconfig files
+KUBECONFIG=~/.kube/config:~/downloads/new-cluster.yaml \
+  kubectl config view --merge --flatten > ~/.kube/config-merged
+mv ~/.kube/config-merged ~/.kube/config
 ```
 
-:::tip[kubectx and kubens]
-Install [kubectx and kubens](https://github.com/ahmetb/kubectx) for faster context and namespace switching:
+### Multiple Kubeconfig Files
 
 ```bash
-brew install kubectx
+# Set KUBECONFIG env var to load multiple files
+export KUBECONFIG=~/.kube/config:~/.kube/dev-cluster:~/.kube/prod-cluster
 
-kubectx              # List contexts
-kubectx my-cluster   # Switch context
-kubens production    # Switch namespace
-kubens -             # Switch to previous namespace
+# Add to ~/.bashrc or ~/.zshrc
+echo 'export KUBECONFIG=$(ls ~/.kube/configs/* | tr "\n" ":")' >> ~/.zshrc
 ```
-:::
-
----
 
 ## Essential kubectl Commands
 
 ### Getting Resources
 
 ```bash
-# Basic get
+# Get resources (short names work: po, svc, deploy, rs, ns, no, cm, secret, pvc)
 kubectl get pods
-kubectl get deployments
-kubectl get services
-kubectl get nodes
-kubectl get namespaces
-
-# Short aliases work
 kubectl get po
-kubectl get deploy
-kubectl get svc
-kubectl get ns
-kubectl get pvc
-kubectl get cm               # configmaps
-kubectl get secrets
-
-# Get all resource types
-kubectl get all
-
-# Get with namespace
 kubectl get pods -n kube-system
-kubectl get pods --all-namespaces    # or -A
+kubectl get pods --all-namespaces
+kubectl get pods -A             # short for --all-namespaces
 
-# Wide output (shows node, IP, etc.)
+# Wide output (shows node, IP)
 kubectl get pods -o wide
 
-# JSON/YAML output
-kubectl get pod my-pod -o json
-kubectl get pod my-pod -o yaml
+# YAML output
+kubectl get pod mypod -o yaml
+
+# JSON output
+kubectl get pod mypod -o json
 
 # Custom columns
-kubectl get pods -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,IP:.status.podIP'
+kubectl get pods -o custom-columns="NAME:.metadata.name,STATUS:.status.phase,NODE:.spec.nodeName"
 
-# Watch for changes
+# Watch (live updates)
 kubectl get pods -w
 kubectl get pods --watch
+
+# Sort output
+kubectl get pods --sort-by=.metadata.creationTimestamp
+kubectl get pods --sort-by=.status.startTime
+
+# Filter by label
+kubectl get pods -l app=myapp
+kubectl get pods -l 'app=myapp,env=prod'
+kubectl get pods -l 'env in (prod,staging)'
+
+# Get everything in a namespace
+kubectl get all -n myapp
+
+# Get all resource types
+kubectl get all --all-namespaces
 ```
 
 ### Describing Resources
 
 ```bash
-# Detailed description including events
-kubectl describe pod my-pod
-kubectl describe deployment my-deploy
-kubectl describe node my-node
-kubectl describe service my-svc
+# Detailed info including events
+kubectl describe pod mypod
+kubectl describe deployment myapp
+kubectl describe service myapp
+kubectl describe node node-01
+kubectl describe ingress myapp
 
-# Events are at the bottom — most useful for debugging crashes
-kubectl describe pod crashing-pod | tail -30
+# Events are at the bottom — most useful for debugging
+kubectl describe pod mypod | tail -30
 ```
 
-### Applying and Deleting
+### Apply and Delete
 
 ```bash
-# Apply a manifest (create or update — declarative)
-kubectl apply -f deployment.yaml
-kubectl apply -f ./manifests/          # Apply all files in directory
-kubectl apply -f ./manifests/ -R       # Recursive
-kubectl apply -f https://example.com/manifest.yaml
+# Apply (create or update)
+kubectl apply -f manifest.yaml
+kubectl apply -f ./k8s/             # apply all YAML files in directory
+kubectl apply -f https://raw.githubusercontent.com/org/repo/main/k8s/deploy.yaml
+
+# Dry run (validate without applying)
+kubectl apply -f manifest.yaml --dry-run=client
+kubectl apply -f manifest.yaml --dry-run=server   # more thorough — checks against API
+
+# Show diff before applying
+kubectl diff -f manifest.yaml
 
 # Delete resources
-kubectl delete -f deployment.yaml
-kubectl delete pod my-pod
-kubectl delete deployment my-deploy
-kubectl delete service my-svc
+kubectl delete -f manifest.yaml
+kubectl delete pod mypod
+kubectl delete deployment myapp
+kubectl delete pod mypod --grace-period=0 --force   # immediate deletion
 
-# Delete all pods in a namespace (Deployment will recreate them)
-kubectl delete pods --all -n my-namespace
-
-# Force delete (skip graceful termination)
-kubectl delete pod my-pod --grace-period=0 --force
+# Delete all pods matching label
+kubectl delete pods -l app=myapp
 ```
 
 ### Logs
 
 ```bash
-# Get logs from a pod
-kubectl logs my-pod
+# Container logs
+kubectl logs mypod
+kubectl logs mypod -c mycontainer    # specific container in multi-container pod
+kubectl logs -f mypod                # follow (stream)
+kubectl logs --tail=100 mypod        # last 100 lines
+kubectl logs --since=1h mypod        # logs from last hour
+kubectl logs --since-time="2024-01-15T10:00:00Z" mypod
 
-# Follow logs in real time
-kubectl logs -f my-pod
+# Logs for all pods of a deployment
+kubectl logs -l app=myapp --all-containers
 
-# Last 100 lines
-kubectl logs --tail=100 my-pod
-
-# With timestamps
-kubectl logs -t my-pod
-
-# From a specific container in a multi-container pod
-kubectl logs my-pod -c my-container
-
-# From a previous container instance (after crash)
-kubectl logs my-pod --previous
-
-# From all pods matching a selector
-kubectl logs -l app=my-app --all-containers=true
-kubectl logs -l app=my-app -f          # Follow all matched pods
+# Previous container logs (after a crash)
+kubectl logs mypod --previous
+kubectl logs mypod -p
 ```
 
 ### Exec and Port-Forward
 
 ```bash
-# Execute command in a running container
-kubectl exec my-pod -- ls /app
-kubectl exec my-pod -c my-container -- env
+# Open a shell in a pod
+kubectl exec -it mypod -- sh
+kubectl exec -it mypod -- bash
+kubectl exec -it mypod -c mycontainer -- sh
 
-# Interactive shell
-kubectl exec -it my-pod -- bash
-kubectl exec -it my-pod -- sh            # For alpine-based images
+# Run a one-off command
+kubectl exec mypod -- ls /app
+kubectl exec mypod -- env | grep DATABASE
 
-# Port forwarding (local:pod)
-kubectl port-forward pod/my-pod 8080:3000
-kubectl port-forward deployment/my-deploy 8080:3000
-kubectl port-forward service/my-svc 8080:3000
+# Port forward pod to local
+kubectl port-forward pod/mypod 8080:3000
 
-# Bind to all interfaces
-kubectl port-forward --address 0.0.0.0 service/my-svc 8080:3000
+# Port forward service to local
+kubectl port-forward svc/myapp 8080:80
+
+# Port forward deployment (picks a random pod)
+kubectl port-forward deployment/myapp 8080:3000
+
+# Background port-forward
+kubectl port-forward svc/myapp 8080:80 &
 ```
 
----
+### Rollout Management
+
+```bash
+# Check rollout status
+kubectl rollout status deployment/myapp
+
+# View rollout history
+kubectl rollout history deployment/myapp
+kubectl rollout history deployment/myapp --revision=3
+
+# Undo last rollout
+kubectl rollout undo deployment/myapp
+
+# Undo to specific revision
+kubectl rollout undo deployment/myapp --to-revision=2
+
+# Pause a rollout (during canary testing)
+kubectl rollout pause deployment/myapp
+
+# Resume a paused rollout
+kubectl rollout resume deployment/myapp
+
+# Restart all pods in a deployment (rolling)
+kubectl rollout restart deployment/myapp
+```
+
+### Scaling
+
+```bash
+# Scale a deployment
+kubectl scale deployment myapp --replicas=5
+kubectl scale deployment myapp --replicas=0   # scale to zero
+
+# Scale multiple deployments
+kubectl scale deployment frontend backend --replicas=3
+
+# Conditional scale (only if current count matches)
+kubectl scale deployment myapp --current-replicas=3 --replicas=5
+```
+
+### Resource Usage (requires metrics-server)
+
+```bash
+# Node resource usage
+kubectl top nodes
+kubectl top node node-01
+
+# Pod resource usage
+kubectl top pods
+kubectl top pods -n myapp
+kubectl top pods --sort-by=cpu
+kubectl top pods --sort-by=memory
+```
 
 ## Namespaces
-
-Namespaces provide virtual clusters within a physical cluster.
 
 ```bash
 # List namespaces
 kubectl get namespaces
 kubectl get ns
 
+# Default namespaces
+# default — where resources go when no namespace is specified
+# kube-system — K8s system components
+# kube-public — publicly readable
+# kube-node-lease — node heartbeat leases
+
 # Create namespace
-kubectl create namespace my-namespace
+kubectl create namespace myapp
+# Or declaratively:
 kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: my-namespace
+  name: myapp
   labels:
-    env: staging
+    app.kubernetes.io/part-of: myplatform
 EOF
 
-# Delete namespace (deletes ALL resources in it!)
-kubectl delete namespace my-namespace
+# Run commands in a namespace
+kubectl get pods -n myapp
+kubectl apply -f manifest.yaml -n myapp
 
 # Set default namespace for current context
-kubectl config set-context --current --namespace=my-namespace
+kubectl config set-context --current --namespace=myapp
 
-# Always specify namespace explicitly in production
-kubectl get pods -n production
-kubectl apply -f manifest.yaml -n production
+# Delete namespace (and ALL resources within it)
+kubectl delete namespace myapp
 ```
 
----
+## Imperative vs Declarative
 
-## Deploying Your First Application
+<Tabs>
+  <TabItem label="Imperative (Quick)">
+    Good for ad-hoc operations, troubleshooting, and getting started quickly.
 
-<Steps>
-1. **Imperative deployment (quick, not recommended for production)**
+    ```bash
+    # Create deployment
+    kubectl create deployment myapp --image=nginx:alpine --replicas=3
 
-   ```bash
-   kubectl create deployment hello \
-     --image=nginx:alpine \
-     --replicas=2
+    # Expose deployment as a service
+    kubectl expose deployment myapp --port=80 --target-port=80 --type=ClusterIP
 
-   kubectl expose deployment hello \
-     --type=LoadBalancer \
-     --port=80
-   ```
+    # Create a ConfigMap
+    kubectl create configmap my-config --from-literal=KEY=value --from-file=config.properties
 
-2. **Declarative deployment (recommended)**
+    # Create a Secret
+    kubectl create secret generic my-secret --from-literal=password=mysecret
 
-   ```yaml
-   # hello-app.yaml
-   apiVersion: apps/v1
-   kind: Deployment
-   metadata:
-     name: hello
-     namespace: default
-   spec:
-     replicas: 2
-     selector:
-       matchLabels:
-         app: hello
-     template:
-       metadata:
-         labels:
-           app: hello
-       spec:
-         containers:
-           - name: nginx
-             image: nginx:alpine
-             ports:
-               - containerPort: 80
-   ---
-   apiVersion: v1
-   kind: Service
-   metadata:
-     name: hello
-   spec:
-     selector:
-       app: hello
-     type: LoadBalancer
-     ports:
-       - port: 80
-         targetPort: 80
-   ```
+    # Run a temporary pod
+    kubectl run tmp-shell --image=busybox --rm -it --restart=Never -- sh
 
-   ```bash
-   kubectl apply -f hello-app.yaml
-   kubectl get pods -w                # Watch pods start
-   kubectl get service hello          # Check external IP
-   ```
+    # Quick debug pod
+    kubectl run debug --image=nicolaka/netshoot --rm -it --restart=Never -- bash
+    ```
 
-3. **Access the application**
+</TabItem>
+  <TabItem label="Declarative (Production)">
+    Preferred for anything that should be version-controlled and repeatable.
 
-   ```bash
-   # On cloud (wait for EXTERNAL-IP)
-   kubectl get service hello
+    ```yaml
+    # deployment.yaml
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: myapp
+      namespace: production
+      labels:
+        app: myapp
+    spec:
+      replicas: 3
+      selector:
+        matchLabels:
+          app: myapp
+      template:
+        metadata:
+          labels:
+            app: myapp
+        spec:
+          containers:
+            - name: myapp
+              image: myapp:v1.2.3
+              ports:
+                - containerPort: 3000
+    ```
 
-   # On minikube
-   minikube service hello --url
+    ```bash
+    kubectl apply -f deployment.yaml
+    kubectl apply -f ./k8s/          # all files in directory
+    ```
 
-   # Port-forward for local access
-   kubectl port-forward service/hello 8080:80
-   # Open http://localhost:8080
-   ```
-</Steps>
+</TabItem>
+</Tabs>
 
----
-
-## Dry Run and Diff
+## Useful Tools and Aliases
 
 ```bash
-# Preview what would be created (client-side)
-kubectl apply -f manifest.yaml --dry-run=client
+# Aliases — add to ~/.bashrc or ~/.zshrc
+alias k='kubectl'
+alias kg='kubectl get'
+alias kd='kubectl describe'
+alias kl='kubectl logs'
+alias ke='kubectl exec -it'
+alias kaf='kubectl apply -f'
+alias kdelf='kubectl delete -f'
+alias kns='kubectl config set-context --current --namespace'
 
-# Validate against the server without applying (server-side dry run)
-kubectl apply -f manifest.yaml --dry-run=server
+# kubectx / kubens — fast context and namespace switching
+brew install kubectx
 
-# Diff current live resources vs manifest
-kubectl diff -f manifest.yaml
+kubectx                    # list contexts
+kubectx prod               # switch to prod context
+kubens myapp               # switch to myapp namespace
+
+# k9s — terminal UI for Kubernetes
+brew install k9s
+k9s                        # opens TUI; navigate with arrows, : for commands
+
+# stern — multi-pod log tailing
+brew install stern
+stern myapp                # tail logs for all pods matching "myapp"
+stern -n myapp .           # all pods in namespace
 ```
 
----
-
-## Useful Utilities
+## kubectl explain
 
 ```bash
-# Explain any resource/field
+# Explain any resource type or field
 kubectl explain pod
 kubectl explain pod.spec
 kubectl explain pod.spec.containers
-kubectl explain pod.spec.containers.resources.limits
+kubectl explain pod.spec.containers.resources
+kubectl explain deployment.spec.strategy
 
-# List all available resource types
+# List all API resources
 kubectl api-resources
-kubectl api-resources --namespaced=true    # Only namespaced resources
-kubectl api-resources -o wide              # Show verbs and API groups
 
-# Get API versions
+# List resources with API versions
+kubectl api-resources -o wide
+
+# Get specific API version info
 kubectl api-versions
-
-# Rollout management
-kubectl rollout status deployment/my-app
-kubectl rollout history deployment/my-app
-kubectl rollout undo deployment/my-app
-kubectl rollout undo deployment/my-app --to-revision=2
-kubectl rollout pause deployment/my-app
-kubectl rollout resume deployment/my-app
-
-# Scale
-kubectl scale deployment my-app --replicas=5
-
-# Resource usage (requires metrics-server)
-kubectl top nodes
-kubectl top pods
-kubectl top pods --containers
-kubectl top pods -n kube-system
 ```
 
----
-
-## Helpful Aliases
+:::tip[Generate YAML from Imperative Commands]
+Use `--dry-run=client -o yaml` to generate YAML templates from imperative commands:
 
 ```bash
-# Add to ~/.bashrc or ~/.zshrc
-alias k='kubectl'
-alias kgp='kubectl get pods'
-alias kgd='kubectl get deployments'
-alias kgs='kubectl get services'
-alias kaf='kubectl apply -f'
-alias kdel='kubectl delete'
-alias klog='kubectl logs -f'
-alias kex='kubectl exec -it'
-alias kpf='kubectl port-forward'
-alias kdesc='kubectl describe'
-
-# Shell completion
-source <(kubectl completion bash)     # bash
-source <(kubectl completion zsh)      # zsh
-
-# With alias
-complete -F __start_kubectl k
+kubectl create deployment myapp --image=nginx --dry-run=client -o yaml > deployment.yaml
+kubectl expose deployment myapp --port=80 --dry-run=client -o yaml > service.yaml
+kubectl create configmap myconfig --from-literal=key=val --dry-run=client -o yaml
 ```
+
+This is a fast way to get a correctly structured YAML file to customise.
+:::

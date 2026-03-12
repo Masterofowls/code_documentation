@@ -1,215 +1,212 @@
 ---
 title: Playwright Actions
-description: Interact with pages using Playwright's action methods — click, fill, type, press, select, hover, drag, upload files, evaluate JavaScript, and control page load state.
+description: Interact with every element type in Playwright — click, fill, type, press, select, upload, drag, hover, scroll, evaluate JavaScript, and control page load state.
 sidebar:
   order: 4
 tags: [testing, javascript]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
-Actions are how Playwright interacts with a web page. Each action method auto-waits for the element to be visible, stable, and enabled before performing the interaction — eliminating the need for explicit `waitFor` calls in most scenarios.
+Playwright actions interact with elements in a browser. Every action **auto-waits** for the element to be visible, stable, and actionable before executing — no explicit waits needed in most cases.
 
 ## click
 
-The most common action — performs a left mouse click:
+The most common action — simulates a mouse click with full browser event dispatching:
 
 ```typescript
-// Standard left click
+// Left click (default)
 await page.getByRole('button', { name: 'Submit' }).click();
 
-// Right-click — opens context menu
-await page.getByRole('img', { name: 'User avatar' }).click({ button: 'right' });
+// Double click
+await page.getByRole('button', { name: 'Edit' }).dblclick();
 
-// Double-click — on an editable cell, for example
-await page.getByRole('cell', { name: 'Alice' }).dblclick();
+// Right click (context menu)
+await page.getByRole('row', { name: 'file.txt' }).click({ button: 'right' });
 
-// Click at a specific offset from the element's top-left corner
-await page.getByRole('canvas').click({ position: { x: 100, y: 200 } });
+// Click at specific position within the element
+await page.getByRole('img', { name: 'Canvas' }).click({
+  position: { x: 100, y: 50 },
+});
 
-// Hold modifier keys while clicking
-await page.getByRole('link', { name: 'Download' }).click({ modifiers: ['Alt'] });
+// Click with modifier keys
+await page.getByRole('row', { name: 'Item A' }).click({ modifiers: ['Shift'] });
+await page
+  .getByRole('link', { name: 'File' })
+  .click({ modifiers: ['Control'] });
 
-// Ctrl+Click for multi-select
-await page.getByRole('row').nth(2).click({ modifiers: ['ControlOrMeta'] });
-await page.getByRole('row').nth(4).click({ modifiers: ['Shift'] });
+// Force click — bypasses actionability checks (use sparingly)
+await page.getByRole('button').click({ force: true });
 
-// Click without waiting for navigation
-await page.getByRole('button', { name: 'Delete' }).click({ noWaitAfter: true });
-
-// Click with a delay (holds down the mouse button)
-await page.getByRole('button').click({ delay: 100 });
-
-// Force click (bypass actionability checks)
-await page.locator('.overlay-covered-button').click({ force: true });
+// Click and hold
+await page.getByRole('button').click({ delay: 500 });
 ```
 
-:::caution[force: true]
-`force: true` bypasses visibility, stability, and enabled checks — use only as a last resort when you are certain the element is in the state you expect. In most cases, if Playwright won't click an element, your test is exposing a real UI problem.
+:::caution[Avoid force: true]
+`force: true` skips Playwright's actionability checks (visibility, stability, enabled state). Only use it when the element is intentionally "hidden" but technically clickable — most of the time, if `force: true` is needed, your locator is wrong or the element is not ready.
 :::
 
 ## fill vs type
 
-Both methods enter text into an input, but they work differently:
+Both actions enter text into input fields, but they behave differently:
 
-| Method | Speed | Events Fired | Use For |
-|---|---|---|---|
-| `fill()` | Fast — sets value directly | `input`, `change` | Standard inputs, forms |
-| `type()` | Slow — one character at a time | `keydown`, `keypress`, `input`, `keyup` for each char | Inputs with per-keystroke logic (autocomplete, validation) |
-| `pressSequentially()` | Slow | Full keyboard events per char | Same as `type()` (Playwright v1.38+) |
+|              | `fill`                     | `type`                                                |
+| ------------ | -------------------------- | ----------------------------------------------------- |
+| Speed        | Fast — sets value directly | Slow — one character at a time                        |
+| Events fired | `input`, `change`          | `keydown`, `keypress`, `input`, `keyup` per character |
+| Clears first | Yes, always                | No (appends)                                          |
+| Use case     | Form inputs                | When keydown/keyup handlers matter                    |
 
 ```typescript
-// fill — clears existing value then sets the new one
-await page.getByLabel('Search').fill('playwright testing');
+// fill — preferred for most inputs
 await page.getByLabel('Email').fill('alice@example.com');
+await page.getByLabel('Search').fill('playwright testing');
 
-// fill with empty string — clears the field
-await page.getByLabel('Search').fill('');
-
-// type — triggers key events for each character (useful for autocomplete)
-await page.getByLabel('City').type('Port');
-// wait for autocomplete dropdown to appear
-await page.getByRole('option', { name: 'Portland' }).click();
-
-// pressSequentially (v1.38+ alias for type)
-await page.getByLabel('Code').pressSequentially('123456');
+// type — use when character-by-character events are required
+await page.getByLabel('Search').type('pl'); // triggers autocomplete suggestions
 ```
 
-## press
+### Clearing an Input
 
-Simulate keyboard key presses:
+```typescript
+// fill clears before typing
+await page.getByLabel('Name').fill('Alice'); // replaces any existing value
+
+// Explicit clear
+await page.getByLabel('Name').clear();
+
+// Select all and replace (for inputs that don't respond to fill)
+await page.getByLabel('Name').selectText();
+await page.keyboard.type('New value');
+```
+
+## press — Keyboard Shortcuts
+
+Send keyboard events using key names:
 
 ```typescript
 // Single keys
-await page.getByLabel('Search').press('Enter');
-await page.getByRole('dialog').press('Escape');
-await page.keyboard.press('F5');         // on the page itself
-await page.keyboard.press('Tab');
+await page.getByRole('textbox').press('Enter');
+await page.getByRole('textbox').press('Tab');
+await page.getByRole('textbox').press('Escape');
+await page.getByRole('textbox').press('ArrowDown');
+await page.getByRole('textbox').press('Backspace');
+await page.getByRole('textbox').press('Delete');
 
-// Key combinations
-await page.keyboard.press('Control+a');  // Select all
-await page.keyboard.press('Control+c');  // Copy
-await page.keyboard.press('Control+v');  // Paste
-await page.keyboard.press('Control+z');  // Undo
-await page.keyboard.press('Meta+Shift+z'); // Redo (macOS)
-
-// Arrow navigation
-await page.keyboard.press('ArrowDown');
-await page.keyboard.press('ArrowUp');
-await page.keyboard.press('PageDown');
-await page.keyboard.press('Home');
-await page.keyboard.press('End');
+// Modifier + key combinations
+await page.getByRole('textbox').press('Control+a'); // select all
+await page.getByRole('textbox').press('Control+c'); // copy
+await page.getByRole('textbox').press('Control+v'); // paste
+await page.getByRole('textbox').press('Meta+z'); // Cmd+Z on macOS
 
 // Function keys
+await page.keyboard.press('F5');
 await page.keyboard.press('F12');
-
-// Key sequences
-await page.getByRole('textbox').press('Control+A');  // Select all text
-await page.getByRole('textbox').press('Backspace');  // Delete selection
 ```
 
-Common key names: `Enter`, `Tab`, `Escape`, `Space`, `Backspace`, `Delete`, `ArrowUp`, `ArrowDown`, `ArrowLeft`, `ArrowRight`, `Home`, `End`, `PageUp`, `PageDown`, `F1`-`F12`.
+### keyboard.type and keyboard.press
 
-## check and uncheck
-
-For checkboxes and radio buttons:
+For global keyboard events not tied to a specific element:
 
 ```typescript
-// Check a checkbox
-await page.getByRole('checkbox', { name: 'Accept terms' }).check();
+// Type text globally (no element focus needed)
+await page.keyboard.type('Hello, World!');
+await page.keyboard.type('slow', { delay: 100 }); // 100ms between characters
+
+// Press a key globally
+await page.keyboard.press('Enter');
+await page.keyboard.press('Escape');
+
+// Hold modifier key
+await page.keyboard.down('Shift');
+await page.getByRole('link', { name: 'About' }).click();
+await page.keyboard.up('Shift');
+```
+
+## check / uncheck — Checkboxes and Radio Buttons
+
+```typescript
+// Check a checkbox (idempotent — won't double-check)
+await page.getByLabel('Accept terms and conditions').check();
+await expect(page.getByLabel('Accept terms')).toBeChecked();
 
 // Uncheck a checkbox
-await page.getByRole('checkbox', { name: 'Subscribe' }).uncheck();
+await page.getByLabel('Subscribe to newsletter').uncheck();
+await expect(page.getByLabel('Subscribe')).not.toBeChecked();
 
-// Verify state
-await expect(page.getByRole('checkbox', { name: 'Remember me' })).toBeChecked();
+// Radio buttons
+await page.getByLabel('Monthly billing').check();
+await page.getByLabel('Annual billing').check(); // unchecks Monthly
 
-// setChecked — idempotent (sets to target state regardless of current)
-await page.getByRole('checkbox', { name: 'Newsletter' }).setChecked(true);
-await page.getByRole('checkbox', { name: 'Newsletter' }).setChecked(false);
-
-// Radio button selection
-await page.getByRole('radio', { name: 'Credit card' }).check();
-await expect(page.getByRole('radio', { name: 'Credit card' })).toBeChecked();
+// setChecked — set to a specific state
+await page.getByLabel('Dark mode').setChecked(true);
+await page.getByLabel('Dark mode').setChecked(false);
 ```
 
-## selectOption
-
-For `<select>` dropdowns:
+## selectOption — Dropdowns
 
 ```typescript
+const countrySelect = page.getByRole('combobox', { name: 'Country' });
+
 // Select by value
-await page.getByRole('combobox', { name: 'Country' }).selectOption('US');
+await countrySelect.selectOption('US');
 
-// Select by display label
-await page.getByRole('combobox', { name: 'Country' }).selectOption({ label: 'United States' });
+// Select by label (visible text)
+await countrySelect.selectOption({ label: 'United States' });
 
-// Select by index (0-based)
-await page.getByRole('combobox', { name: 'Country' }).selectOption({ index: 0 });
+// Select by index
+await countrySelect.selectOption({ index: 2 });
 
-// Multi-select — pass an array
-await page.getByLabel('Languages').selectOption(['javascript', 'typescript', 'python']);
+// Multi-select (multiple options at once)
+await page
+  .getByLabel('Interests')
+  .selectOption(['coding', 'design', 'testing']);
 
-// Select by label (multi)
-await page.getByLabel('Skills').selectOption([
-  { label: 'JavaScript' },
-  { label: 'TypeScript' },
-]);
+// Deselect all (multi-select)
+await page.getByLabel('Tags').selectOption([]);
 ```
 
-## hover
-
-Move the mouse cursor over an element to trigger hover states:
+## hover, focus, blur
 
 ```typescript
-// Basic hover — triggers :hover CSS, mouseover events
-await page.getByRole('button', { name: 'More options' }).hover();
-
-// Hover over a specific position within an element
-await page.getByRole('image', { name: 'Chart' }).hover({ position: { x: 150, y: 75 } });
-
-// Hover to reveal a tooltip, then assert on it
-await page.getByRole('button', { name: 'Info' }).hover();
+// Hover over element (triggers :hover CSS styles, tooltips)
+await page.getByRole('button', { name: 'Help' }).hover();
 await expect(page.getByRole('tooltip')).toBeVisible();
-await expect(page.getByRole('tooltip')).toContainText('Click for more details');
+
+// Hover at specific position
+await page.getByRole('img').hover({ position: { x: 50, y: 50 } });
+
+// Focus an element (without clicking)
+await page.getByLabel('Name').focus();
+await expect(page.getByLabel('Name')).toBeFocused();
+
+// Blur (remove focus)
+await page.getByLabel('Name').blur();
 ```
 
-## focus and blur
+## dragTo — Drag and Drop
 
 ```typescript
-// Focus an element (triggers :focus styles)
-await page.getByLabel('Email').focus();
-await expect(page.getByLabel('Email')).toBeFocused();
+// Drag from source to target
+const source = page.getByTestId('draggable-item');
+const target = page.getByTestId('drop-zone');
 
-// Blur (remove focus) — triggers validation messages
-await page.getByLabel('Email').blur();
-await expect(page.getByText('Email is required')).toBeVisible();
+await source.dragTo(target);
 
-// Tab through form fields
-await page.getByLabel('First name').focus();
-await page.keyboard.press('Tab');
-// focus moves to next field
-await expect(page.getByLabel('Last name')).toBeFocused();
-```
-
-## dragTo
-
-Drag an element to a target location:
-
-```typescript
-// Drag one element onto another
-await page.getByTestId('draggable-item').dragTo(page.getByTestId('drop-zone'));
-
-// Drag to specific coordinates
-await page.getByTestId('handle').dragTo(page.locator('#target'), {
-  sourcePosition: { x: 10, y: 10 },   // offset from source
-  targetPosition: { x: 50, y: 50 },   // offset from target
-});
+// Drag with explicit steps (smoother for complex drag implementations)
+await source.dragTo(target, { sourcePosition: { x: 10, y: 10 } });
 
 // Manual drag using mouse
-await page.getByTestId('slider-handle').hover();
+await page.mouse.move(100, 200);
 await page.mouse.down();
-await page.mouse.move(300, 0, { steps: 10 }); // 10 intermediate steps
+await page.mouse.move(300, 200, { steps: 10 }); // move in 10 steps
 await page.mouse.up();
 ```
 
@@ -217,133 +214,113 @@ await page.mouse.up();
 
 ```typescript
 // Single file upload
-await page.getByLabel('Profile picture').setInputFiles('path/to/photo.jpg');
+await page.getByLabel('Profile photo').setInputFiles('path/to/photo.jpg');
 
 // Multiple files
-await page.getByLabel('Attachments').setInputFiles([
-  'path/to/document.pdf',
-  'path/to/image.png',
-]);
+await page
+  .getByLabel('Attachments')
+  .setInputFiles(['path/to/file1.pdf', 'path/to/file2.docx']);
 
-// Clear a file input
-await page.getByLabel('Profile picture').setInputFiles([]);
-
-// Upload from a buffer (in-memory file)
-await page.getByLabel('Logo').setInputFiles({
-  name: 'logo.png',
-  mimeType: 'image/png',
-  buffer: Buffer.from('fake image data'),
+// Upload from buffer (no file on disk needed)
+await page.getByLabel('Document').setInputFiles({
+  name: 'test.txt',
+  mimeType: 'text/plain',
+  buffer: Buffer.from('Hello, World!'),
 });
 
-// Handle a file chooser dialog
+// Clear the file input
+await page.getByLabel('Attachment').setInputFiles([]);
+
+// Handle file chooser dialog
 const fileChooserPromise = page.waitForEvent('filechooser');
 await page.getByRole('button', { name: 'Upload' }).click();
 const fileChooser = await fileChooserPromise;
 await fileChooser.setFiles('path/to/file.pdf');
 ```
 
-## tap — Mobile Touch Actions
+## tap — Touch / Mobile
+
+Simulate touch events on mobile viewports:
 
 ```typescript
-// Tap (touch event — use for mobile testing)
-await page.getByRole('button', { name: 'Submit' }).tap();
+// Set mobile viewport in test
+test.use({ viewport: { width: 375, height: 812 }, hasTouch: true });
 
-// Multi-touch gesture
-await page.touchscreen.tap(100, 200);
+test('mobile navigation', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Menu' }).tap();
+  await expect(page.getByRole('navigation')).toBeVisible();
+});
 ```
 
-Enable touch via `devices` configuration:
+## mouse — Low-Level Mouse Control
 
 ```typescript
-// playwright.config.ts
-projects: [{
-  name: 'Mobile Safari',
-  use: { ...devices['iPhone 12'] },
-}],
-```
+// Move mouse to absolute coordinates
+await page.mouse.move(500, 300);
 
-## Mouse Control
-
-For precise mouse movements:
-
-```typescript
-// Move the mouse to a location
-await page.mouse.move(100, 200);
-await page.mouse.move(300, 400, { steps: 10 }); // smooth movement
-
-// Press and hold / release buttons
-await page.mouse.down();
-await page.mouse.move(200, 200);
-await page.mouse.up();
+// Move in steps (for drag/hover over paths)
+await page.mouse.move(500, 300, { steps: 20 });
 
 // Click at coordinates
-await page.mouse.click(100, 200);
-await page.mouse.dblclick(100, 200);
+await page.mouse.click(500, 300);
+await page.mouse.dblclick(500, 300);
+
+// Press and release individually (for drag)
+await page.mouse.down();
+await page.mouse.move(600, 300);
+await page.mouse.up();
+
+// Mouse wheel / scroll
+await page.mouse.wheel(0, 300); // scroll down 300px
 ```
 
-## Keyboard Control
+## page.evaluate — Execute JavaScript in the Browser
 
-For complex keyboard interactions not covered by `press()`:
-
-```typescript
-// Hold a key while clicking
-await page.keyboard.down('Shift');
-await page.getByRole('row').nth(4).click();
-await page.keyboard.up('Shift');
-
-// Type text (all characters at once)
-await page.keyboard.type('Hello, World!');
-
-// Insert text (no key events — just inserts the string)
-await page.keyboard.insertText('Pasted text 🎉');
-```
-
-## page.evaluate — Running JavaScript in the Browser
-
-Execute JavaScript in the browser context:
+Run arbitrary JavaScript in the browser page context:
 
 ```typescript
-// Get a value from the page
+// Read a DOM property
 const title = await page.evaluate(() => document.title);
 
 // Manipulate the DOM
 await page.evaluate(() => {
-  document.getElementById('hidden-element')!.style.display = 'block';
+  document.body.style.backgroundColor = 'red';
 });
 
-// Pass arguments to the script
-const elementText = await page.evaluate(
-  (selector) => document.querySelector(selector)?.textContent ?? '',
-  '.my-element'
-);
+// Pass arguments to the browser context
+const result = await page.evaluate(({ x, y }) => x + y, { x: 10, y: 20 });
+expect(result).toBe(30);
 
-// Get the bounding box of an element
-const box = await page.getByRole('main').boundingBox();
-console.log(`Main content: ${box?.width}x${box?.height} at (${box?.x}, ${box?.y})`);
+// Read localStorage
+const token = await page.evaluate(() => localStorage.getItem('auth_token'));
 
-// Evaluate on a locator (runs JS with the element as argument)
-const value = await page.getByRole('textbox').evaluate(
-  (el: HTMLInputElement) => el.value
-);
+// Evaluate on a specific element
+const text = await page.getByRole('heading').evaluate((el) => el.textContent);
 
-// Scroll to a position
-await page.evaluate(() => window.scrollTo(0, 500));
+// Complex DOM inspection
+const tableData = await page.evaluate(() => {
+  return Array.from(document.querySelectorAll('table tbody tr')).map((row) => ({
+    cells: Array.from(row.querySelectorAll('td')).map((td) =>
+      td.textContent?.trim(),
+    ),
+  }));
+});
 ```
 
 ## page.exposeFunction
 
-Expose a Node.js function to be callable from browser scripts:
+Expose a Node.js function to the browser context:
 
 ```typescript
-// Make a function available on window in the browser
-await page.exposeFunction('sha256', async (text: string) => {
-  const crypto = require('crypto');
-  return crypto.createHash('sha256').update(text).digest('hex');
+// Expose a Node.js function to the browser
+await page.exposeFunction('readFile', async (filePath: string) => {
+  return fs.promises.readFile(filePath, 'utf-8');
 });
 
-// Now callable from page.evaluate or page scripts
-const hash = await page.evaluate(async () => {
-  return await (window as any).sha256('hello world');
+// Call it from browser-side evaluate
+const content = await page.evaluate(async () => {
+  return (window as any).readFile('/tmp/data.json');
 });
 ```
 
@@ -352,43 +329,90 @@ const hash = await page.evaluate(async () => {
 Scroll an element into the visible viewport:
 
 ```typescript
-// Scroll element into view before interacting
-await page.getByRole('button', { name: 'Load more' }).scrollIntoViewIfNeeded();
-await page.getByRole('button', { name: 'Load more' }).click();
+// Scroll element into view (called automatically by most actions)
+await page.getByTestId('footer-section').scrollIntoViewIfNeeded();
 
-// Scroll the page itself
+// Manual scroll on the page
 await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
 
-// Scroll to bottom of a scrollable container
-await page.locator('.scroll-container').evaluate(el => {
-  el.scrollTop = el.scrollHeight;
-});
+// Scroll inside a container
+const container = page.getByTestId('scrollable-list');
+await container.evaluate((el) => el.scrollTo(0, el.scrollHeight));
 ```
 
 ## waitForLoadState
 
-Control when to consider navigation complete:
+Wait for the page to reach a specific load state:
 
 ```typescript
-// 'load' — window.load event fired (all resources loaded)
-await page.goto('/dashboard', { waitUntil: 'load' });
+// After navigation, wait for network to be idle
+await page.goto('/dashboard');
+await page.waitForLoadState('networkidle'); // no network activity for 500ms
 
-// 'domcontentloaded' — HTML parsed, no waiting for images/fonts
-await page.goto('/dashboard', { waitUntil: 'domcontentloaded' });
+// Wait for DOM to be parsed (fastest)
+await page.waitForLoadState('domcontentloaded');
 
-// 'networkidle' — no network requests for 500ms (fragile for SPAs)
-await page.goto('/dashboard', { waitUntil: 'networkidle' });
-
-// Wait after navigation
-await page.getByRole('link', { name: 'Profile' }).click();
+// Wait for all resources (images, scripts, styles) to load
 await page.waitForLoadState('load');
 
-// Wait for a specific URL
-await page.waitForURL('**/dashboard');
-await page.waitForURL(/\/dashboard/);
-await page.waitForURL('https://app.example.com/dashboard');
+// After a click that triggers navigation
+await page.getByRole('link', { name: 'Products' }).click();
+await page.waitForLoadState('networkidle');
+await expect(page.getByRole('heading', { name: 'Products' })).toBeVisible();
 ```
 
-:::tip[Prefer waitForURL over networkidle]
-`waitUntil: 'networkidle'` can cause flaky tests — SPAs often have background network activity. Use `page.waitForURL()` to wait for a specific navigation, or web-first assertions to wait for expected UI state.
+| Load state         | Condition                     | Use case                      |
+| ------------------ | ----------------------------- | ----------------------------- |
+| `domcontentloaded` | HTML parsed, DOM available    | Fast navigation check         |
+| `load`             | All resources loaded          | Page with images/fonts        |
+| `networkidle`      | No network activity for 500ms | SPAs with async data fetching |
+
+:::tip[Prefer Assertions Over waitForLoadState]
+Most of the time, waiting for a specific element to be visible is better than waiting for a load state — it's more specific about what you need:
+
+```typescript
+// ✅ More precise
+await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
+
+// Works but less precise
+await page.waitForLoadState('networkidle');
+```
+
 :::
+
+## Handling Downloads
+
+```typescript
+// Wait for a download to start when clicking
+const downloadPromise = page.waitForEvent('download');
+await page.getByRole('button', { name: 'Export CSV' }).click();
+const download = await downloadPromise;
+
+// Save the file
+await download.saveAs('/tmp/export.csv');
+
+// Get the suggested filename
+console.log(download.suggestedFilename());
+
+// Get the download URL
+console.log(download.url());
+```
+
+## Handling Dialogs
+
+```typescript
+// Automatically dismiss all dialogs
+page.on('dialog', (dialog) => dialog.dismiss());
+
+// Accept all dialogs
+page.on('dialog', (dialog) => dialog.accept());
+
+// Handle a specific dialog with input
+page.once('dialog', async (dialog) => {
+  expect(dialog.type()).toBe('prompt');
+  expect(dialog.message()).toContain('Enter your name');
+  await dialog.accept('Alice');
+});
+
+await page.getByRole('button', { name: 'Prompt me' }).click();
+```

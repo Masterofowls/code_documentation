@@ -1,115 +1,108 @@
 ---
 title: Routing
-description: Master Next.js file-based routing with dynamic segments, the Link component, useRouter, usePathname, useSearchParams, middleware, redirect functions, and internationalization patterns.
+description: Master Next.js file-based routing — dynamic segments, the Link component, useRouter, usePathname, useSearchParams, redirect(), middleware, and internationalisation patterns.
 sidebar:
   order: 4
 tags: [react, javascript, frontend]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
-Next.js uses a file-system-based router where every folder in the `app/` directory maps to a URL segment. Understanding the routing mechanics — especially dynamic routes, the Link component, and middleware — is fundamental to building any Next.js application.
+Next.js uses a file-system-based router where every file in the `app/` directory maps to a URL segment. This page covers every routing mechanism from basic pages to advanced middleware and internationalisation.
 
 ## File-Based Routing Mechanics
 
-Every folder containing a `page.tsx` file becomes a publicly accessible URL:
+The folder structure under `app/` directly maps to URL paths:
 
 ```
 app/
-├── page.tsx              → /
+├── page.tsx                    →  /
 ├── about/
-│   └── page.tsx          → /about
+│   └── page.tsx                →  /about
 ├── blog/
-│   ├── page.tsx          → /blog
-│   └── tags/
-│       └── page.tsx      → /blog/tags
-└── dashboard/
-    ├── page.tsx          → /dashboard
-    ├── settings/
-    │   └── page.tsx      → /dashboard/settings
+│   ├── page.tsx                →  /blog
+│   └── [slug]/
+│       └── page.tsx            →  /blog/:slug
+├── shop/
+│   ├── page.tsx                →  /shop
+│   ├── [category]/
+│   │   ├── page.tsx            →  /shop/:category
+│   │   └── [productId]/
+│   │       └── page.tsx        →  /shop/:category/:productId
+│   └── cart/
+│       └── page.tsx            →  /shop/cart
+└── api/
     └── users/
-        └── page.tsx      → /dashboard/users
+        └── route.ts            →  /api/users (no page rendered)
 ```
-
-URL segments map directly to folder names. Folders without a `page.tsx` are not publicly accessible (useful for organizing files).
 
 ## Dynamic Segments
 
-### Single Dynamic Segment
-
-```
-app/
-└── blog/
-    └── [slug]/
-        └── page.tsx     → /blog/hello-world, /blog/my-post
-```
+### `[slug]` — Single Dynamic Segment
 
 ```tsx
 // app/blog/[slug]/page.tsx
-interface Props {
+interface PageProps {
   params: Promise<{ slug: string }>;
 }
 
-export default async function BlogPost({ params }: Props) {
+export default async function PostPage({ params }: PageProps) {
   const { slug } = await params;
-  // slug = 'hello-world' for /blog/hello-world
-  return <h1>Post: {slug}</h1>;
+  const post = await getPost(slug);
+
+  return <article>{post.content}</article>;
 }
 ```
 
-### Catch-All Segments
+### `[...slug]` — Catch-All Segment
 
-```
-app/
-└── docs/
-    └── [...slug]/
-        └── page.tsx     → /docs/react, /docs/react/hooks, /docs/react/hooks/use-state
-```
+Matches any number of path segments. `/docs/a/b/c` → `slug: ['a', 'b', 'c']`.
 
 ```tsx
 // app/docs/[...slug]/page.tsx
-interface Props {
+interface PageProps {
   params: Promise<{ slug: string[] }>;
 }
 
-export default async function DocsPage({ params }: Props) {
+export default async function DocsPage({ params }: PageProps) {
   const { slug } = await params;
-  // /docs/react/hooks → slug = ['react', 'hooks']
+  // /docs/getting-started/installation → slug: ['getting-started', 'installation']
   const path = slug.join('/');
-  return <Docs path={path} />;
+  const doc = await getDoc(path);
+
+  return <div>{doc.content}</div>;
 }
 ```
 
-### Optional Catch-All Segments
+### `[[...slug]]` — Optional Catch-All
 
-```
-app/
-└── [[...slug]]/
-    └── page.tsx         → /, /anything, /any/path/here
-```
-
-The double brackets make the segment optional — it also matches the root.
+Like catch-all, but also matches the root path. `/docs` → `slug: undefined`. `/docs/a/b` → `slug: ['a', 'b']`.
 
 ```tsx
-// app/[[...slug]]/page.tsx
-interface Props {
+// app/docs/[[...slug]]/page.tsx
+interface PageProps {
   params: Promise<{ slug?: string[] }>;
 }
 
-export default async function Page({ params }: Props) {
+export default async function DocsPage({ params }: PageProps) {
   const { slug } = await params;
-  // / → slug = undefined
-  // /docs → slug = ['docs']
-  // /docs/react → slug = ['docs', 'react']
+  const path = slug?.join('/') ?? 'index';
+  const doc = await getDoc(path);
 
-  if (!slug) return <Homepage />;
-  return <ContentPage segments={slug} />;
+  return <div>{doc.content}</div>;
 }
 ```
 
-## Link Component
+## The Link Component
 
-`Link` is the primary navigation component. It prefetches the destination page automatically on hover.
+`Link` is Next.js's client-side navigation component. It prefetches linked pages automatically:
 
 ```tsx
 import Link from 'next/link';
@@ -117,104 +110,90 @@ import Link from 'next/link';
 export function Navigation() {
   return (
     <nav>
-      {/* Simple link */}
+      {/* Basic navigation */}
+      <Link href="/">Home</Link>
       <Link href="/about">About</Link>
 
       {/* Dynamic route */}
       <Link href={`/blog/${post.slug}`}>Read Post</Link>
 
-      {/* Object form with query params */}
-      <Link
-        href={{
-          pathname: '/search',
-          query: { q: 'react', category: 'tutorials' },
-        }}
-      >
-        Search React Tutorials
-      </Link>
-
-      {/* Disable prefetch (useful for links behind auth) */}
-      <Link href="/dashboard" prefetch={false}>
-        Dashboard
+      {/* With query params */}
+      <Link href={{ pathname: '/search', query: { q: 'nextjs', page: '2' } }}>
+        Search Results
       </Link>
 
       {/* Replace current history entry (no back button) */}
       <Link href="/login" replace>
-        Login
+        Log In
       </Link>
 
-      {/* Scroll to top on navigation */}
-      <Link href="/blog" scroll={true}>
-        Blog
+      {/* Disable scroll to top on navigation */}
+      <Link href="/blog#comments" scroll={false}>
+        Jump to Comments
       </Link>
 
-      {/* External link (still ok to use, but consider <a> for clarity) */}
-      <Link href="https://github.com" target="_blank" rel="noopener noreferrer">
-        GitHub
+      {/* Disable prefetching (useful for expensive pages) */}
+      <Link href="/admin" prefetch={false}>
+        Admin Panel
       </Link>
     </nav>
   );
 }
 ```
 
-### Active Link Styling
+:::tip[Active Link Styling]
+To highlight the active link, use `usePathname()` and compare with the href:
 
 ```tsx
 'use client';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
-const navItems = [
-  { href: '/', label: 'Home' },
-  { href: '/blog', label: 'Blog' },
-  { href: '/about', label: 'About' },
-];
-
-export function NavBar() {
+export function NavLink({
+  href,
+  children,
+}: {
+  href: string;
+  children: React.ReactNode;
+}) {
   const pathname = usePathname();
+  const isActive = pathname === href || pathname.startsWith(href + '/');
 
   return (
-    <nav className="flex gap-4">
-      {navItems.map(({ href, label }) => {
-        const isActive = pathname === href || pathname.startsWith(`${href}/`);
-        return (
-          <Link
-            key={href}
-            href={href}
-            className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-              isActive
-                ? 'bg-blue-100 text-blue-700'
-                : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
-            }`}
-            aria-current={isActive ? 'page' : undefined}
-          >
-            {label}
-          </Link>
-        );
-      })}
-    </nav>
+    <Link
+      href={href}
+      className={
+        isActive
+          ? 'text-indigo-600 font-semibold'
+          : 'text-gray-600 hover:text-gray-900'
+      }
+    >
+      {children}
+    </Link>
   );
 }
 ```
 
-## useRouter
+:::
 
-`useRouter` from `next/navigation` is for programmatic navigation in Client Components.
+## Client-Side Navigation Hooks
+
+These hooks are available in Client Components (`'use client'`):
+
+### useRouter
 
 ```tsx
 'use client';
 import { useRouter } from 'next/navigation';
 
-export function LoginForm() {
+export function SearchForm() {
   const router = useRouter();
 
-  const handleSubmit = async (data: FormData) => {
-    await signIn(data);
+  const handleSearch = (query: string) => {
+    // Push a new history entry
+    router.push(`/search?q=${encodeURIComponent(query)}`);
 
-    // Navigate to dashboard
-    router.push('/dashboard');
-
-    // Replace (no back button)
+    // Replace current history entry
     router.replace('/dashboard');
 
     // Go back
@@ -223,253 +202,247 @@ export function LoginForm() {
     // Go forward
     router.forward();
 
-    // Refresh current route (re-fetch server data without full reload)
+    // Refresh server components without full page reload
     router.refresh();
 
     // Prefetch a route
-    router.prefetch('/dashboard');
+    router.prefetch('/heavy-page');
   };
 
-  return <form onSubmit={handleSubmit}>{/* ... */}</form>;
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        handleSearch('nextjs');
+      }}
+    >
+      ...
+    </form>
+  );
 }
 ```
 
-:::caution[useRouter from next/navigation]
-Always import `useRouter` from `next/navigation`, not from `next/router`. The `next/router` package is for the Pages Router only.
-:::
-
-## usePathname and useSearchParams
+### usePathname and useSearchParams
 
 ```tsx
 'use client';
 import { usePathname, useSearchParams } from 'next/navigation';
 import { useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 
-export function SearchFilters() {
+export function FilterBar() {
+  const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const router = useRouter();
 
-  // Current search param value
-  const currentCategory = searchParams.get('category') ?? 'all';
-  const currentPage = Number(searchParams.get('page') ?? '1');
+  // Read individual params
+  const currentPage = searchParams.get('page') ?? '1';
+  const currentCategory = searchParams.get('category');
 
-  // Update search params without losing others
-  const setCategory = useCallback(
-    (category: string) => {
+  // Create a new searchParams string with modifications
+  const createQueryString = useCallback(
+    (name: string, value: string) => {
       const params = new URLSearchParams(searchParams.toString());
-      params.set('category', category);
-      params.set('page', '1'); // reset pagination on filter change
-      router.push(`${pathname}?${params.toString()}`);
+      params.set(name, value);
+      return params.toString();
     },
-    [pathname, router, searchParams]
+    [searchParams],
   );
+
+  const setCategory = (category: string) => {
+    router.push(pathname + '?' + createQueryString('category', category));
+  };
 
   return (
     <div>
       <p>Current path: {pathname}</p>
-      <p>Current category: {currentCategory}</p>
-      <button onClick={() => setCategory('tutorials')}>Tutorials</button>
-      <button onClick={() => setCategory('news')}>News</button>
+      <p>Page: {currentPage}</p>
+      {['all', 'tech', 'design', 'business'].map((cat) => (
+        <button
+          key={cat}
+          onClick={() => setCategory(cat)}
+          className={currentCategory === cat ? 'font-bold' : ''}
+        >
+          {cat}
+        </button>
+      ))}
     </div>
   );
 }
 ```
 
+:::caution[Suspense Boundary Required for useSearchParams]
+`useSearchParams()` must be used inside a `<Suspense>` boundary when used in a component that is part of static generation. Wrap your component in `<Suspense fallback={...}>` to avoid build errors.
+:::
+
 ## Server-Side Redirect Functions
 
-In Server Components, layouts, and server actions:
+Use these in Server Components, Server Actions, and Route Handlers:
 
 ```tsx
+// app/dashboard/page.tsx
 import { redirect, permanentRedirect } from 'next/navigation';
+import { auth } from '@/lib/auth';
 
-export default async function ProfilePage() {
-  const session = await getSession();
+export default async function DashboardPage() {
+  const session = await auth();
 
   if (!session) {
-    redirect('/login'); // 307 temporary redirect
+    // Temporary redirect (307) — user must log in
+    redirect('/login?callbackUrl=/dashboard');
   }
 
-  if (session.user.isDeleted) {
-    permanentRedirect('/account-deleted'); // 308 permanent redirect
+  if (session.user.role !== 'admin') {
+    // Permanent redirect (308) — this path has moved forever
+    permanentRedirect('/not-authorized');
   }
 
-  return <Profile user={session.user} />;
+  return <div>Welcome to the dashboard!</div>;
 }
 ```
 
-:::tip[redirect() Throws]
-`redirect()` works by throwing a special error. Never call it inside a `try/catch` block without re-throwing, or the redirect won't happen.
-:::
+## notFound()
+
+Call `notFound()` in a Server Component to render the nearest `not-found.tsx`:
+
+```tsx
+import { notFound } from 'next/navigation';
+
+export default async function ProductPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = await params;
+  const product = await getProduct(id);
+
+  if (!product) {
+    notFound(); // Renders app/not-found.tsx (or nearest not-found.tsx)
+  }
+
+  return <div>{product.name}</div>;
+}
+```
 
 ## Middleware
 
-Middleware runs before every request and can modify responses, redirect, rewrite, or set headers. It runs on the Edge Runtime.
+Middleware runs **before** every request and can rewrite, redirect, or modify headers. It runs at the edge (closest to the user).
 
 ```typescript
-// src/middleware.ts
+// middleware.ts (root of project, not in app/)
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { verifyJWT } from '@/lib/auth';
 
-export async function middleware(request: NextRequest) {
+export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
+  const token = request.cookies.get('auth-token')?.value;
 
-  // Auth protection
+  // Protect dashboard routes
   if (pathname.startsWith('/dashboard')) {
-    const token = request.cookies.get('auth-token')?.value;
-
     if (!token) {
-      return NextResponse.redirect(new URL('/login', request.url));
-    }
-
-    try {
-      await verifyJWT(token);
-    } catch {
-      return NextResponse.redirect(new URL('/login', request.url));
+      const loginUrl = new URL('/login', request.url);
+      loginUrl.searchParams.set('callbackUrl', pathname);
+      return NextResponse.redirect(loginUrl);
     }
   }
 
-  // Redirect old blog URLs
-  if (pathname.startsWith('/posts/')) {
-    const newPath = pathname.replace('/posts/', '/blog/');
-    return NextResponse.redirect(new URL(newPath, request.url), { status: 301 });
+  // A/B testing: route 50% of users to a different version
+  if (pathname === '/') {
+    const isVariant = Math.random() < 0.5;
+    if (isVariant) {
+      return NextResponse.rewrite(new URL('/home-v2', request.url));
+    }
   }
 
-  // Rewrite (proxy without URL change)
-  if (pathname.startsWith('/api/v1/')) {
-    const rewriteUrl = new URL(
-      pathname.replace('/api/v1/', 'https://legacy-api.example.com/'),
-    );
-    return NextResponse.rewrite(rewriteUrl);
-  }
-
-  // Modify request/response headers
+  // Add security headers to all responses
   const response = NextResponse.next();
-  response.headers.set('X-Current-Path', pathname);
+  response.headers.set('X-Frame-Options', 'DENY');
+  response.headers.set('X-Robots-Tag', 'index, follow');
 
   return response;
 }
 
-// Limit middleware to specific paths (skip static files automatically)
+// Configure which paths the middleware applies to
 export const config = {
   matcher: [
+    // Match all except static files and Next.js internals
     '/((?!_next/static|_next/image|favicon.ico|public/).*)',
+    // Always run for API routes
+    '/api/(.*)',
   ],
 };
 ```
 
-### Middleware Matcher Patterns
+:::tip[Middleware vs Route Handlers]
+Use **middleware** for auth checks, redirects, rewrites, and response header modification that needs to run before the request reaches the page. Use **Route Handlers** for building API endpoints. Middleware cannot read the request body or return JSON — use Route Handlers for that.
+:::
 
-```typescript
-export const config = {
-  matcher: [
-    // Match all routes except static files and API routes
-    '/((?!api|_next/static|_next/image|favicon.ico).*)',
+## Internationalisation with next-intl
 
-    // Match specific paths
-    '/dashboard/:path*',
-    '/admin/:path*',
+A common pattern for internationalised apps using the `next-intl` library:
 
-    // Match specific file extensions
-    '/(.*)\\.(?:jpg|jpeg|gif|png|svg|ico)$',
-  ],
-};
-```
-
-## Internationalization with next-intl
+<Steps>
+1. **Install next-intl**
 
 ```bash
 npm install next-intl
 ```
 
-```
-app/
-├── [locale]/                  # Locale segment
-│   ├── layout.tsx             # Sets locale context
-│   ├── page.tsx               # / and /en/ and /fr/
-│   └── about/
-│       └── page.tsx           # /about, /en/about, /fr/about
-└── messages/
-    ├── en.json
-    └── fr.json
-```
+2. **Create message files**
 
-```typescript
-// middleware.ts — redirect to default locale
-import createMiddleware from 'next-intl/middleware';
+   ```json
+   // messages/en.json
+   {
+     "home": {
+       "title": "Welcome to My App",
+       "subtitle": "The best app on the internet"
+     }
+   }
+   ```
 
-export default createMiddleware({
-  locales: ['en', 'fr', 'de', 'es'],
-  defaultLocale: 'en',
-  localeDetection: true,
-});
+   ```json
+   // messages/fr.json
+   {
+     "home": {
+       "title": "Bienvenue dans Mon Application",
+       "subtitle": "La meilleure application sur Internet"
+     }
+   }
+   ```
 
-export const config = {
-  matcher: ['/((?!api|_next|_vercel|.*\\..*).*)'],
-};
-```
+3. **Configure middleware for locale detection**
 
-```tsx
-// app/[locale]/layout.tsx
-import { NextIntlClientProvider } from 'next-intl';
-import { getMessages } from 'next-intl/server';
-import { notFound } from 'next/navigation';
+   ```typescript
+   // middleware.ts
+   import createMiddleware from 'next-intl/middleware';
 
-const locales = ['en', 'fr', 'de', 'es'];
+   export default createMiddleware({
+     locales: ['en', 'fr', 'de'],
+     defaultLocale: 'en',
+     localePrefix: 'as-needed', // /en/... for non-default, /... for default
+   });
 
-export default async function LocaleLayout({
-  children,
-  params,
-}: {
-  children: React.ReactNode;
-  params: Promise<{ locale: string }>;
-}) {
-  const { locale } = await params;
+   export const config = {
+     matcher: ['/((?!api|_next|_vercel|.*\\..*).*)'],
+   };
+   ```
 
-  if (!locales.includes(locale)) notFound();
+4. **Use translations in components**
 
-  const messages = await getMessages();
+   ```tsx
+   // app/[locale]/page.tsx
+   import { useTranslations } from 'next-intl';
 
-  return (
-    <html lang={locale}>
-      <body>
-        <NextIntlClientProvider messages={messages}>
-          {children}
-        </NextIntlClientProvider>
-      </body>
-    </html>
-  );
-}
-```
+   export default function Home() {
+     const t = useTranslations('home');
 
-```json
-// messages/en.json
-{
-  "HomePage": {
-    "title": "Welcome to MyApp",
-    "description": "Build something great",
-    "cta": "Get Started"
-  },
-  "Navigation": {
-    "home": "Home",
-    "blog": "Blog",
-    "about": "About"
-  }
-}
-```
+     return (
+       <div>
+         <h1>{t('title')}</h1>
+         <p>{t('subtitle')}</p>
+       </div>
+     );
+   }
+   ```
 
-```tsx
-// Usage in a Server Component
-import { useTranslations } from 'next-intl';
-
-export function HomePage() {
-  const t = useTranslations('HomePage');
-  return (
-    <main>
-      <h1>{t('title')}</h1>
-      <p>{t('description')}</p>
-    </main>
-  );
-}
-```
+   </Steps>

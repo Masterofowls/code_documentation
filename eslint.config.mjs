@@ -13,7 +13,7 @@ export default tseslint.config(
       '@typescript-eslint/no-explicit-any': 'error',
       'prefer-const': 'error',
       'no-duplicate-imports': 'error',
-      'eqeqeq': ['error', 'always'],
+      eqeqeq: ['error', 'always'],
     },
   },
   {

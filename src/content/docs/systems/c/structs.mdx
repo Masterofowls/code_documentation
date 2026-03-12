@@ -1,516 +1,571 @@
 ---
 title: Structs, Unions & Enums in C
-description: Struct declaration, padding, typedef, designated initializers, unions, bit fields, enums, opaque pointers, and SoA vs AoS data layouts.
+description: Struct layout, padding, alignment, unions, bit fields, enumerations, opaque pointers, and SoA vs AoS performance patterns.
 sidebar:
   order: 5
 tags: [systems, cpp, c]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
 # Structs, Unions & Enums in C
 
-Structs are the primary mechanism for creating composite data types in C. Combined with unions, bit fields, and enums, they let you model complex real-world data while retaining full control over memory layout.
+Structs are the primary mechanism for grouping related data in C. Combined with unions, bit fields, and enumerations, they enable rich, efficient data structures.
 
 ## Struct Basics
 
 ```c
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
-// Forward declaration (incomplete type — useful in header files)
-struct Point;
-
-// Full definition
+// Declaration: introduces the type
 struct Point {
     float x;
     float y;
 };
 
-// typedef lets you use the name without "struct" keyword
+// typedef: creates an alias — avoids writing 'struct' everywhere
 typedef struct {
-    int   id;
-    char  name[64];
-    float salary;
-} Employee;
+    float x;
+    float y;
+} Vec2;
 
-int main(void)
-{
-    // Stack allocation
-    struct Point p1;         // uninitialized
-    struct Point p2 = { 3.0f, 4.0f };  // positional init
-    Employee e1 = { 0 };    // zero-initialize all fields
+// Both of these are equivalent after typedef:
+struct Point p1;
+Vec2 p2;
 
-    // Designated initializers (C99) — order-independent, readable
-    struct Point p3 = { .x = 1.5f, .y = 2.5f };
-    Employee e2 = {
-        .id     = 42,
-        .salary = 75000.0f,
-        // .name not set — zero-initialized (all nulls)
-    };
-    strncpy(e2.name, "Alice", sizeof(e2.name) - 1);
+// Initialization — C99+ designated initializers (order doesn't matter)
+struct Point origin = { .x = 0.0f, .y = 0.0f };
+Vec2 unit_x = { .x = 1.0f, .y = 0.0f };
 
-    // Member access via dot operator
-    printf("p2: (%.1f, %.1f)\n", p2.x, p2.y);
-    printf("e2: id=%d name=%s salary=%.0f\n",
-           e2.id, e2.name, e2.salary);
+// Zero-initialization shorthand
+struct Point zeroed = {0};   // All fields set to 0
 
-    // Struct assignment (shallow copy — copies all bytes)
-    struct Point p4 = p2;   // p4 is an independent copy
-    p4.x = 99.0f;
-    printf("p2.x=%.1f (unchanged), p4.x=%.1f\n", p2.x, p4.x);
+// Nested struct initialization
+typedef struct {
+    Vec2 position;
+    Vec2 velocity;
+    int  id;
+    char name[32];
+} Entity;
 
-    return 0;
-}
+Entity player = {
+    .position = { .x = 100.0f, .y = 200.0f },
+    .velocity = { .x = 0.0f,   .y = 0.0f   },
+    .id       = 1,
+    .name     = "Player",
+};
+
+// Accessing members
+printf("Player pos: (%.1f, %.1f)\n", player.position.x, player.position.y);
+player.velocity.x = 5.0f;
+player.id = 2;
 ```
 
 ## Struct Padding and Alignment
 
-The compiler inserts padding bytes between struct members to satisfy alignment requirements. Member order dramatically affects struct size:
+The compiler inserts padding bytes between fields to ensure proper alignment. Misunderstanding this can waste memory and cause subtle bugs.
 
 ```c
-#include <stddef.h>
 #include <stdio.h>
+#include <stddef.h>
 
-// Bad layout — lots of padding
-struct Bad {
-    char   a;    // offset 0 (1 byte)
-    // 3 bytes padding
-    int    b;    // offset 4 (4 bytes)
-    char   c;    // offset 8 (1 byte)
-    // 7 bytes padding
-    double d;    // offset 16 (8 bytes)
-};               // sizeof = 24
-
-// Good layout — fields ordered by decreasing alignment
-struct Good {
-    double d;    // offset 0  (8 bytes)
-    int    b;    // offset 8  (4 bytes)
-    char   a;    // offset 12 (1 byte)
-    char   c;    // offset 13 (1 byte)
-    // 2 bytes padding (to align struct size to 8)
-};               // sizeof = 16
-
-// Force packed layout (GCC/Clang attribute)
-struct __attribute__((packed)) Packed {
-    char   a;    // offset 0
-    int    b;    // offset 1 (unaligned — may be slow or fault on some archs)
-    double d;    // offset 5 (unaligned)
-};               // sizeof = 13
-
-// MSVC pragma version
-#pragma pack(push, 1)
-struct MsvcPacked {
-    char  a;
-    int   b;
-    double d;
+// BAD layout — lots of padding
+struct BadLayout {
+    char   a;    // 1 byte  @ offset 0
+    // 7 bytes padding (align double to 8-byte boundary)
+    double b;    // 8 bytes @ offset 8
+    char   c;    // 1 byte  @ offset 16
+    // 3 bytes padding (align int to 4-byte boundary)
+    int    d;    // 4 bytes @ offset 20
+    // Total: 24 bytes
 };
+
+// GOOD layout — fields ordered largest to smallest
+struct GoodLayout {
+    double b;    // 8 bytes @ offset 0
+    int    d;    // 4 bytes @ offset 8
+    char   a;    // 1 byte  @ offset 12
+    char   c;    // 1 byte  @ offset 13
+    // 2 bytes padding (struct alignment = 8, size must be multiple of 8)
+    // Total: 16 bytes
+};
+
+void print_layout(void) {
+    printf("BadLayout size:  %zu bytes\n", sizeof(struct BadLayout));   // 24
+    printf("GoodLayout size: %zu bytes\n", sizeof(struct GoodLayout));  // 16
+
+    printf("BadLayout offsets: a=%zu b=%zu c=%zu d=%zu\n",
+        offsetof(struct BadLayout, a),
+        offsetof(struct BadLayout, b),
+        offsetof(struct BadLayout, c),
+        offsetof(struct BadLayout, d));
+
+    printf("GoodLayout offsets: b=%zu d=%zu a=%zu c=%zu\n",
+        offsetof(struct GoodLayout, b),
+        offsetof(struct GoodLayout, d),
+        offsetof(struct GoodLayout, a),
+        offsetof(struct GoodLayout, c));
+}
+
+// Force packing (removes padding — may cause performance penalty on some CPUs)
+#pragma pack(push, 1)
+struct Packed {
+    char   a;    // 1 byte @ 0
+    double b;    // 8 bytes @ 1 (unaligned!)
+    char   c;    // 1 byte @ 9
+    int    d;    // 4 bytes @ 10 (unaligned!)
+};               // Total: 14 bytes — no padding
 #pragma pack(pop)
 
-int main(void)
-{
-    printf("Bad:    %zu bytes\n", sizeof(struct Bad));    // 24
-    printf("Good:   %zu bytes\n", sizeof(struct Good));   // 16
-    printf("Packed: %zu bytes\n", sizeof(struct Packed)); // 13
-
-    printf("Bad.a  offset: %zu\n", offsetof(struct Bad, a));  // 0
-    printf("Bad.b  offset: %zu\n", offsetof(struct Bad, b));  // 4
-    printf("Bad.c  offset: %zu\n", offsetof(struct Bad, c));  // 8
-    printf("Bad.d  offset: %zu\n", offsetof(struct Bad, d));  // 16
-
-    return 0;
-}
+// GCC alternative:
+struct __attribute__((packed)) GccPacked {
+    char a; double b; char c; int d;
+};
 ```
 
-:::tip[Rule of Thumb for Struct Layout]
-Order your struct members from **largest alignment to smallest**: `double`/`pointer` first, then `int`/`float`, then `short`, then `char`. This typically produces the smallest size without manual packing.
+:::caution[Packed Structs and Performance]
+Packed structs may cause **misaligned memory access**, which is slow on x86 and causes a fault on some ARM and RISC-V configurations. Use packing only for serialization formats, network packets, or hardware register maps where you need exact byte layout.
 :::
 
-## Nested Structs
+## Nested Structs and Pointers
 
 ```c
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-typedef struct {
-    float x, y;
-} Vec2;
+typedef struct Node {
+    int data;
+    struct Node *left;   // Self-referential: must use 'struct Node' here
+    struct Node *right;
+} Node;
 
-typedef struct {
-    Vec2  position;
-    Vec2  velocity;
-    float radius;
-    int   id;
-} Circle;
+// Forward declaration (incomplete type)
+typedef struct HashTable HashTable;  // Type declared but not yet defined
+// Functions can accept/return HashTable* because pointer size is known
+void hash_table_insert(HashTable *ht, const char *key, int value);
 
-typedef struct {
-    Circle   circles[100];
-    int      count;
-    Vec2     world_size;
-} World;
+// Now define it (in the same or another translation unit)
+struct HashTable {
+    Node **buckets;
+    size_t bucket_count;
+    size_t item_count;
+};
 
-int main(void)
-{
-    Circle c = {
-        .position = { .x = 10.0f, .y = 20.0f },
-        .velocity = { .x =  1.0f, .y = -1.0f },
-        .radius   = 5.0f,
-        .id       = 1,
-    };
+// Passing by value vs pointer
+typedef struct { float x, y, z; } Vec3;
 
-    printf("Circle at (%.1f, %.1f) r=%.1f\n",
-           c.position.x, c.position.y, c.radius);
-
-    // World with designated initializer
-    World w = {
-        .count      = 0,
-        .world_size = { .x = 800.0f, .y = 600.0f },
-    };
-    w.circles[w.count++] = c;
-
-    return 0;
-}
-```
-
-## Passing Structs to Functions
-
-```c
-#include <stdio.h>
-#include <math.h>
-
-typedef struct { float x, y; } Vec2;
-
-// Pass by value — makes a copy (cheap for small structs)
-float vec2_length(Vec2 v) {
-    return sqrtf(v.x * v.x + v.y * v.y);
+// Pass by value: works for small structs (copied on the stack)
+float vec3_dot(Vec3 a, Vec3 b) {
+    return a.x*b.x + a.y*b.y + a.z*b.z;
 }
 
-// Pass by pointer — no copy (preferred for large structs)
-void vec2_normalize(Vec2 *v) {
-    float len = sqrtf(v->x * v->x + v->y * v->y);
-    if (len > 0.0f) { v->x /= len; v->y /= len; }
+// Pass by pointer: preferred for large structs
+void vec3_normalize(Vec3 *v) {
+    float len = sqrtf(v->x*v->x + v->y*v->y + v->z*v->z);
+    if (len > 0.0f) { v->x /= len; v->y /= len; v->z /= len; }
 }
 
-// Pass by const pointer — read-only, no copy
-void vec2_print(const Vec2 *v) {
-    printf("(%.3f, %.3f)\n", v->x, v->y);
-}
-
-// Return by value (struct return) — modern compilers optimize via NRVO
-Vec2 vec2_add(Vec2 a, Vec2 b) {
-    return (Vec2){ a.x + b.x, a.y + b.y };  // compound literal
-}
-
-int main(void)
-{
-    Vec2 v = { 3.0f, 4.0f };
-    printf("length = %.1f\n", vec2_length(v));  // 5.0
-
-    vec2_normalize(&v);
-    vec2_print(&v);  // (0.600, 0.800)
-
-    Vec2 a = { 1.0f, 2.0f }, b = { 3.0f, 4.0f };
-    Vec2 sum = vec2_add(a, b);
-    vec2_print(&sum);  // (4.000, 6.000)
-
-    return 0;
+// Return struct by value (modern compilers use NRVO — no copy)
+Vec3 vec3_add(Vec3 a, Vec3 b) {
+    return (Vec3){ a.x + b.x, a.y + b.y, a.z + b.z };
 }
 ```
 
 ## Unions
 
-A union allocates enough space for its **largest member** and all members share that space. Only one member holds a valid value at a time.
+A union allocates all members at the same memory location. Only one member is "active" at any time. The size of a union is the size of its largest member.
 
 ```c
 #include <stdio.h>
 #include <stdint.h>
 
-// Inspect float bit representation
-union FloatBits {
-    float    f;
-    uint32_t u;
-    struct {
-        uint32_t mantissa : 23;
-        uint32_t exponent :  8;
-        uint32_t sign     :  1;
-    } parts;
+// Union: shared memory
+union Number {
+    int    i;
+    float  f;
+    double d;
 };
 
-// Tagged union — safe union with type tag
-typedef enum { SHAPE_CIRCLE, SHAPE_RECT, SHAPE_TRIANGLE } ShapeType;
+// Common use: type-punning (read memory as a different type)
+// C11+ makes this defined behavior (was technically UB in C99)
+union FloatBits {
+    float    f;
+    uint32_t bits;
+};
+
+float fast_inverse_sqrt(float x) {
+    union FloatBits fb;
+    fb.f   = x;
+    uint32_t i = 0x5f3759df - (fb.bits >> 1);
+    fb.bits = i;
+    float y = fb.f;
+    y = y * (1.5f - 0.5f * x * y * y);  // Newton's method iteration
+    return y;
+}
+
+// Endian detection with union
+union EndianTest {
+    uint32_t word;
+    uint8_t  bytes[4];
+};
+
+int is_little_endian(void) {
+    union EndianTest et;
+    et.word = 0x01020304;
+    return et.bytes[0] == 0x04;  // Little-endian: LSB at lowest address
+}
+
+// Tagged union: union with a type tag (manual variant type)
+typedef enum { TAG_INT, TAG_FLOAT, TAG_STRING } Tag;
 
 typedef struct {
-    ShapeType type;
+    Tag tag;
     union {
-        struct { float radius; }            circle;
-        struct { float width, height; }     rect;
-        struct { float base, height; }      triangle;
-    };   // anonymous union (C11)
-} Shape;
+        int    i;
+        float  f;
+        char  *s;
+    };
+} Value;
 
-float shape_area(const Shape *s)
-{
-    switch (s->type) {
-        case SHAPE_CIRCLE:   return 3.14159f * s->circle.radius * s->circle.radius;
-        case SHAPE_RECT:     return s->rect.width * s->rect.height;
-        case SHAPE_TRIANGLE: return 0.5f * s->triangle.base * s->triangle.height;
-        default:             return 0.0f;
+void print_value(const Value *v) {
+    switch (v->tag) {
+        case TAG_INT:    printf("int: %d\n", v->i); break;
+        case TAG_FLOAT:  printf("float: %.2f\n", v->f); break;
+        case TAG_STRING: printf("string: %s\n", v->s); break;
     }
 }
 
-// Endianness detection via union
-int is_little_endian(void)
-{
-    union { uint32_t i; uint8_t c[4]; } u = { 0x01020304 };
-    return u.c[0] == 0x04;
-}
+int main(void) {
+    printf("Is little-endian: %s\n", is_little_endian() ? "yes" : "no");
 
-int main(void)
-{
-    // Float bit representation
-    union FloatBits fb = { .f = -1.5f };
-    printf("float -1.5: hex=%08X sign=%u exp=%u mant=%u\n",
-           fb.u, fb.parts.sign, fb.parts.exponent, fb.parts.mantissa);
+    Value vals[] = {
+        { .tag = TAG_INT,    .i = 42 },
+        { .tag = TAG_FLOAT,  .f = 3.14f },
+        { .tag = TAG_STRING, .s = "hello" },
+    };
 
-    // Tagged union
-    Shape circle   = { .type = SHAPE_CIRCLE,   .circle   = { 5.0f } };
-    Shape rect     = { .type = SHAPE_RECT,     .rect     = { 4.0f, 6.0f } };
-    Shape triangle = { .type = SHAPE_TRIANGLE, .triangle = { 3.0f, 8.0f } };
+    for (int i = 0; i < 3; i++) print_value(&vals[i]);
 
-    printf("circle area   = %.2f\n", shape_area(&circle));    // 78.54
-    printf("rect area     = %.2f\n", shape_area(&rect));      // 24.00
-    printf("triangle area = %.2f\n", shape_area(&triangle));  // 12.00
-
-    printf("little endian: %s\n", is_little_endian() ? "yes" : "no");
+    float x = 4.0f;
+    printf("1/sqrt(%.1f) ≈ %.6f\n", x, fast_inverse_sqrt(x));
 
     return 0;
 }
 ```
 
-:::caution[Type Punning via Union]
-Using union members to reinterpret bits (type punning) is **legal in C99/C11** but **undefined behavior in C++**. The `FloatBits` example above is valid C. In C++, use `memcpy` for type punning instead.
-:::
+## Anonymous Structs and Unions (C11)
+
+```c
+#include <stdio.h>
+
+// Anonymous union inside struct: members accessible directly
+typedef struct {
+    int type;
+    union {             // Anonymous: no member name
+        int    i_val;   // Access as event.i_val
+        float  f_val;   // Access as event.f_val
+        struct {        // Anonymous struct inside anonymous union
+            int x, y;   // Access as event.x, event.y
+        };
+    };
+} Event;
+
+// Anonymous struct inside union (common for vector math)
+typedef struct {
+    union {
+        struct { float x, y, z, w; };  // Access as v.x, v.y, v.z, v.w
+        float e[4];                      // Access as v.e[0], v.e[1]...
+    };
+} Vec4;
+
+int main(void) {
+    Event e = { .type = 1, .i_val = 42 };
+    printf("type=%d, i_val=%d\n", e.type, e.i_val);
+
+    e.type  = 2;
+    e.f_val = 3.14f;
+    printf("type=%d, f_val=%.2f\n", e.type, e.f_val);
+
+    Vec4 v = { .x = 1.0f, .y = 2.0f, .z = 3.0f, .w = 1.0f };
+    printf("v.x=%.1f, v.e[0]=%.1f\n", v.x, v.e[0]);  // Same memory
+
+    return 0;
+}
+```
 
 ## Bit Fields
 
-Bit fields pack multiple small values into a single integer, saving memory at the cost of some readability:
+Bit fields allow packing multiple values into a single integer, useful for flags, hardware registers, and compact data.
 
 ```c
 #include <stdio.h>
-#include <stdint.h>
 
-// Network packet header (big-endian bit layout)
+// CPU flags register simulation
 typedef struct {
-    uint8_t version   : 4;   // bits 0-3
-    uint8_t ihl       : 4;   // bits 4-7 (Internet Header Length)
-    uint8_t dscp      : 6;
-    uint8_t ecn       : 2;
-    uint16_t tot_len;
-    uint16_t id;
-    uint16_t frag_off : 13;
-    uint16_t flags    :  3;
-    uint8_t  ttl;
-    uint8_t  protocol;
-    uint16_t checksum;
-    uint32_t src_addr;
-    uint32_t dst_addr;
-} IPv4Header;
+    unsigned int carry    : 1;   // 1 bit wide
+    unsigned int zero     : 1;
+    unsigned int overflow : 1;
+    unsigned int negative : 1;
+    unsigned int : 4;            // 4 unnamed bits (padding)
+    unsigned int mode     : 2;   // 2-bit value (0-3)
+    unsigned int : 6;            // 6 unnamed bits
+    unsigned int reserved : 16;  // Reserved
+} StatusFlags;
 
-// Flags register (hardware-style)
+// Network packet header (packed layout with bit fields)
 typedef struct {
-    unsigned zero     : 1;   // bit 0
-    unsigned carry    : 1;   // bit 1
-    unsigned overflow : 1;   // bit 2
-    unsigned sign     : 1;   // bit 3
-    unsigned parity   : 1;   // bit 4
-    unsigned          : 3;   // 3 unnamed padding bits
-    unsigned irq_en   : 1;   // bit 8
-    unsigned          : 7;   // padding to 16 bits
-} Flags;
+    unsigned int version  : 4;   // 4 bits: IP version
+    unsigned int ihl      : 4;   // 4 bits: header length
+    unsigned int dscp     : 6;   // 6 bits: differentiated services
+    unsigned int ecn      : 2;   // 2 bits: explicit congestion
+    unsigned int length   : 16;  // 16 bits: total length
+} IPHeader;
 
-int main(void)
-{
-    Flags f = { .carry = 1, .irq_en = 1 };
-    printf("carry=%u irq_en=%u zero=%u\n",
-           f.carry, f.irq_en, f.zero);  // 1 1 0
+int main(void) {
+    StatusFlags sf = {0};
+    sf.zero  = 1;
+    sf.mode  = 2;
 
-    IPv4Header hdr = { .version = 4, .ihl = 5, .ttl = 64 };
-    printf("IP version=%u ihl=%u ttl=%u\n",
-           hdr.version, hdr.ihl, hdr.ttl);
+    printf("sizeof(StatusFlags) = %zu\n", sizeof(StatusFlags));  // 4
+    printf("zero=%u, mode=%u\n", sf.zero, sf.mode);
 
-    printf("sizeof Flags = %zu\n", sizeof(Flags));  // 2 bytes
+    // Bit fields are NOT portable: layout depends on compiler and endianness
+    // Don't use for serialization; use explicit bitwise operations instead
+
+    // Explicit bit manipulation (portable alternative):
+    uint32_t flags = 0;
+    flags |= (1U << 1);  // Set "zero" flag
+    flags |= (2U << 8);  // Set "mode" = 2
+    printf("flags via bits: 0x%08X\n", flags);
 
     return 0;
 }
 ```
 
-:::caution[Bit Field Portability]
-Bit field layout (bit order, storage unit, padding) is **implementation-defined**. Do not rely on bit fields matching hardware register layouts or network protocol formats across different compilers/architectures. Use bit manipulation macros for truly portable bit packing.
-:::
-
-## Enums
+## Enumerations
 
 ```c
 #include <stdio.h>
 
-// Basic enum — values start at 0 by default
-typedef enum {
-    MON = 0,
-    TUE,      // 1
-    WED,      // 2
-    THU,      // 3
-    FRI,      // 4
-    SAT,      // 5
-    SUN,      // 6
-} Weekday;
+// Basic enum (underlying type is int in C)
+enum Direction { NORTH, SOUTH, EAST, WEST };  // 0, 1, 2, 3
 
-// Explicit values — useful for bit flags
-typedef enum {
-    PERM_NONE    = 0,
-    PERM_READ    = 1 << 0,  // 0x01
-    PERM_WRITE   = 1 << 1,  // 0x02
-    PERM_EXECUTE = 1 << 2,  // 0x04
-    PERM_ALL     = PERM_READ | PERM_WRITE | PERM_EXECUTE,
-} Permission;
+// Enum with explicit values
+enum Color {
+    RED   = 0xFF0000,
+    GREEN = 0x00FF00,
+    BLUE  = 0x0000FF,
+};
 
-// Enums are ints in C — no type safety
-void print_day(Weekday day)
-{
-    static const char *names[] = {
-        "Monday", "Tuesday", "Wednesday", "Thursday",
-        "Friday", "Saturday", "Sunday"
-    };
-    if (day >= MON && day <= SUN)
-        printf("%s\n", names[day]);
+// Enum as flags (powers of 2)
+typedef enum {
+    FLAG_NONE     = 0,
+    FLAG_READABLE = 1 << 0,   // 1
+    FLAG_WRITABLE = 1 << 1,   // 2
+    FLAG_EXEC     = 1 << 2,   // 4
+    FLAG_HIDDEN   = 1 << 3,   // 8
+    FLAG_ALL      = FLAG_READABLE | FLAG_WRITABLE | FLAG_EXEC
+} FileFlags;
+
+const char *direction_name(enum Direction d) {
+    switch (d) {
+        case NORTH: return "North";
+        case SOUTH: return "South";
+        case EAST:  return "East";
+        case WEST:  return "West";
+        default:    return "Unknown";
+    }
 }
 
-int main(void)
-{
-    Weekday today = WED;
-    print_day(today);  // Wednesday
+int main(void) {
+    enum Direction dir = NORTH;
+    printf("Direction: %s (%d)\n", direction_name(dir), dir);
 
-    Permission p = PERM_READ | PERM_WRITE;
-    if (p & PERM_READ)  printf("can read\n");
-    if (p & PERM_WRITE) printf("can write\n");
-    if (!(p & PERM_EXECUTE)) printf("cannot execute\n");
+    FileFlags perms = FLAG_READABLE | FLAG_WRITABLE;
+    if (perms & FLAG_READABLE) printf("Readable\n");
+    if (perms & FLAG_WRITABLE) printf("Writable\n");
+    if (!(perms & FLAG_EXEC))  printf("Not executable\n");
 
-    // Enums are just ints — this compiles (usually with a warning)
-    Weekday bad = 999;  // not a valid day — C allows this!
-    (void)bad;
+    // Note: C enums are just ints — no type safety
+    enum Direction x = 99;  // Compiles! No range check.
+    printf("Invalid direction: %d\n", x);
 
     return 0;
 }
 ```
+
+## SoA vs AoS Performance
+
+Structure of Arrays (SoA) vs Array of Structures (AoS) is a crucial optimization for data-intensive code.
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define N 1000000
+
+// AoS: Array of Structures — common intuitive layout
+typedef struct {
+    float x, y, z;   // Position
+    float vx, vy, vz; // Velocity
+    float mass;
+    int   alive;
+} ParticleAoS;
+
+// SoA: Structure of Arrays — cache-friendly for partial field access
+typedef struct {
+    float *x,  *y,  *z;    // All X positions, all Y positions...
+    float *vx, *vy, *vz;
+    float *mass;
+    int   *alive;
+} ParticleSoA;
+
+// AoS update: loads all fields even though we only need x,y,z,vx,vy,vz
+void update_aos(ParticleAoS *particles, int n, float dt) {
+    for (int i = 0; i < n; i++) {
+        if (particles[i].alive) {
+            particles[i].x += particles[i].vx * dt;
+            particles[i].y += particles[i].vy * dt;
+            particles[i].z += particles[i].vz * dt;
+        }
+    }
+}
+
+// SoA update: accesses only the needed arrays — better cache behavior
+// Compiler can also vectorize (SIMD) this more easily
+void update_soa(ParticleSoA *p, int n, float dt) {
+    for (int i = 0; i < n; i++) {
+        if (p->alive[i]) {
+            p->x[i] += p->vx[i] * dt;
+            p->y[i] += p->vy[i] * dt;
+            p->z[i] += p->vz[i] * dt;
+        }
+    }
+}
+```
+
+:::tip[When to Use SoA]
+Use SoA when:
+
+- You iterate through all entities processing only a few fields (e.g., game physics updating position)
+- SIMD vectorization is desired (packed arrays of the same type vectorize naturally)
+- The number of objects is large (thousands+)
+
+Use AoS when:
+
+- You always access all fields of an entity together
+- The number of objects is small
+- Readability/ergonomics matter more than throughput
+  :::
 
 ## Opaque Pointer Pattern
 
-The opaque pointer (handle) pattern hides implementation details by only exposing a pointer to an incomplete type in the public header:
+The opaque pointer (handle) pattern hides implementation details — a form of encapsulation in C.
 
 ```c
-/* --- queue.h (public interface) --- */
+// queue.h — public interface
 #ifndef QUEUE_H
 #define QUEUE_H
 
-#include <stddef.h>
-
-// Incomplete type — users see only a pointer, not the internals
+// Incomplete type: callers see only the pointer, not the internals
 typedef struct Queue Queue;
 
 Queue *queue_create(size_t capacity);
 void   queue_destroy(Queue *q);
-int    queue_push(Queue *q, int value);   // returns 0 on success, -1 if full
-int    queue_pop(Queue *q, int *out);     // returns 0 on success, -1 if empty
+int    queue_push(Queue *q, int value);
+int    queue_pop(Queue *q, int *out_value);
+int    queue_empty(const Queue *q);
 size_t queue_size(const Queue *q);
 
 #endif
 
-/* --- queue.c (implementation — hidden from users) --- */
+// queue.c — private implementation (callers never see this)
 #include "queue.h"
 #include <stdlib.h>
+#include <string.h>
 
-// Full definition — only visible in this translation unit
-struct Queue {
-    int   *buffer;
-    size_t capacity;
-    size_t head, tail, size;
+struct Queue {         // Full definition hidden from callers
+    int   *data;
+    size_t head, tail, size, capacity;
 };
 
-Queue *queue_create(size_t capacity)
-{
+Queue *queue_create(size_t capacity) {
     Queue *q = malloc(sizeof(Queue));
     if (!q) return NULL;
-    q->buffer   = malloc(capacity * sizeof(int));
-    if (!q->buffer) { free(q); return NULL; }
-    q->capacity = capacity;
+    q->data = malloc(capacity * sizeof(int));
+    if (!q->data) { free(q); return NULL; }
     q->head = q->tail = q->size = 0;
+    q->capacity = capacity;
     return q;
 }
 
-void queue_destroy(Queue *q)
-{
-    if (!q) return;
-    free(q->buffer);
-    free(q);
+void queue_destroy(Queue *q) {
+    if (q) { free(q->data); free(q); }
 }
 
-int queue_push(Queue *q, int value)
-{
-    if (q->size == q->capacity) return -1;
-    q->buffer[q->tail] = value;
+int queue_push(Queue *q, int value) {
+    if (q->size == q->capacity) return 0;  // Full
+    q->data[q->tail] = value;
     q->tail = (q->tail + 1) % q->capacity;
     q->size++;
-    return 0;
+    return 1;
 }
 
-int queue_pop(Queue *q, int *out)
-{
-    if (q->size == 0) return -1;
-    *out = q->buffer[q->head];
+int queue_pop(Queue *q, int *out) {
+    if (q->size == 0) return 0;  // Empty
+    *out = q->data[q->head];
     q->head = (q->head + 1) % q->capacity;
     q->size--;
-    return 0;
+    return 1;
 }
 
-size_t queue_size(const Queue *q) { return q->size; }
+int    queue_empty(const Queue *q) { return q->size == 0; }
+size_t queue_size(const Queue *q)  { return q->size; }
 ```
 
-## SoA vs AoS Performance Summary
+## Flexible Array Members
 
-<CardGrid>
-  <Card title="Array of Structs (AoS)" icon="seti:c">
-    `{x,y,z, x,y,z, x,y,z}` — natural OOP layout. Good for operations that touch all fields of one entity. Cache-unfriendly when iterating only one field.
-  </Card>
-  <Card title="Struct of Arrays (SoA)" icon="rocket">
-    `{x,x,x}, {y,y,y}, {z,z,z}` — data-oriented layout. Excellent for SIMD/vectorization when one field of many entities is processed. Used in high-performance game engines.
-  </Card>
-</CardGrid>
+A flexible array member allows a struct to have a variable-length array at the end (C99+):
 
 ```c
-// Benchmark: sum all x values from 1 million particles
-// AoS: every cache miss loads 28 bytes but uses only 4 bytes (x)
-// SoA: every cache miss loads 16 x values — 4× more useful data per miss
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-#define N 1000000
+typedef struct {
+    size_t length;
+    int    data[];  // Flexible array member — must be last; no size specified
+} IntArray;
 
-// AoS
-typedef struct { float x, y, z, mass, charge, temp; } ParticleAoS;
-ParticleAoS particles_aos[N];
-
-float sum_x_aos(void) {
-    float s = 0;
-    for (int i = 0; i < N; i++) s += particles_aos[i].x;
-    return s;
+IntArray *intarray_create(size_t n) {
+    // Allocate struct + n integers in one allocation
+    IntArray *arr = malloc(sizeof(IntArray) + n * sizeof(int));
+    if (!arr) return NULL;
+    arr->length = n;
+    memset(arr->data, 0, n * sizeof(int));
+    return arr;
 }
 
-// SoA
-typedef struct {
-    float x[N], y[N], z[N];
-    float mass[N], charge[N], temp[N];
-} ParticlesSoA;
-ParticlesSoA particles_soa;
+int main(void) {
+    IntArray *a = intarray_create(5);
+    if (!a) return 1;
 
-float sum_x_soa(void) {
-    float s = 0;
-    for (int i = 0; i < N; i++) s += particles_soa.x[i];
-    return s;  // ~3-4x faster due to cache efficiency + auto-vectorization
+    for (size_t i = 0; i < a->length; i++) a->data[i] = (int)(i * i);
+    for (size_t i = 0; i < a->length; i++) printf("%d ", a->data[i]);
+    printf("\n");  // 0 1 4 9 16
+
+    free(a);  // Single free for the whole thing
+    return 0;
 }
 ```

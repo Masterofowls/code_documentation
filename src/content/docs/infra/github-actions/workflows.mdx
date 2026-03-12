@@ -1,20 +1,29 @@
 ---
 title: GitHub Actions Workflows
-description: All trigger events, concurrency controls, matrix strategy, permissions, and advanced workflow patterns.
+description: Deep dive into all GitHub Actions triggers, concurrency controls, permissions, matrix strategy, and advanced workflow patterns.
 sidebar:
   order: 3
 tags: [devops, ci-cd]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
-
-Workflows are the top-level unit of automation in GitHub Actions. This page covers every trigger event available, how to control workflow concurrency, permission scoping, matrix strategies, and advanced patterns.
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
 ## Trigger Events (`on:`)
 
+GitHub Actions supports dozens of event triggers. Understanding the right trigger for your workflow is critical for both correctness and cost efficiency.
+
+## Code Events
+
 ### `push`
 
-Triggered when commits are pushed to a branch or tag is pushed.
+Fires when commits are pushed to any matching branch, tag, or path.
 
 ```yaml
 on:
@@ -22,111 +31,111 @@ on:
     branches:
       - main
       - 'release/**'
-      - '!release/old-*'      # Negate with !
+      - '!release/draft-*' # exclude with !
     branches-ignore:
       - 'dependabot/**'
     tags:
-      - 'v*.*.*'              # Semantic version tags
-      - '!v*-beta'            # Exclude beta tags
+      - 'v[0-9]+.[0-9]+.[0-9]+' # regex-like glob: v1.2.3
     paths:
       - 'src/**'
-      - 'package.json'
-      - 'Dockerfile'
+      - 'tests/**'
+      - 'package*.json'
     paths-ignore:
-      - '**.md'
-      - '.github/CODEOWNERS'
+      - '**/*.md'
+      - 'docs/**'
 ```
 
 ### `pull_request`
 
-Triggered on pull request lifecycle events. Runs in the context of the **merge commit** (what the branch would look like if merged). For PRs from forks, secrets are not available — use `pull_request_target` carefully.
+Fires for pull request activity. This trigger runs in the context of the **merge commit** and uses the target branch's permissions.
 
 ```yaml
 on:
   pull_request:
+    branches: [main, develop]
     types:
-      - opened          # PR created
-      - synchronize     # New commits pushed to PR
-      - reopened        # Closed PR reopened
-      - ready_for_review
-      - labeled
-      - unlabeled
-      - assigned
-    branches:
-      - main
-      - develop
-    paths:
-      - 'src/**'
+      - opened # PR created
+      - synchronize # new commits pushed to the PR branch
+      - reopened # PR reopened after close
+      - ready_for_review # draft → ready
+      - labeled # label added
+      - unlabeled # label removed
+      - closed # PR closed (check merged with github.event.pull_request.merged)
 ```
 
 ### `pull_request_target`
 
-Runs in the context of the **base branch** (not the PR branch). Has access to secrets and write permissions. Use for workflows that need to comment on or label PRs from forks.
-
-:::caution[Security risk]
-`pull_request_target` runs arbitrary code from fork branches with access to your secrets. Always pin the checkout to `github.event.pull_request.head.sha` and be extremely careful about what you execute.
-:::
+Runs in the **base branch context** (with write permissions). Used for workflows that need secrets for fork PRs — but use with extreme care.
 
 ```yaml
 on:
   pull_request_target:
-    types: [opened, labeled]
-
-jobs:
-  label:
-    runs-on: ubuntu-latest
-    permissions:
-      pull-requests: write
-    steps:
-      - uses: actions/labeler@v5
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+    types: [opened, synchronize]
 ```
 
-### `workflow_dispatch`
+:::caution[pull_request_target Security Risk]
+`pull_request_target` has write access to the base repository and secrets. Never checkout the PR's code and then use it in a `run:` step — this is a common supply-chain attack vector. Only use it for labeling, commenting, or other metadata operations that don't execute PR code.
+:::
 
-Manual trigger with optional user inputs. Dispatched from the GitHub UI (Actions tab → workflow → Run workflow) or the API.
+### `workflow_run`
+
+Triggers when another workflow completes, starts, or is requested. Runs in the base branch context with full permissions.
+
+```yaml
+on:
+  workflow_run:
+    workflows: [CI] # name of the triggering workflow
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "CI passed, deploying..."
+```
+
+## Manual and External Triggers
+
+### `workflow_dispatch` — Manual Trigger
 
 ```yaml
 on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Deployment environment'
+        description: 'Deployment target'
         required: true
         type: choice
-        options:
-          - staging
-          - production
-        default: staging
+        options: [development, staging, production]
       version:
-        description: 'Version tag to deploy'
+        description: 'Git tag or branch to deploy'
         required: true
         type: string
-      skip_tests:
-        description: 'Skip test suite'
-        required: false
+        default: main
+      dry_run:
+        description: 'Simulate without applying changes'
         type: boolean
         default: false
-      notify_channel:
-        description: 'Slack channel for notifications'
-        required: false
-        type: string
-        default: '#deployments'
+      log_level:
+        description: 'Logging verbosity'
+        type: choice
+        options: [info, debug, trace]
+        default: info
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
     steps:
-      - run: |
-          echo "Deploying version ${{ inputs.version }}"
-          echo "Skip tests: ${{ inputs.skip_tests }}"
+      - name: Show inputs
+        run: |
+          echo "Environment: ${{ inputs.environment }}"
+          echo "Version:     ${{ inputs.version }}"
+          echo "Dry run:     ${{ inputs.dry_run }}"
 ```
 
-### `workflow_call`
-
-Makes a workflow callable by other workflows (reusable workflows). See the [Reusable Workflows](/infra/github-actions/reusable) page for full coverage.
+### `workflow_call` — Reusable Workflow Trigger
 
 ```yaml
 on:
@@ -135,223 +144,189 @@ on:
       environment:
         required: true
         type: string
+      image-tag:
+        required: true
+        type: string
     secrets:
       DEPLOY_KEY:
         required: true
     outputs:
-      deployed-url:
-        description: 'URL of deployed app'
+      deploy-url:
+        description: 'The deployed application URL'
         value: ${{ jobs.deploy.outputs.url }}
 ```
 
-### `schedule`
+### `repository_dispatch` — External API Trigger
 
-Cron-based triggers. All times are UTC. Schedules only run on the repository's default branch.
-
-```yaml
-on:
-  schedule:
-    - cron: '30 5 * * 1,3'   # 5:30 AM UTC, Mon and Wed
-    - cron: '0 0 1 * *'      # Midnight UTC, first of each month
-```
-
-Common cron patterns:
-
-| Pattern | Description |
-|---|---|
-| `0 * * * *` | Every hour |
-| `0 9 * * 1-5` | 9 AM UTC, weekdays |
-| `0 0 * * 0` | Midnight Sunday |
-| `*/15 * * * *` | Every 15 minutes |
-| `0 2 * * *` | 2 AM UTC daily |
-
-### `release`
-
-Triggered on GitHub Release lifecycle events.
-
-```yaml
-on:
-  release:
-    types:
-      - published       # New release published (most common)
-      - created
-      - edited
-      - prereleased
-      - released        # Pre-release promoted to release
-```
-
-### `issues` and `issue_comment`
-
-```yaml
-on:
-  issues:
-    types: [opened, labeled, assigned]
-
-  issue_comment:
-    types: [created]
-
-jobs:
-  triage:
-    if: github.event_name == 'issues' && github.event.action == 'opened'
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "New issue opened"
-```
-
-### `workflow_run`
-
-Triggered when another workflow run completes. Useful for post-processing after CI.
-
-```yaml
-on:
-  workflow_run:
-    workflows: ['CI']        # Name of the triggering workflow
-    types:
-      - completed
-    branches:
-      - main
-
-jobs:
-  notify:
-    runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
-    steps:
-      - run: echo "CI passed, running post-CI tasks"
-```
-
-### `repository_dispatch`
-
-External webhook trigger. Allows third-party systems to trigger workflows via the GitHub API.
+Triggered via the GitHub API from external systems:
 
 ```yaml
 on:
   repository_dispatch:
-    types: [deploy-request, data-refresh]
+    types: [deploy-request, cache-bust]
 
 jobs:
-  process:
+  handle:
     runs-on: ubuntu-latest
     steps:
-      - run: |
+      - name: Process dispatch event
+        run: |
           echo "Event type: ${{ github.event.action }}"
           echo "Client payload: ${{ toJSON(github.event.client_payload) }}"
 ```
 
-Trigger via API:
 ```bash
+# Trigger from external system via GitHub API
 curl -X POST \
-  -H "Authorization: token $GITHUB_TOKEN" \
-  -H "Accept: application/vnd.github.v3+json" \
+  -H "Accept: application/vnd.github+json" \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
   https://api.github.com/repos/OWNER/REPO/dispatches \
-  -d '{"event_type":"deploy-request","client_payload":{"version":"1.2.3"}}'
+  -d '{"event_type":"deploy-request","client_payload":{"version":"1.2.3","env":"staging"}}'
 ```
 
-## Concurrency Control
+## Scheduled Workflows
 
-Prevent redundant workflow runs — e.g., cancel in-progress CI runs when new commits are pushed to the same PR.
+```yaml
+on:
+  schedule:
+    - cron: '0 0 * * *' # midnight UTC every day
+    - cron: '*/15 * * * *' # every 15 minutes (minimum: 5)
+    - cron: '0 8 * * 1' # 8 AM UTC every Monday
+    - cron: '0 2 1 * *' # 2 AM UTC on the 1st of each month
+```
+
+Cron syntax: `minute hour day-of-month month day-of-week`
+
+## GitHub Event Triggers
+
+```yaml
+on:
+  # When a GitHub Release is published/created/edited
+  release:
+    types: [published, created, edited, prereleased, released]
+
+  # When an issue is opened/closed/labeled/etc.
+  issues:
+    types: [opened, closed, labeled, assigned]
+
+  # When someone comments on an issue or PR
+  issue_comment:
+    types: [created, edited]
+
+  # When a branch or tag is created
+  create: {}
+
+  # When a branch or tag is deleted
+  delete: {}
+
+  # When a fork is created
+  fork: {}
+
+  # When someone stars the repo
+  watch:
+    types: [started]
+
+  # When a check run completes
+  check_run:
+    types: [completed]
+```
+
+## Concurrency Controls
+
+Prevent multiple runs of the same workflow from interfering with each other:
 
 ```yaml
 concurrency:
+  # Unique group key — same branch, same workflow
   group: ${{ github.workflow }}-${{ github.ref }}
+  # Cancel any in-progress run in this group when a new one starts
   cancel-in-progress: true
 ```
 
-The `group` is a string — runs with the same group string are treated as concurrent. Common group patterns:
+For deployments, you want to queue rather than cancel:
 
 ```yaml
-# Per-branch: cancel old runs on same branch
-group: ci-${{ github.ref }}
-
-# Per-PR: cancel old runs for same PR
-group: pr-${{ github.event.pull_request.number }}
-
-# Per-workflow + branch (multiple workflows on same branch don't conflict)
-group: ${{ github.workflow }}-${{ github.ref }}
-
-# Production deploys: queue, never cancel
 concurrency:
-  group: deploy-production
-  cancel-in-progress: false   # Queue instead of cancel
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false # queue; don't cancel in-flight deployments
 ```
 
-:::tip[Production deployments]
-Set `cancel-in-progress: false` for deployment jobs targeting production. You want new deploys to queue, not cancel an in-flight deployment that might leave the system in an inconsistent state.
-:::
-
-## Permissions
-
-The `permissions:` key scopes the `GITHUB_TOKEN` for a workflow or job. Setting it to a minimal set is a security best practice.
+Job-level concurrency:
 
 ```yaml
-# Set at workflow level (applies to all jobs, unless overridden)
+jobs:
+  deploy:
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
+```
+
+## Permissions Block
+
+Explicitly declare what `GITHUB_TOKEN` permissions your workflow needs. This follows the principle of least privilege and is required for OIDC cloud authentication.
+
+```yaml
+# At workflow level — applies to all jobs
 permissions:
-  contents: read
-  pull-requests: write
-
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    # Override at job level
-    permissions:
-      contents: write       # Create releases
-      packages: write       # Push to GHCR
-      id-token: write       # OIDC for cloud auth
+  contents: read # read repo content
+  pull-requests: write # create/update PR comments
+  issues: write # create/update issue comments
+  packages: write # publish to GitHub Container Registry
+  id-token: write # required for OIDC (AWS, GCP, Azure)
+  deployments: write # create deployment records
+  statuses: write # set commit status checks
+  checks: write # create/update check runs
+  actions: read # read workflow runs (for workflow_run trigger)
+  security-events: write # upload SARIF results (code scanning)
 ```
 
-Available permission scopes:
-
-| Scope | Description |
-|---|---|
-| `actions` | Manage workflow runs |
-| `checks` | Create check runs |
-| `contents` | Repository contents (code, releases) |
-| `deployments` | Manage deployments |
-| `id-token` | Required for OIDC authentication |
-| `issues` | Read/write issues |
-| `packages` | GitHub Packages (GHCR) |
-| `pages` | GitHub Pages |
-| `pull-requests` | PR read/write |
-| `repository-projects` | Projects |
-| `security-events` | Code scanning results |
-| `statuses` | Commit statuses |
-
-Set the entire workflow to read-only, then grant specific write permissions per-job:
+Override at job level:
 
 ```yaml
-permissions: read-all   # Deny all writes globally
-
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  read-only-job:
     permissions:
-      checks: write     # Allow only check creation
+      contents: read # this job only needs read
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Can only read"
+
+  write-job:
+    permissions:
+      contents: write
+      pull-requests: write
+    runs-on: ubuntu-latest
 ```
+
+:::tip[Least Privilege Default]
+Set `permissions: {}` (empty — all denied) at the workflow level, then grant only what each job needs. This limits blast radius if a step is compromised.
+:::
 
 ## Matrix Strategy
 
-Run a job multiple times with different parameter combinations. Matrices create parallel jobs automatically.
+Run a job multiple times with different parameter combinations:
 
 ```yaml
 jobs:
   test:
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false      # Don't cancel other matrix jobs on failure
-      max-parallel: 4       # Limit concurrent jobs
+      fail-fast: false # don't cancel other matrix jobs if one fails
+      max-parallel: 4 # limit concurrent jobs
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         node: [18, 20, 22]
-        # Creates 9 jobs: 3 OS × 3 Node versions
+        # Results in 9 combinations: 3 OS × 3 Node versions
 
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - run: npm test
+      - run: npm ci && npm test
 ```
 
-### Include and Exclude
+### Matrix with Include and Exclude
 
 ```yaml
 strategy:
@@ -359,15 +334,14 @@ strategy:
     os: [ubuntu-latest, windows-latest]
     node: [18, 20]
     include:
-      # Add extra properties to an existing combination
+      # Add extra jobs beyond the matrix
       - os: ubuntu-latest
-        node: 20
+        node: 22
         experimental: true
-
-      # Add entirely new combinations
-      - os: macos-latest
+      # Add properties to existing combinations
+      - os: windows-latest
         node: 20
-
+        runs-extra-checks: true
     exclude:
       # Remove specific combinations
       - os: windows-latest
@@ -375,8 +349,6 @@ strategy:
 ```
 
 ### Dynamic Matrix from JSON
-
-Generate the matrix dynamically in a setup job:
 
 ```yaml
 jobs:
@@ -387,69 +359,79 @@ jobs:
     steps:
       - id: set-matrix
         run: |
-          echo 'matrix={"include":[{"node":"18"},{"node":"20"}]}' >> $GITHUB_OUTPUT
+          echo 'matrix={"include":[{"env":"staging","url":"https://staging.example.com"},{"env":"prod","url":"https://example.com"}]}' >> $GITHUB_OUTPUT
 
-  test:
+  deploy:
     needs: setup
     runs-on: ubuntu-latest
     strategy:
       matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
     steps:
-      - run: echo "Node ${{ matrix.node }}"
+      - run: echo "Deploying to ${{ matrix.env }} at ${{ matrix.url }}"
 ```
 
-## Filtering with `if` at the Workflow Level
-
-You can use `if:` on jobs to conditionally run them based on context:
-
-```yaml
-jobs:
-  deploy-staging:
-    if: github.ref == 'refs/heads/develop'
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "Deploy to staging"
-
-  deploy-prod:
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "Deploy to production"
-
-  notify:
-    if: always() && contains(needs.*.result, 'failure')
-    needs: [deploy-staging, deploy-prod]
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "A deployment failed"
-```
-
-## Path Filtering
-
-Trigger workflows only when specific paths change:
+## Workflow-Level `if` Conditions
 
 ```yaml
 on:
   push:
-    paths:
-      - 'backend/**'
-      - 'shared/**'
-      - 'package.json'
-
+    branches: [main]
   pull_request:
-    paths:
-      - 'frontend/**'
-      - '!frontend/**.md'   # Exclude docs changes in frontend
+
+# Skip the entire workflow for docs-only changes
+jobs:
+  build:
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'skip-ci'))
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build
 ```
 
-:::tip[Separate frontend and backend workflows]
-Create separate workflow files — one for frontend changes and one for backend changes using `paths:` filtering. This prevents a CSS change from triggering your entire backend test suite.
-:::
+## Path Filtering with `dorny/paths-filter`
+
+For fine-grained path-based job skipping:
+
+```yaml
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'api/**'
+              - 'packages/server/**'
+            frontend:
+              - 'web/**'
+              - 'packages/ui/**'
+
+  test-backend:
+    needs: changes
+    if: ${{ needs.changes.outputs.backend == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run test:api
+
+  test-frontend:
+    needs: changes
+    if: ${{ needs.changes.outputs.frontend == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run test:web
+```
 
 ## Complete Advanced Workflow Example
 
 ```yaml
-name: Advanced CI
+name: Advanced CI/CD
 
 on:
   push:
@@ -457,11 +439,10 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main]
-  schedule:
-    - cron: '0 3 * * 1'   # Weekly dependency audit
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
-      skip-deploy:
+      skip-tests:
         type: boolean
         default: false
 
@@ -473,46 +454,51 @@ permissions:
   contents: read
   pull-requests: write
 
+env:
+  NODE_VERSION: '20'
+  REGISTRY: ghcr.io
+
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
       - run: npm ci --ignore-scripts
       - run: npm run lint
+      - run: npm run type-check
 
   test:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-        node: [18, 20, 22]
-        include:
-          - os: windows-latest
-            node: 20
-    needs: lint
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node }}
-          cache: 'npm'
-      - run: npm ci
-      - run: npm test
-
-  security-audit:
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'push'
+    timeout-minutes: 15
+    if: ${{ !inputs.skip-tests }}
+    strategy:
+      matrix:
+        shard: [1, 2, 3, 4] # split tests into 4 parallel shards
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
-      - run: npm audit --audit-level=high
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm test -- --shard=${{ matrix.shard }}/4
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    timeout-minutes: 15
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci && npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
 ```

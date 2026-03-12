@@ -1,243 +1,265 @@
 ---
 title: Advanced C Programming
-description: Preprocessor macros, compilation and linking, signals, setjmp/longjmp, multi-file projects, C11 threads, atomics, and compiler extensions.
+description: Preprocessor macros, compilation and linking, signals, setjmp/longjmp, multi-file projects, C11 threads and atomics, and advanced language features.
 sidebar:
   order: 7
 tags: [systems, cpp, c]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
 # Advanced C Programming
 
-This guide covers the advanced features of C that distinguish proficient systems programmers: the preprocessor's full power, linking mechanics, signal handling, multi-file project organization, and C11's threading and atomics support.
+This guide covers the C features that separate beginner from expert: the preprocessor, linker behavior, signal handling, multi-file project architecture, and C11's threading and atomic primitives.
 
-## The Preprocessor
+## The C Preprocessor
 
-The C preprocessor runs before compilation and performs textual transformation. It knows nothing about C syntax.
+The preprocessor transforms source text before compilation. It knows nothing about C syntax — it operates purely on text.
 
-### Macros and Conditional Compilation
+### Include Directives
 
 ```c
-// --- Constants ---
-#define PI           3.14159265358979323846
-#define MAX_BUF_SIZE 4096
-#define APP_VERSION  "1.2.3"
+// Angle brackets: search system/compiler include paths
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
 
-// --- Function-like macros ---
-// WARNING: arguments are evaluated multiple times — dangerous with side effects
-#define MAX(a, b)        ((a) > (b) ? (a) : (b))
-#define SQUARE(x)        ((x) * (x))
-#define ARRAY_LEN(arr)   (sizeof(arr) / sizeof((arr)[0]))
-#define OFFSET_OF(T, m)  ((size_t)&((T*)0)->m)  // manual offsetof
+// Quotes: search current directory first, then system paths
+#include "mylib.h"
+#include "../../common/utils.h"
 
-// Correct usage:
-// MAX(x++, y++)  — WRONG: x or y incremented twice
-// MAX(++x, y)    — WRONG: x incremented twice if x > y
+// You can compute include paths (rarely done, but possible)
+#define HEADER "mylib.h"
+#include HEADER
+```
 
-// Safer: use a compound statement macro (GCC extension)
-#define SAFE_MAX(a, b) ({      \
-    __typeof__(a) _a = (a);    \
-    __typeof__(b) _b = (b);    \
-    _a > _b ? _a : _b;         \
-})
+### Object-like and Function-like Macros
 
-// --- Conditional compilation ---
-#ifdef _WIN32
-    #include <windows.h>
-    #define PLATFORM "Windows"
-#elif defined(__linux__)
-    #include <unistd.h>
-    #define PLATFORM "Linux"
-#elif defined(__APPLE__)
-    #include <unistd.h>
-    #define PLATFORM "macOS"
+```c
+// Object-like macro (constant replacement)
+#define PI        3.14159265358979323846
+#define MAX_SIZE  1024
+#define TRUE      1
+#define FALSE     0
+
+// Prefer typed constants when possible (const variables or enum):
+static const double kPi = 3.14159265358979323846;
+
+// Function-like macros — arguments are text-substituted
+// Wrap EVERYTHING in parentheses to avoid precedence issues!
+#define MIN(a, b)    (((a) < (b)) ? (a) : (b))
+#define MAX(a, b)    (((a) > (b)) ? (a) : (b))
+#define ABS(x)       (((x) < 0) ? -(x) : (x))
+#define CLAMP(v,lo,hi) (MIN(MAX((v),(lo)),(hi)))
+
+// Array size (common idiom)
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
+
+// Stringify (#) — converts argument to string literal
+#define STRINGIFY(x)  #x
+#define XSTRINGIFY(x) STRINGIFY(x)  // Extra level for macro expansion
+
+// Token concatenation (##) — joins two tokens into one
+#define MAKE_VAR(prefix, num)  prefix##num
+int MAKE_VAR(count, 1) = 0;  // Expands to: int count1 = 0;
+int MAKE_VAR(count, 2) = 0;  // int count2 = 0;
+
+// Variadic macros with __VA_ARGS__
+#define LOG(fmt, ...)  fprintf(stderr, "[LOG] " fmt "\n", ##__VA_ARGS__)
+#define ASSERT(cond)   \
+    do { if (!(cond)) { \
+        fprintf(stderr, "Assert failed: %s at %s:%d\n", \
+                #cond, __FILE__, __LINE__); \
+        abort(); \
+    } } while(0)
+
+// Multi-statement macro — ALWAYS wrap in do { } while(0)
+#define SWAP(a, b, type) \
+    do { type _tmp = (a); (a) = (b); (b) = _tmp; } while(0)
+
+// Usage:
+LOG("Value = %d", 42);
+ASSERT(1 + 1 == 2);
+int x = 5, y = 10;
+SWAP(x, y, int);
+```
+
+### Conditional Compilation
+
+```c
+// Include guards — prevent double-inclusion
+// In mylib.h:
+#ifndef MYLIB_H
+#define MYLIB_H
+
+// ... header content ...
+
+#endif // MYLIB_H
+
+// pragma once (non-standard but widely supported, cleaner)
+#pragma once
+// ... header content ...
+
+// Compile-time feature detection
+#ifdef DEBUG
+    #define DBG_PRINT(fmt, ...) printf("[DEBUG] " fmt "\n", ##__VA_ARGS__)
 #else
-    #define PLATFORM "Unknown"
+    #define DBG_PRINT(fmt, ...) do { } while(0)  // Optimized away
 #endif
 
-// Feature detection
+// Platform detection
+#if defined(_WIN32) || defined(_WIN64)
+    #define PLATFORM_WINDOWS
+    #include <windows.h>
+#elif defined(__APPLE__)
+    #define PLATFORM_MACOS
+    #include <TargetConditionals.h>
+#elif defined(__linux__)
+    #define PLATFORM_LINUX
+#endif
+
+// Compiler detection
+#if defined(__GNUC__) && !defined(__clang__)
+    #define COMPILER_GCC
+    #define LIKELY(x)   __builtin_expect(!!(x), 1)
+    #define UNLIKELY(x) __builtin_expect(!!(x), 0)
+    #define FORCE_INLINE __attribute__((always_inline)) inline
+    #define NO_INLINE    __attribute__((noinline))
+#elif defined(__clang__)
+    #define COMPILER_CLANG
+    #define LIKELY(x)   __builtin_expect(!!(x), 1)
+    #define UNLIKELY(x) __builtin_expect(!!(x), 0)
+    #define FORCE_INLINE __attribute__((always_inline)) inline
+    #define NO_INLINE    __attribute__((noinline))
+#elif defined(_MSC_VER)
+    #define COMPILER_MSVC
+    #define LIKELY(x)   (x)
+    #define UNLIKELY(x) (x)
+    #define FORCE_INLINE __forceinline
+    #define NO_INLINE    __declspec(noinline)
+#endif
+
+// Feature testing (C11+)
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-    // C11 features available
-    #define HAS_C11 1
+    #define HAS_C11
 #endif
 
 // #if with expressions
-#if MAX_BUF_SIZE >= 4096
-    #define USE_LARGE_BUFFER 1
+#define VERSION_MAJOR 2
+#define VERSION_MINOR 4
+#if VERSION_MAJOR > 1 && defined(HAS_C11)
+    // Features for version 2+ with C11
 #endif
 
-// defined() operator
-#if defined(DEBUG) && !defined(NDEBUG)
-    #define LOG(fmt, ...) fprintf(stderr, "[DEBUG] " fmt "\n", ##__VA_ARGS__)
-#else
-    #define LOG(fmt, ...)  // expands to nothing in release
+// Emit a compile-time error
+#if CHAR_BIT != 8
+    #error "This code requires 8-bit bytes"
 #endif
+
+// Emit a compile-time warning (GCC/Clang)
+#if defined(ENABLE_DEPRECATED_API)
+    #warning "Deprecated API enabled — remove before release"
+#endif
+
+// __LINE__, __FILE__, __DATE__, __TIME__, __func__ (C99+)
+#define WHERE  __FILE__ ":" XSTRINGIFY(__LINE__)
+printf("Error at " WHERE "\n");
 ```
 
-### Include Guards and #pragma once
+### Predefined Macros
 
 ```c
-// Traditional include guards — most portable
-#ifndef MYHEADER_H
-#define MYHEADER_H
+printf("Compiled: %s %s\n", __DATE__, __TIME__);  // "Jan 01 2024" "12:00:00"
+printf("File: %s, Line: %d\n", __FILE__, __LINE__);
+printf("Function: %s\n", __func__);   // C99+
+printf("C standard: %ldL\n", (long)__STDC_VERSION__);  // 201112L for C11
 
-// ... header contents ...
-
-#endif /* MYHEADER_H */
-
-// #pragma once — supported by all major compilers (GCC, Clang, MSVC)
-// Slightly faster (compiler doesn't re-open the file)
-#pragma once
-
-// ... header contents ...
-```
-
-### Token Concatenation and Stringification
-
-```c
-#include <stdio.h>
-
-// ## — token pasting (concatenation)
-#define MAKE_FUNC(prefix, suffix) prefix##_##suffix
-// MAKE_FUNC(get, value) → get_value
-
-#define TYPED_VAR(type, name) type name##_##type
-// TYPED_VAR(int, count) → int count_int
-
-// # — stringification (converts token to string literal)
-#define STRINGIFY(x)  #x
-#define TOSTRING(x)   STRINGIFY(x)    // extra level needed for macro expansion
-
-#define ASSERT(cond)                                              \
-    do {                                                          \
-        if (!(cond)) {                                            \
-            fprintf(stderr, "Assertion failed: %s\n"             \
-                    "  File: %s, Line: %d\n",                    \
-                    #cond, __FILE__, __LINE__);                   \
-            abort();                                              \
-        }                                                         \
-    } while (0)   /* do-while(0) makes macro safe in if/else */
-
-// Predefined macros
-#define BUILD_INFO \
-    "Built: " __DATE__ " " __TIME__ \
-    " File: " __FILE__ \
-    " Line: " TOSTRING(__LINE__)
-
-// Variadic macros (C99)
-#define TRACE(fmt, ...) \
-    printf("[%s:%d] " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__)
-// ## before __VA_ARGS__ handles the case of zero variadic arguments (GCC)
-
-int main(void)
-{
-    ASSERT(1 + 1 == 2);  // passes
-    // ASSERT(1 == 2);   // would abort with message
-
-    TRACE("value = %d", 42);
-    TRACE("no args");
-
-    printf("STRINGIFY(hello world) = %s\n", STRINGIFY(hello world));
-    printf("PI as string: %s\n", TOSTRING(PI));  // "3.14159..."
-
-    return 0;
-}
-```
-
-### #error, #warning, #line
-
-```c
-// Compile-time error — stops compilation
-#if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 199901L
-    #error "This code requires C99 or later. Use -std=c99 or higher."
-#endif
-
-// Compile-time warning (GCC/Clang extension)
-#if defined(_MSC_VER)
-    #pragma message("Using MSVC — some GNU extensions may not be available")
-#else
-    #warning "This feature is experimental"
-#endif
-
-// #line — override __FILE__ and __LINE__ (used by code generators)
-#line 100 "generated_code.c"
-// Now __LINE__ reports 100 and __FILE__ reports "generated_code.c"
+// GCC/Clang extensions:
+printf("Pretty function: %s\n", __PRETTY_FUNCTION__);  // Full signature
 ```
 
 ## Compilation and Linking
 
-### Translation Units and Linkage
+### Linkage
 
 ```c
-// --- math_utils.h ---
-#ifndef MATH_UTILS_H
-#define MATH_UTILS_H
+// External linkage: accessible from other translation units
+int global_var = 42;          // External linkage
+void global_function(void) {}  // External linkage
 
-// External linkage — visible to all translation units
-int add(int a, int b);
-extern int global_counter;   // declaration (no storage)
+// Internal linkage: visible only within this translation unit
+static int private_var = 0;          // Internal linkage (file-private)
+static void private_helper(void) {}  // Internal linkage
 
-#endif
-
-// --- math_utils.c ---
-#include "math_utils.h"
-
-int global_counter = 0;     // definition — storage allocated here
-
-// Internal linkage — only visible in this .c file
-static int helper(int x) { return x * x; }
-
-// External linkage — defined here, declared in header
-int add(int a, int b)
-{
-    global_counter++;
-    return a + b + helper(0);  // can call static function internally
+// No linkage: local variables (only visible in their block)
+void foo(void) {
+    int local = 5;  // No linkage
+    static int persistent = 0;  // Static local: no linkage but persists
 }
 
-// Inline function — defined in header (C99); "inline" is a hint, not guarantee
-// In C11, you should have one "extern inline" definition in a .c file
-
-// --- main.c ---
-#include <stdio.h>
-#include "math_utils.h"
-
-int main(void)
-{
-    printf("%d\n", add(3, 4));        // 7
-    printf("calls: %d\n", global_counter);  // 1
-    return 0;
-}
+// extern: declare without defining (use definition from another TU)
+extern int counter;   // Defined in counter.c
+extern void init(void);  // Defined in init.c
 ```
 
-### Static and Dynamic Libraries
+### Static vs Dynamic Libraries
 
+<Tabs>
+  <TabItem label="Static Library (.a)">
 ```bash
-# --- Static library (.a on Linux/macOS, .lib on Windows) ---
-# Compile object files
+# Create object files
 gcc -c -O2 math_utils.c -o math_utils.o
 gcc -c -O2 string_utils.c -o string_utils.o
 
-# Create archive (static library)
-ar rcs libmyutils.a math_utils.o string_utils.o
-# ar flags: r=insert, c=create, s=add index
+# Create static library (archive)
 
-# Link against static library
-gcc main.c -L. -lmyutils -o program
-# Library search: -L<dir> adds directory; -l<name> links lib<name>.a or lib<name>.so
+ar rcs libutils.a math_utils.o string_utils.o
 
-# --- Dynamic/shared library (.so on Linux, .dylib on macOS, .dll on Windows) ---
-gcc -c -fPIC -O2 math_utils.c -o math_utils.o   # -fPIC: position independent code
-gcc -shared -o libmyutils.so math_utils.o
+# List library contents
+
+ar t libutils.a
+
+# Link against static library (code is copied into executable)
+
+gcc main.c -L. -lutils -o myapp
+
+# Or directly
+
+gcc main.c libutils.a -o myapp
+
+````
+</TabItem>
+  <TabItem label="Shared Library (.so/.dll)">
+```bash
+# Create position-independent object files
+gcc -c -fPIC -O2 math_utils.c -o math_utils.o
+
+# Create shared library
+gcc -shared -o libutils.so math_utils.o
+
+# On macOS (.dylib)
+gcc -dynamiclib -o libutils.dylib math_utils.o
 
 # Link against shared library
-gcc main.c -L. -lmyutils -o program
-# Run: LD_LIBRARY_PATH=. ./program  (or install to /usr/local/lib and run ldconfig)
+gcc main.c -L. -lutils -o myapp
 
-# Symbol visibility
-gcc -fvisibility=hidden ...    # hide all symbols by default
-# Then explicitly mark exported: __attribute__((visibility("default")))
-```
+# Set rpath so loader finds the library
+gcc main.c -L. -lutils -Wl,-rpath,. -o myapp
+
+# At runtime, set LD_LIBRARY_PATH (Linux) or DYLD_LIBRARY_PATH (macOS)
+export LD_LIBRARY_PATH=.:$LD_LIBRARY_PATH
+./myapp
+````
+
+</TabItem>
+</Tabs>
 
 ## Signal Handling
 
@@ -245,194 +267,187 @@ gcc -fvisibility=hidden ...    # hide all symbols by default
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 
-// volatile sig_atomic_t — the ONLY type safely read/written in signal handlers
-volatile sig_atomic_t shutdown_requested = 0;
-volatile sig_atomic_t reload_config      = 0;
+// volatile sig_atomic_t: only type guaranteed safe in signal handlers
+static volatile sig_atomic_t g_running = 1;
+static volatile sig_atomic_t g_reload  = 0;
 
-// Signal handler — must be async-signal-safe
-// SAFE functions in handlers: write(), _Exit(), signal(), ...
-// NOT SAFE: printf(), malloc(), free(), most library functions
-void handle_sigint(int signo)
-{
-    (void)signo;
-    shutdown_requested = 1;
-    // write() is async-signal-safe; printf() is NOT
-    const char msg[] = "\nShutdown requested\n";
+// Signal handler: VERY restricted — only async-signal-safe functions
+// Allowed: write() (not printf), signal(), abort(), _exit()
+// NOT allowed: malloc, free, printf, fprintf, most library functions
+void handle_sigint(int sig) {
+    (void)sig;
+    g_running = 0;
+    // write() is async-signal-safe; printf is NOT
+    const char msg[] = "\nReceived SIGINT — shutting down\n";
     write(STDOUT_FILENO, msg, sizeof(msg) - 1);
 }
 
-void handle_sigusr1(int signo)
-{
-    (void)signo;
-    reload_config = 1;
+void handle_sighup(int sig) {
+    (void)sig;
+    g_reload = 1;  // Main loop will handle the actual reload
 }
 
-// sigaction — more portable and powerful than signal()
-void setup_signals(void)
-{
+// sigaction is preferred over signal() — more portable and predictable
+void setup_signals(void) {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
+
+    // SIGINT (Ctrl+C)
     sa.sa_handler = handle_sigint;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART;   // restart interrupted system calls
+    sigemptyset(&sa.sa_mask);  // Don't block other signals during handler
+    sa.sa_flags = SA_RESTART;  // Restart interrupted system calls
+    if (sigaction(SIGINT, &sa, NULL) == -1) { perror("sigaction"); exit(1); }
 
-    if (sigaction(SIGINT,  &sa, NULL) < 0) { perror("sigaction"); exit(1); }
-    if (sigaction(SIGTERM, &sa, NULL) < 0) { perror("sigaction"); exit(1); }
+    // SIGHUP (terminal hangup / reload)
+    sa.sa_handler = handle_sighup;
+    if (sigaction(SIGHUP, &sa, NULL) == -1) { perror("sigaction"); exit(1); }
 
-    sa.sa_handler = handle_sigusr1;
-    if (sigaction(SIGUSR1, &sa, NULL) < 0) { perror("sigaction"); exit(1); }
+    // SIGTERM (graceful shutdown)
+    sa.sa_handler = handle_sigint;  // Reuse same handler
+    if (sigaction(SIGTERM, &sa, NULL) == -1) { perror("sigaction"); exit(1); }
 
-    // Ignore SIGPIPE (common for network servers)
-    signal(SIGPIPE, SIG_IGN);
+    // Ignore SIGPIPE (common for network servers — broken pipe)
+    sa.sa_handler = SIG_IGN;
+    if (sigaction(SIGPIPE, &sa, NULL) == -1) { perror("sigaction"); exit(1); }
 }
 
-int main(void)
-{
+int main(void) {
     setup_signals();
-    printf("Running (PID=%d). Ctrl-C to stop.\n", getpid());
+    printf("Running (PID %d). Press Ctrl+C to stop.\n", getpid());
 
-    while (!shutdown_requested) {
-        if (reload_config) {
-            reload_config = 0;
-            printf("Reloading config...\n");
+    while (g_running) {
+        if (g_reload) {
+            printf("Reloading configuration...\n");
+            g_reload = 0;
         }
-        // do work...
         sleep(1);
+        printf("Tick\n");
     }
 
-    printf("Shutting down cleanly.\n");
+    printf("Graceful shutdown complete.\n");
     return 0;
 }
 ```
 
-## setjmp / longjmp — Non-Local Jumps
+## setjmp / longjmp
+
+`setjmp`/`longjmp` implements non-local jumps — jumping out of nested function calls without stack unwinding. Useful for error recovery, but dangerous.
 
 ```c
 #include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-// jmp_buf stores the execution context (registers, stack pointer, etc.)
+// Error codes
+typedef enum { ERR_NONE = 0, ERR_OOM = 1, ERR_IO = 2, ERR_LOGIC = 3 } Error;
+
+// Error recovery context
 static jmp_buf error_context;
 
-// Error codes
-enum { ERR_OK = 0, ERR_IO, ERR_MEM, ERR_PARSE };
-
-void deep_function(int fail_type)
-{
-    printf("deep_function: about to fail with code %d\n", fail_type);
-    // longjmp unwinds the stack back to the setjmp call point
-    // WARNING: destructors, cleanup, and C++ RAII do NOT run!
-    longjmp(error_context, fail_type);
-    // Code after longjmp never executes
-    printf("This line never prints\n");
+// Functions that can "throw" errors
+void allocate_resources(int n) {
+    void *p = malloc((size_t)n * 1024 * 1024);
+    if (!p) {
+        longjmp(error_context, ERR_OOM);  // Jump back to setjmp point
+    }
+    printf("Allocated %d MB\n", n);
+    free(p);
 }
 
-void middle_function(void)
-{
-    printf("middle_function called\n");
-    deep_function(ERR_MEM);
+void complex_operation(void) {
+    allocate_resources(10);
+    // ... more work ...
+    int trigger = 1;
+    if (trigger) longjmp(error_context, ERR_LOGIC);  // Simulate error
+    allocate_resources(100);  // Never reached
 }
 
-int main(void)
-{
-    int error_code;
+int main(void) {
+    int err;
 
-    // setjmp returns 0 on initial call
-    // Returns non-zero when called via longjmp (the longjmp value argument)
-    if ((error_code = setjmp(error_context)) == 0) {
+    // setjmp: saves execution context; returns 0 on first call
+    // Returns non-zero when jumped to via longjmp
+    if ((err = setjmp(error_context)) == 0) {
         // Normal execution path
-        printf("Starting operation\n");
-        middle_function();
-        printf("This line never prints\n");
+        printf("Starting operation...\n");
+        complex_operation();
+        printf("Operation complete!\n");  // Not reached
     } else {
-        // Error recovery path — jumped here by longjmp
-        switch (error_code) {
-            case ERR_IO:    fprintf(stderr, "I/O error\n");     break;
-            case ERR_MEM:   fprintf(stderr, "Out of memory\n"); break;
-            case ERR_PARSE: fprintf(stderr, "Parse error\n");   break;
+        // Error recovery path
+        switch (err) {
+            case ERR_OOM:   printf("Error: out of memory\n"); break;
+            case ERR_IO:    printf("Error: I/O failure\n"); break;
+            case ERR_LOGIC: printf("Error: logic error\n"); break;
+            default:        printf("Error: unknown (%d)\n", err); break;
         }
     }
 
-    printf("Continuing after error handling\n");
-    return 0;
+    return err != ERR_NONE ? 1 : 0;
 }
 ```
 
-:::caution[setjmp Dangers]
-`longjmp` does **not** call destructors, `free()` registered atexit handlers, or unwind the stack cleanly. It bypasses resource cleanup. Prefer returning error codes in C, or C++ exceptions (which do unwind). Use `setjmp`/`longjmp` only when you have no other option (e.g., in a parser where you control all resources via a top-level cleanup step).
+:::caution[setjmp/longjmp Dangers]
+`longjmp` skips destructors, does NOT free heap memory allocated since `setjmp`, and can corrupt the stack if the function containing `setjmp` has already returned. Variables that changed between `setjmp` and `longjmp` must be declared `volatile`. Use only as a last resort; prefer error return codes.
 :::
 
 ## C11 Threads
 
 ```c
-#include <threads.h>  // C11
+#include <threads.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-#define NUM_THREADS 4
-#define ITEMS_PER_THREAD 1000000
+// Mutex for protecting shared state
+mtx_t g_mutex;
+int   g_counter = 0;
 
-typedef struct {
-    long long *array;
-    int start, end;
-    long long result;
-} SumTask;
+// Thread function signature: int fn(void*)
+int worker_thread(void *arg) {
+    int id = *(int*)arg;
+    free(arg);
 
-int sum_thread(void *arg)
-{
-    SumTask *task = (SumTask *)arg;
-    long long sum = 0;
-    for (int i = task->start; i < task->end; i++) {
-        sum += task->array[i];
-    }
-    task->result = sum;
-    return thrd_success;
-}
-
-// Mutex example
-static mtx_t mutex;
-static long long shared_counter = 0;
-
-int increment_thread(void *arg)
-{
-    (void)arg;
     for (int i = 0; i < 1000; i++) {
-        mtx_lock(&mutex);
-        shared_counter++;
-        mtx_unlock(&mutex);
+        mtx_lock(&g_mutex);
+        g_counter++;
+        mtx_unlock(&g_mutex);
     }
-    return thrd_success;
+
+    printf("Worker %d finished\n", id);
+    return 0;  // Return value retrievable via thrd_join
 }
 
-int main(void)
-{
-    // Initialize mutex
-    if (mtx_init(&mutex, mtx_plain) != thrd_success) {
+int main(void) {
+    // Initialize mutex (mtx_plain, mtx_recursive, mtx_timed)
+    if (mtx_init(&g_mutex, mtx_plain) != thrd_success) {
         fprintf(stderr, "mtx_init failed\n");
         return 1;
     }
 
-    // Launch threads
-    thrd_t threads[4];
-    for (int i = 0; i < 4; i++) {
-        if (thrd_create(&threads[i], increment_thread, NULL) != thrd_success) {
+    const int NUM_THREADS = 4;
+    thrd_t threads[NUM_THREADS];
+
+    // Create threads
+    for (int i = 0; i < NUM_THREADS; i++) {
+        int *id = malloc(sizeof(int));
+        *id = i;
+        if (thrd_create(&threads[i], worker_thread, id) != thrd_success) {
             fprintf(stderr, "thrd_create failed\n");
-            return 1;
         }
     }
 
-    // Join threads
-    for (int i = 0; i < 4; i++) {
-        int result;
-        thrd_join(threads[i], &result);
+    // Wait for all threads
+    for (int i = 0; i < NUM_THREADS; i++) {
+        int ret;
+        thrd_join(threads[i], &ret);
+        printf("Thread %d returned %d\n", i, ret);
     }
 
-    mtx_destroy(&mutex);
-    printf("shared_counter = %lld (expected %d)\n", shared_counter, 4000);
+    printf("Final counter: %d (expected %d)\n", g_counter, NUM_THREADS * 1000);
 
+    mtx_destroy(&g_mutex);
     return 0;
 }
 ```
@@ -441,104 +456,83 @@ int main(void)
 
 ```c
 #include <stdatomic.h>
-#include <stdio.h>
 #include <threads.h>
-
-// _Atomic qualifier — makes any type atomic
-_Atomic int atomic_counter = 0;
-atomic_flag spinlock = ATOMIC_FLAG_INIT;  // simple spinlock
-
-void spinlock_lock(void)
-{
-    // test_and_set returns previous value; loop until we set it from false
-    while (atomic_flag_test_and_set_explicit(&spinlock, memory_order_acquire))
-        ;  // spin
-}
-
-void spinlock_unlock(void)
-{
-    atomic_flag_clear_explicit(&spinlock, memory_order_release);
-}
-
-int counter_thread(void *arg)
-{
-    (void)arg;
-    for (int i = 0; i < 1000; i++) {
-        // atomic_fetch_add — thread-safe increment, returns old value
-        atomic_fetch_add_explicit(&atomic_counter, 1, memory_order_relaxed);
-    }
-    return thrd_success;
-}
-
-// Memory orders (from weakest to strongest):
-// memory_order_relaxed  — no ordering constraints; only atomicity
-// memory_order_acquire  — no reads/writes can be reordered BEFORE this load
-// memory_order_release  — no reads/writes can be reordered AFTER this store
-// memory_order_acq_rel  — both acquire and release (for RMW operations)
-// memory_order_seq_cst  — full sequential consistency (default if not specified)
-
-void demonstrate_memory_orders(void)
-{
-    _Atomic int x = 0, y = 0;
-
-    // Store-release followed by load-acquire creates happens-before
-    atomic_store_explicit(&x, 1, memory_order_release);
-    int val = atomic_load_explicit(&x, memory_order_acquire);
-    (void)val;
-
-    // Compare-and-swap (CAS) — the fundamental building block of lock-free
-    int expected = 0;
-    if (atomic_compare_exchange_strong_explicit(
-            &y, &expected, 42,
-            memory_order_acq_rel,
-            memory_order_relaxed)) {
-        printf("CAS succeeded: y = %d\n", atomic_load(&y));
-    }
-}
-```
-
-## Designated Initializers and Compound Literals (C99)
-
-```c
 #include <stdio.h>
 
-typedef struct { int x, y, z; } Point3D;
-typedef union  { int i; float f; } IntFloat;
+// Atomic types — operations on these are thread-safe without locks
+// (for basic types; larger structures still need mutexes)
+static atomic_int  g_ref_count  = ATOMIC_VAR_INIT(0);
+static atomic_bool g_stop_flag  = ATOMIC_VAR_INIT(false);
+static atomic_uint g_seq_number = ATOMIC_VAR_INIT(0);
 
-// Compound literals — create temporary objects (lvalue in C99+)
-void draw_at(const Point3D *p) {
-    printf("drawing at (%d,%d,%d)\n", p->x, p->y, p->z);
+void acquire(void) {
+    // atomic_fetch_add: atomically adds and returns old value
+    // memory_order_relaxed: no ordering guarantees beyond atomicity
+    atomic_fetch_add_explicit(&g_ref_count, 1, memory_order_relaxed);
 }
 
-int main(void)
-{
-    // Pass compound literal directly to function
-    draw_at(&(Point3D){ .x = 1, .y = 2, .z = 3 });
+void release(void) {
+    // Release ordering: ensures all prior writes are visible before decrement
+    if (atomic_fetch_sub_explicit(&g_ref_count, 1, memory_order_release) == 1) {
+        // Acquire ordering: ensure we see all writes from the releasing thread
+        atomic_thread_fence(memory_order_acquire);
+        printf("Last reference released — free the resource\n");
+    }
+}
 
-    // Array compound literal
-    int *primes = (int[]){ 2, 3, 5, 7, 11, 13 };
-    for (int i = 0; i < 6; i++) printf("%d ", primes[i]);
-    printf("\n");
+// Lock-free stack using CAS (compare-and-swap)
+typedef struct StackNode { int val; struct StackNode *next; } StackNode;
+typedef struct { _Atomic(StackNode*) top; } LockFreeStack;
 
-    // Compound literal in array initializer
-    Point3D points[3] = {
-        [0] = { 0, 0, 0 },
-        [2] = { .x = 10, .z = 5 },   // .y defaults to 0; [1] defaults to all-zero
-    };
-    printf("points[2] = (%d,%d,%d)\n", points[2].x, points[2].y, points[2].z);
+void stack_push(LockFreeStack *s, int val) {
+    StackNode *node = malloc(sizeof(StackNode));
+    node->val  = val;
+    StackNode *top;
+    do {
+        top        = atomic_load(&s->top);
+        node->next = top;
+    } while (!atomic_compare_exchange_weak(&s->top, &top, node));
+    // compare_exchange_weak: may fail spuriously (loop handles it)
+    // compare_exchange_strong: never fails spuriously (used for if-else)
+}
+
+int main(void) {
+    acquire(); acquire(); acquire();
+    printf("Ref count: %d\n", atomic_load(&g_ref_count));  // 3
+
+    release(); release(); release();  // Last release prints message
+
+    LockFreeStack stack = { .top = NULL };
+    stack_push(&stack, 1);
+    stack_push(&stack, 2);
+    stack_push(&stack, 3);
+
+    StackNode *n = atomic_load(&stack.top);
+    while (n) { printf("%d ", n->val); n = n->next; }
+    printf("\n");  // 3 2 1
+
+    // Cleanup (not thread-safe here — single-threaded cleanup)
+    n = atomic_load(&stack.top);
+    while (n) { StackNode *tmp = n->next; free(n); n = tmp; }
 
     return 0;
 }
 ```
 
-## restrict Qualifier and inline Functions
+## inline Functions and restrict
 
 ```c
-// restrict — promises no aliasing; enables better auto-vectorization
+// inline: hint to compiler to expand function at call site (avoids call overhead)
+// In C99+, inline in a header requires an external definition in exactly one .c file
+static inline int max_int(int a, int b) { return a > b ? a : b; }
+static inline float lerp(float a, float b, float t) { return a + (b - a) * t; }
+
+// restrict: promise pointer arguments don't alias each other
+// Enables aggressive auto-vectorization
 void matrix_multiply(
-    float *restrict C,
-    const float *restrict A,
-    const float *restrict B,
+    float * restrict C,
+    const float * restrict A,
+    const float * restrict B,
     int n)
 {
     for (int i = 0; i < n; i++) {
@@ -551,85 +545,52 @@ void matrix_multiply(
         }
     }
 }
+```
 
-// inline — suggests inlining at call site; avoids function call overhead
-// In C99: inline definition in header must be accompanied by
-// "extern inline" definition in one .c file (C11 relaxes this)
-static inline int fast_min(int a, int b)
-{
-    return a < b ? a : b;
-}
+## Designated Initializers and Compound Literals (C99+)
 
-static inline int fast_abs(int x)
-{
-    return x < 0 ? -x : x;
-}
+```c
+#include <stdio.h>
 
-// _Noreturn (C11) — function never returns (exit, abort, longjmp target wrappers)
-_Noreturn void fatal_error(const char *msg)
-{
-    fprintf(stderr, "FATAL: %s\n", msg);
-    abort();  // dumps core, terminates
+typedef struct { int x, y, w, h; } Rect;
+typedef struct { float r, g, b, a; } Color;
+
+// Designated initializer: initialize specific fields by name
+Rect r = { .x = 10, .y = 20, .w = 100, .h = 50 };
+
+// Compound literal: creates a temporary object
+// Useful for passing struct to a function without a named variable
+void draw_rect(Rect rect, Color color);
+
+void example(void) {
+    // Compound literal — anonymous temporary struct
+    draw_rect(
+        (Rect){ .x = 0, .y = 0, .w = 640, .h = 480 },
+        (Color){ .r = 1.0f, .g = 0.0f, .b = 0.0f, .a = 1.0f }
+    );
+
+    // Compound literal for arrays
+    int *arr = (int[]){ 1, 2, 3, 4, 5 };
+    for (int i = 0; i < 5; i++) printf("%d ", arr[i]);
+    printf("\n");
 }
 ```
 
-## Multi-File Project Structure
+:::tip[Multi-File Project Layout]
+A well-organized C project:
 
 ```
 project/
-├── include/
-│   ├── config.h       — project-wide constants, platform macros
-│   ├── math_utils.h   — math function declarations
-│   └── data_store.h   — opaque type + interface
-├── src/
-│   ├── main.c         — entry point
-│   ├── math_utils.c   — math implementations
-│   └── data_store.c   — data store implementation
-├── tests/
-│   └── test_math.c    — unit tests
-└── Makefile
+├── include/         ← public headers (only what external code needs)
+│   └── mylib.h
+├── src/             ← implementation files
+│   ├── core.c
+│   ├── utils.c
+│   └── network.c
+├── tests/           ← test programs
+├── examples/        ← example programs
+└── CMakeLists.txt
 ```
 
-```c
-// include/config.h — included everywhere
-#pragma once
-
-#define PROJECT_VERSION "1.0.0"
-#define MAX_ENTRIES 1024
-
-#ifdef NDEBUG
-  #define ASSERT(x) ((void)(x))
-#else
-  #include <assert.h>
-  #define ASSERT(x) assert(x)
-#endif
-
-// include/math_utils.h — public API
-#pragma once
-#include <stddef.h>
-
-double vec_dot(const double *a, const double *b, size_t n);
-double vec_norm(const double *v, size_t n);
-void   vec_normalize(double *v, size_t n);
-
-// src/math_utils.c — implementation
-#include "math_utils.h"
-#include <math.h>
-
-double vec_dot(const double *a, const double *b, size_t n) {
-    double s = 0;
-    for (size_t i = 0; i < n; i++) s += a[i] * b[i];
-    return s;
-}
-double vec_norm(const double *v, size_t n) { return sqrt(vec_dot(v, v, n)); }
-void   vec_normalize(double *v, size_t n) {
-    double len = vec_norm(v, n);
-    if (len > 1e-15) for (size_t i = 0; i < n; i++) v[i] /= len;
-}
-```
-
-:::tip[Header Best Practices]
-- Always use include guards (`#pragma once` or `#ifndef`).
-- Headers should only **declare**, not **define** (except `static inline` and `static const` for small values).
-- Include only what you need in headers (prefer forward declarations where possible) — this keeps compile times fast.
+Keep implementation details out of headers. Use `static` for file-private functions. Use `extern` declarations in headers for functions and global variables that need to cross translation unit boundaries.
 :::

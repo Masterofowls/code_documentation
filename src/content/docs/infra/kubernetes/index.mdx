@@ -1,203 +1,200 @@
 ---
 title: Kubernetes
-description: Complete Kubernetes documentation — architecture, pods, deployments, services, storage, scaling, and Helm.
+description: Complete Kubernetes documentation — architecture, workloads, networking, storage, scaling, and Helm package management.
 sidebar:
   order: 1
 tags: [devops, kubernetes]
 ---
 
-import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import {
+  Steps,
+  Aside,
+  Tabs,
+  TabItem,
+  Card,
+  CardGrid,
+} from '@astrojs/starlight/components';
 
 # Kubernetes
 
-Kubernetes (K8s) is an open-source container orchestration platform that automates deploying, scaling, and managing containerized applications. Originally developed by Google and donated to the CNCF, it is now the industry standard for running containers at scale.
-
----
+Kubernetes (K8s) is an open-source container orchestration system that automates the deployment, scaling, and management of containerised applications. Originally designed by Google, it is now maintained by the Cloud Native Computing Foundation (CNCF).
 
 ## The Container Orchestration Problem
 
-Running a single container on one machine is simple. Running **hundreds of containers across dozens of machines** in production is a different challenge entirely:
+Running a single container on a single server is easy. Production workloads need much more:
 
-- How do you ensure containers restart if they crash?
-- How do you roll out new versions with zero downtime?
-- How do you scale up under load and scale down to save costs?
-- How do you route traffic to healthy containers?
-- How do you distribute containers across machines to use resources efficiently?
-- How do you manage configuration and secrets across environments?
+- **High availability** — if a server crashes, containers must restart elsewhere
+- **Scaling** — automatically add instances when traffic spikes, remove them when it drops
+- **Rolling updates** — deploy new versions without downtime
+- **Service discovery** — containers need to find each other without hardcoded IPs
+- **Load balancing** — distribute traffic across multiple container instances
+- **Secret management** — inject credentials without baking them into images
+- **Storage orchestration** — attach persistent storage from cloud providers or NFS
+- **Self-healing** — restart failed containers, replace unresponsive ones
+- **Resource management** — schedule containers to nodes with sufficient CPU and memory
 
-Kubernetes solves all of these problems.
-
----
+Kubernetes solves all of these problems with a declarative API: you describe the **desired state** and Kubernetes continuously reconciles actual state to match it.
 
 ## Kubernetes Architecture
 
-Kubernetes follows a **control plane / data plane** architecture.
-
 ```
-┌────────────────────────────────────────────────────────────────────┐
-│                        CONTROL PLANE                               │
-│                                                                    │
-│  ┌──────────────┐  ┌─────────────┐  ┌────────────────────────┐   │
-│  │  API Server  │  │    etcd     │  │  Controller Manager    │   │
-│  │(kube-apiserver)│ │ (key-value │  │  (node, replication,   │   │
-│  │              │  │  store)     │  │   endpoints, etc.)     │   │
-│  └──────┬───────┘  └─────────────┘  └────────────────────────┘   │
-│         │                                                          │
-│  ┌──────┴──────────────┐                                           │
-│  │     Scheduler       │                                           │
-│  │  (kube-scheduler)   │                                           │
-│  └─────────────────────┘                                           │
-└────────────────────────────────────────────────────────────────────┘
-           │
-           │ kubelet (watches API server)
-           ▼
-┌────────────────────────────────────────────────────────────────────┐
-│                    DATA PLANE (Worker Nodes)                        │
-│                                                                    │
-│  ┌──────────────────────────────────────────────────────────────┐ │
-│  │                       Node 1                                  │ │
-│  │  ┌──────────┐  ┌─────────────────────────────────────────┐  │ │
-│  │  │  kubelet │  │              kube-proxy                  │  │ │
-│  │  └──────────┘  └─────────────────────────────────────────┘  │ │
-│  │                                                               │ │
-│  │  ┌─────────────────────┐  ┌─────────────────────────────┐   │ │
-│  │  │  Pod (containers)   │  │     Pod (containers)        │   │ │
-│  │  └─────────────────────┘  └─────────────────────────────┘   │ │
-│  └──────────────────────────────────────────────────────────────┘ │
-└────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                        CONTROL PLANE                            │
+│                                                                  │
+│  ┌─────────────────┐  ┌──────────┐  ┌──────────────────────┐   │
+│  │   API Server    │  │   etcd   │  │  Controller Manager  │   │
+│  │  (kube-apiserver│  │(distributed  │  (node, replication, │   │
+│  │   REST API)     │  │ key-value)│  │   endpoint, job...) │   │
+│  └────────┬────────┘  └──────────┘  └──────────────────────┘   │
+│           │                                                      │
+│  ┌────────▼────────┐                                            │
+│  │    Scheduler    │  (assigns pods to nodes)                   │
+│  │ (kube-scheduler)│                                            │
+│  └─────────────────┘                                            │
+└──────────────────────────────┬───────────────────────────────────┘
+                               │
+          ┌────────────────────┼────────────────────┐
+          │                    │                    │
+┌─────────▼──────┐   ┌────────▼───────┐   ┌────────▼───────┐
+│    NODE 1      │   │    NODE 2      │   │    NODE 3      │
+│                │   │                │   │                │
+│  ┌──────────┐  │   │  ┌──────────┐  │   │  ┌──────────┐  │
+│  │  kubelet │  │   │  │  kubelet │  │   │  │  kubelet │  │
+│  └──────────┘  │   │  └──────────┘  │   │  └──────────┘  │
+│  ┌──────────┐  │   │  ┌──────────┐  │   │  ┌──────────┐  │
+│  │kube-proxy│  │   │  │kube-proxy│  │   │  │kube-proxy│  │
+│  └──────────┘  │   │  └──────────┘  │   │  └──────────┘  │
+│  ┌──────────┐  │   │  ┌──────────┐  │   │  ┌──────────┐  │
+│  │  Pods    │  │   │  │  Pods    │  │   │  │  Pods    │  │
+│  └──────────┘  │   │  └──────────┘  │   │  └──────────┘  │
+└────────────────┘   └────────────────┘   └────────────────┘
 ```
 
 ### Control Plane Components
 
 **kube-apiserver**
-The front end to the Kubernetes control plane. All communication goes through the API server — `kubectl`, controllers, kubelets, and external tools all talk to it via REST. It validates and processes requests, then persists state to etcd.
+The front door to Kubernetes. All communication — from `kubectl`, from nodes, from controllers — goes through the REST API server. It validates and processes API objects, and is the only component that talks to etcd.
 
 **etcd**
-A distributed, highly available key-value store used as Kubernetes' backing store for all cluster data. Think of it as the cluster's source of truth. Back it up regularly.
+A distributed, strongly consistent key-value store. The single source of truth for all cluster state: what nodes exist, what pods are running, what ConfigMaps and Secrets contain. Always run etcd in HA (3 or 5 nodes) in production.
 
 **kube-scheduler**
-Watches for newly created Pods with no assigned node and selects the best node to run them on, based on resource requirements, affinity rules, taints/tolerations, and other constraints.
+Watches for newly created Pods with no assigned node and selects a node for them to run on. Considers: resource requirements, hardware/software constraints, affinity rules, taints and tolerations, data locality.
 
 **kube-controller-manager**
-Runs controller processes in a single binary. Each controller is a control loop that watches cluster state and makes changes to move the current state toward the desired state. Examples: Node controller, Replication controller, Endpoints controller, Service Account controller.
+Runs controller loops that watch state and take action. Includes: Node Controller (notices when nodes go down), Replication Controller (maintains correct pod count), Endpoints Controller, Service Account Controller, and many more.
 
-**cloud-controller-manager**
-Embeds cloud-specific control logic. Lets you link your cluster into your cloud provider's API (for LoadBalancer services, PersistentVolumes via cloud disks, etc.).
-
-### Data Plane (Worker Node) Components
+### Node Components
 
 **kubelet**
-An agent that runs on every worker node. It watches the API server for Pods assigned to its node and ensures they are running and healthy. It talks to the container runtime (containerd/CRI-O) to manage containers.
+An agent on every node. Receives PodSpec (from the API server) and ensures the described containers are running and healthy. Communicates pod status back to the control plane.
 
 **kube-proxy**
-Maintains network rules on nodes that implement the Kubernetes Service concept. It enables communication to Pods from inside or outside the cluster using iptables or IPVS rules.
+A network proxy on every node. Implements the Service concept by maintaining iptables/ipvs rules to route traffic to the correct pods. Handles load balancing across pod endpoints.
 
-**Container Runtime**
-The software responsible for running containers. Kubernetes supports any CRI-compliant runtime: `containerd` (default), `CRI-O`, or others.
-
----
+**Container runtime**
+The software that actually runs containers. Kubernetes supports any OCI-compliant runtime: containerd (most common), CRI-O, Docker (via cri-dockerd shim).
 
 ## Managed Kubernetes Services
 
-Running your own control plane is complex and risky. Managed services handle the control plane for you.
+| Service       | Provider     | Notes                                                              |
+| ------------- | ------------ | ------------------------------------------------------------------ |
+| **EKS**       | AWS          | EC2 or Fargate worker nodes; integrates with IAM, ALB, EBS         |
+| **GKE**       | Google Cloud | Autopilot mode for fully managed nodes; best Kubernetes experience |
+| **AKS**       | Azure        | Deep Azure AD integration; free control plane                      |
+| **DOKS**      | DigitalOcean | Simple, affordable, good for smaller workloads                     |
+| **k3s**       | Rancher/SUSE | Lightweight K8s, great for edge and on-prem                        |
+| **k0s**       | Mirantis     | Single binary, no external dependencies                            |
+| **OpenShift** | Red Hat      | Enterprise K8s with additional developer tools                     |
 
-| Service | Provider | Notes |
-|---|---|---|
-| **EKS** | AWS | Elastic Kubernetes Service. Tight AWS integration (IAM, ALB, EBS, EFS). |
-| **GKE** | Google Cloud | Google Kubernetes Engine. Best managed experience; Autopilot mode available. |
-| **AKS** | Azure | Azure Kubernetes Service. Free control plane; strong Windows container support. |
-| **DOKS** | DigitalOcean | Simple, affordable. Good for smaller workloads. |
-| **k3s** | Rancher/SUSE | Lightweight K8s. Runs on edge, IoT, Raspberry Pi. |
-| **OpenShift** | Red Hat | Enterprise K8s platform with built-in CI/CD and developer tools. |
+## Kubernetes vs Docker Swarm vs Nomad
 
-:::tip[Start with managed]
-Unless you have specific on-prem requirements or enjoy infrastructure operations, use a managed service. The control plane is not where you add value — your applications are.
-:::
+| Feature                     | Kubernetes                      | Docker Swarm     | Nomad                    |
+| --------------------------- | ------------------------------- | ---------------- | ------------------------ |
+| **Complexity**              | High                            | Low              | Medium                   |
+| **Ecosystem**               | Massive (CNCF)                  | Small            | Medium (HashiCorp)       |
+| **Scaling**                 | Sophisticated (HPA, VPA, KEDA)  | Basic            | Good                     |
+| **Networking**              | CNI plugins (Calico, Cilium...) | Built-in overlay | Consul integration       |
+| **Storage**                 | PV/PVC/CSI                      | Volume plugins   | Task volumes             |
+| **Learning curve**          | Steep                           | Gentle           | Moderate                 |
+| **Non-container workloads** | Pods only                       | Docker only      | VMs, JARs, binaries      |
+| **Production readiness**    | Industry standard               | Limited use      | Good for mixed workloads |
+| **GPU support**             | Yes (device plugins)            | Limited          | Yes                      |
 
----
+## Core Concepts Overview
 
-## Kubernetes vs Alternatives
+| Concept                   | Purpose                                                                               |
+| ------------------------- | ------------------------------------------------------------------------------------- |
+| **Pod**                   | Smallest deployable unit; one or more containers sharing network and storage          |
+| **Deployment**            | Manages ReplicaSets; handles rolling updates and rollbacks                            |
+| **StatefulSet**           | Like Deployment but for stateful apps; stable network identity and ordered deployment |
+| **DaemonSet**             | Runs exactly one pod per node (logging agents, monitoring)                            |
+| **Service**               | Stable IP/DNS endpoint for a set of pods; load balances traffic                       |
+| **Ingress**               | HTTP(S) routing rules; exposes services to the internet                               |
+| **ConfigMap**             | Non-sensitive configuration data; injected as env vars or files                       |
+| **Secret**                | Sensitive data (passwords, tokens); base64 encoded in etcd                            |
+| **PersistentVolumeClaim** | Request for persistent storage; bound to a PersistentVolume                           |
+| **Namespace**             | Virtual cluster; isolates resources within the same physical cluster                  |
+| **ServiceAccount**        | Identity for pods; controls API and resource access                                   |
+| **RBAC**                  | Role-Based Access Control; who can do what with which resources                       |
 
-| Feature | Kubernetes | Docker Swarm | HashiCorp Nomad |
-|---|---|---|---|
-| **Maturity** | Very high | Stable | High |
-| **Learning curve** | Steep | Low | Medium |
-| **Ecosystem** | Enormous (CNCF) | Small | Medium |
-| **Multi-tenancy** | Excellent (namespaces, RBAC) | Basic | Good |
-| **Autoscaling** | HPA, VPA, KEDA, Cluster Autoscaler | Manual | Autoscaler plugin |
-| **Storage** | Rich (CSI, many drivers) | Basic | Good |
-| **Non-container workloads** | Pods only | Containers only | VMs, binaries, containers |
-| **Community** | Massive | Shrinking | Active |
-| **Managed offering** | EKS, GKE, AKS, etc. | None cloud-managed | HCP Nomad |
-| **Config complexity** | High (YAML-heavy) | Low | Medium |
-
----
-
-## Core Kubernetes Concepts
-
-A brief overview of the objects you'll encounter most often:
-
-**Pod**
-The smallest deployable unit. A Pod wraps one or more containers that share network and storage. You rarely create Pods directly — controllers manage them.
-
-**Deployment**
-Manages a replicated set of Pods. Handles rolling updates, rollbacks, and scaling. The most common way to run stateless applications.
-
-**Service**
-A stable network endpoint for a set of Pods. Provides load balancing and DNS-based discovery. Types: ClusterIP, NodePort, LoadBalancer.
-
-**Ingress**
-Manages external HTTP/HTTPS access to Services. Defines routing rules based on hostname and path. Requires an Ingress Controller (nginx-ingress, Traefik, etc.).
-
-**ConfigMap**
-Stores non-sensitive configuration data as key-value pairs. Can be injected into Pods as environment variables or mounted as files.
-
-**Secret**
-Stores sensitive data (passwords, tokens, keys) in base64-encoded form. Can be injected as environment variables or volumes.
-
-**PersistentVolumeClaim (PVC)**
-A request for storage. Kubernetes provisions a PersistentVolume matching the claim's requirements (size, access mode, StorageClass).
-
-**Namespace**
-A mechanism to divide cluster resources between multiple users or teams. Provides scope for names, resource quotas, and RBAC policies.
-
-**StatefulSet**
-Like a Deployment, but for stateful applications. Provides stable network identities and persistent storage per replica. Used for databases, message queues, etc.
-
-**DaemonSet**
-Ensures a copy of a Pod runs on every (or selected) node. Used for log collectors, monitoring agents, network plugins.
-
----
-
-## Explore Kubernetes Documentation
+## What's in this Section
 
 <CardGrid>
   <Card title="Getting Started" icon="rocket">
-    Install kubectl, set up a local cluster, and learn the essential commands.
-    [Getting Started →](/infra/kubernetes/getting-started)
-</Card>
-  <Card title="Pods & Deployments" icon="list-format">
-    Pod spec, probes, Deployments, rollouts, StatefulSets, DaemonSets, Jobs, and CronJobs.
-    [Pods & Deployments →](/infra/kubernetes/pods-deployments)
-</Card>
+    Install kubectl, set up a local cluster, and deploy your first application.
+    [→ Getting Started](/infra/kubernetes/getting-started)
+  </Card>
+  <Card title="Pods & Deployments" icon="puzzle">
+    Deep dive into Pod specs, Deployments, StatefulSets, DaemonSets, Jobs, and
+    CronJobs. [→ Pods & Deployments](/infra/kubernetes/pods-deployments)
+  </Card>
   <Card title="Services & Ingress" icon="random">
-    ClusterIP, NodePort, LoadBalancer, Ingress rules, TLS, cert-manager, and Gateway API.
-    [Services & Ingress →](/infra/kubernetes/services-ingress)
-</Card>
+    Expose applications with ClusterIP, NodePort, LoadBalancer services, and
+    Ingress routing. [→ Services & Ingress](/infra/kubernetes/services-ingress)
+  </Card>
   <Card title="Config & Secrets" icon="document">
-    ConfigMaps, Secrets, External Secrets Operator, Sealed Secrets, and the Downward API.
-    [Config & Secrets →](/infra/kubernetes/config-secrets)
-</Card>
+    Manage application configuration with ConfigMaps, Secrets, and External
+    Secrets Operator. [→ Config & Secrets](/infra/kubernetes/config-secrets)
+  </Card>
   <Card title="Storage" icon="open-book">
-    PVs, PVCs, StorageClasses, CSI drivers, StatefulSet volumes, and volume snapshots.
-    [Storage →](/infra/kubernetes/storage)
-</Card>
-  <Card title="Scaling" icon="setting">
-    HPA, VPA, KEDA, Cluster Autoscaler, PodDisruptionBudgets, affinity, and taints.
-    [Scaling →](/infra/kubernetes/scaling)
-</Card>
-  <Card title="Helm" icon="external">
-    Package management for Kubernetes — charts, values, templating, and Helmfile.
-    [Helm →](/infra/kubernetes/helm)
-</Card>
+    Persistent storage with PVs, PVCs, StorageClasses, CSI drivers, and volume
+    snapshots. [→ Storage](/infra/kubernetes/storage)
+  </Card>
+  <Card title="Scaling" icon="approve-check-circle">
+    HPA, VPA, KEDA, Cluster Autoscaler, Pod Disruption Budgets, and topology
+    constraints. [→ Scaling](/infra/kubernetes/scaling)
+  </Card>
+  <Card title="Helm" icon="seti:helm">
+    Package, template, and deploy applications with Helm charts and Helmfile. [→
+    Helm](/infra/kubernetes/helm)
+  </Card>
 </CardGrid>
+
+## Quick Reference
+
+```bash
+# Get everything in a namespace
+kubectl get all -n myapp
+
+# Apply a manifest
+kubectl apply -f deployment.yaml
+
+# Get pod logs
+kubectl logs -f deployment/myapp
+
+# Shell into a pod
+kubectl exec -it pod/myapp-abc123 -- sh
+
+# Port forward to local machine
+kubectl port-forward svc/myapp 8080:80
+
+# Scale a deployment
+kubectl scale deployment/myapp --replicas=5
+
+# Watch rolling update
+kubectl rollout status deployment/myapp
+
+# Roll back
+kubectl rollout undo deployment/myapp
+```

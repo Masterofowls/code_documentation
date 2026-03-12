@@ -1,0 +1,532 @@
+---
+title: Deployment with GitHub Actions
+description: GitHub Environments, approval gates, deployment patterns, and deploying to Vercel, AWS, Azure, GCP, Kubernetes, and automating releases.
+sidebar:
+  order: 7
+tags: [devops, ci-cd]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Deployment workflows are where GitHub Actions delivers maximum value. This page covers GitHub Environments with approval gates, deployment patterns, cloud provider integrations, and release automation.
+
+## GitHub Environments
+
+Environments represent deployment targets (staging, production) with their own secrets, protection rules, and deployment history.
+
+### Creating an Environment
+
+<Steps>
+1. Go to **Settings → Environments → New environment**
+2. Name it (e.g., `staging`, `production`)
+3. Configure **Protection rules** (required reviewers, wait timer)
+4. Add **Environment secrets** (scoped to this environment only)
+5. Set an **Environment URL** (shown in deployments panel)
+</Steps>
+
+### Environment Configuration
+
+```yaml
+jobs:
+  deploy-production:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://example.com   # shown in PR deployment panel
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy
+        env:
+          # Environment secret — only available when targeting this environment
+          PROD_API_KEY: ${{ secrets.PROD_API_KEY }}
+        run: ./deploy.sh production
+```
+
+### Protection Rules
+
+**Required reviewers**: Require one or more people to approve before the deployment job runs. The workflow pauses and sends a notification.
+
+**Wait timer**: Add a minimum delay (1–43,200 minutes) before the job runs, giving time to cancel if a bad deployment was triggered accidentally.
+
+**Deployment branches**: Restrict which branches can deploy to this environment (e.g., only `main` can deploy to production).
+
+## Standard Deployment Pipeline Pattern
+
+```yaml
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  # --- Stage 1: Validate ---
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm test
+
+  # --- Stage 2: Build ---
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    outputs:
+      image-tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: tag
+        run: echo "tag=myapp:${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
+      - name: Build Docker image
+        run: docker build -t ${{ steps.tag.outputs.tag }} .
+      - name: Push to registry
+        run: docker push ${{ steps.tag.outputs.tag }}
+
+  # --- Stage 3: Deploy to Staging (automatic) ---
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: staging
+      url: https://staging.example.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to staging
+        env:
+          IMAGE_TAG: ${{ needs.build.outputs.image-tag }}
+          DEPLOY_TOKEN: ${{ secrets.STAGING_DEPLOY_TOKEN }}
+        run: ./scripts/deploy.sh staging $IMAGE_TAG
+
+  # --- Stage 4: Deploy to Production (requires approval) ---
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    environment:
+      name: production      # has required reviewers configured
+      url: https://example.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to production
+        env:
+          IMAGE_TAG: ${{ needs.build.outputs.image-tag }}
+          DEPLOY_TOKEN: ${{ secrets.PROD_DEPLOY_TOKEN }}
+        run: ./scripts/deploy.sh production $IMAGE_TAG
+
+      - name: Deployment summary
+        run: |
+          echo "## Production Deployment ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: ${{ needs.build.outputs.image-tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **SHA**: ${GITHUB_SHA:0:7}" >> $GITHUB_STEP_SUMMARY
+          echo "- **URL**: https://example.com" >> $GITHUB_STEP_SUMMARY
+```
+
+## Deploy to Vercel
+
+<Tabs>
+<TabItem label="Vercel CLI">
+
+```yaml
+name: Deploy to Vercel
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Pull Vercel environment
+        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Build project
+        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Deploy to Vercel
+        run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
+```
+
+</TabItem>
+<TabItem label="Preview Deployments">
+
+```yaml
+- name: Deploy preview
+  if: github.event_name == 'pull_request'
+  id: preview
+  run: |
+    URL=$(vercel deploy --token=${{ secrets.VERCEL_TOKEN }})
+    echo "url=$URL" >> $GITHUB_OUTPUT
+
+- name: Comment preview URL
+  if: github.event_name == 'pull_request'
+  uses: actions/github-script@v7
+  with:
+    script: |
+      github.rest.issues.createComment({
+        issue_number: context.issue.number,
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        body: `Preview deployed: ${{ steps.preview.outputs.url }}`
+      })
+```
+
+</TabItem>
+</Tabs>
+
+## Deploy to AWS
+
+### S3 Static Site + CloudFront
+
+```yaml
+name: Deploy to AWS S3
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci && npm run build
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Sync to S3
+        run: |
+          aws s3 sync dist/ s3://${{ secrets.S3_BUCKET }} \
+            --delete \
+            --cache-control "public, max-age=31536000, immutable" \
+            --exclude "index.html"
+          aws s3 cp dist/index.html s3://${{ secrets.S3_BUCKET }}/index.html \
+            --cache-control "no-cache, no-store, must-revalidate"
+
+      - name: Invalidate CloudFront cache
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/*"
+```
+
+### ECS with Task Definition Update
+
+```yaml
+- name: Login to Amazon ECR
+  id: login-ecr
+  uses: aws-actions/amazon-ecr-login@v2
+
+- name: Build and push Docker image
+  id: build
+  env:
+    ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+    ECR_REPOSITORY: my-app
+    IMAGE_TAG: ${{ github.sha }}
+  run: |
+    docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+    docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+    echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+- name: Download task definition
+  run: |
+    aws ecs describe-task-definition --task-definition my-app \
+      --query taskDefinition > task-definition.json
+
+- name: Update task definition with new image
+  id: task-def
+  uses: aws-actions/amazon-ecs-render-task-definition@v1
+  with:
+    task-definition: task-definition.json
+    container-name: my-app
+    image: ${{ steps.build.outputs.image }}
+
+- name: Deploy to ECS
+  uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+  with:
+    task-definition: ${{ steps.task-def.outputs.task-definition }}
+    service: my-app-service
+    cluster: my-cluster
+    wait-for-service-stability: true
+```
+
+### Lambda Deployment
+
+```yaml
+- name: Package Lambda
+  run: |
+    npm ci --production
+    zip -r function.zip . -x "*.git*" -x "node_modules/.bin/*"
+
+- name: Update Lambda function
+  run: |
+    aws lambda update-function-code \
+      --function-name my-function \
+      --zip-file fileb://function.zip
+
+- name: Wait for update
+  run: |
+    aws lambda wait function-updated \
+      --function-name my-function
+
+- name: Publish new version
+  id: publish
+  run: |
+    VERSION=$(aws lambda publish-version \
+      --function-name my-function \
+      --query Version --output text)
+    echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+- name: Update alias
+  run: |
+    aws lambda update-alias \
+      --function-name my-function \
+      --name production \
+      --function-version ${{ steps.publish.outputs.version }}
+```
+
+## Deploy to Azure
+
+```yaml
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build and push to ACR
+        uses: azure/docker-login@v1
+        with:
+          login-server: ${{ secrets.REGISTRY_LOGIN_SERVER }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - run: |
+          docker build -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/myapp:${{ github.sha }} .
+          docker push ${{ secrets.REGISTRY_LOGIN_SERVER }}/myapp:${{ github.sha }}
+
+      - name: Deploy to Azure App Service
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: my-app-service
+          images: '${{ secrets.REGISTRY_LOGIN_SERVER }}/myapp:${{ github.sha }}'
+```
+
+## Deploy to GCP Cloud Run
+
+```yaml
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev
+
+      - name: Build and push image
+        run: |
+          IMAGE="us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/myapp/api:${{ github.sha }}"
+          docker build -t $IMAGE .
+          docker push $IMAGE
+
+      - name: Deploy to Cloud Run
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: my-api
+          region: us-central1
+          image: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/myapp/api:${{ github.sha }}
+          flags: '--allow-unauthenticated --memory=512Mi --cpu=1'
+```
+
+## Kubernetes Deployment
+
+```yaml
+- name: Set up kubectl
+  uses: azure/setup-kubectl@v4
+  with:
+    version: 'v1.29.0'
+
+- name: Configure kubeconfig
+  run: |
+    echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig.yaml
+    echo "KUBECONFIG=$PWD/kubeconfig.yaml" >> $GITHUB_ENV
+
+- name: Update image in deployment
+  run: |
+    kubectl set image deployment/my-app \
+      app=myregistry/myapp:${{ github.sha }} \
+      --record
+
+- name: Wait for rollout
+  run: |
+    kubectl rollout status deployment/my-app --timeout=5m
+
+- name: Verify pods
+  run: kubectl get pods -l app=my-app
+```
+
+## Release Automation
+
+### `softprops/action-gh-release`
+
+```yaml
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build release artifacts
+        run: |
+          npm ci
+          npm run build
+          tar -czf dist-linux.tar.gz dist/
+          sha256sum dist-linux.tar.gz > checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist-linux.tar.gz
+            checksums.txt
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
+          body: |
+            ## What's Changed
+
+            See [CHANGELOG.md](CHANGELOG.md) for full details.
+```
+
+### `release-please` — Automated Versioning
+
+```yaml
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: google-github-actions/release-please-action@v4
+        id: release
+        with:
+          release-type: node
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Only runs when release-please merges a release PR
+      - uses: actions/checkout@v4
+        if: ${{ steps.release.outputs.release_created }}
+
+      - uses: actions/setup-node@v4
+        if: ${{ steps.release.outputs.release_created }}
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+        if: ${{ steps.release.outputs.release_created }}
+
+      - run: npm publish
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+```
+
+:::tip[release-please]
+`release-please` reads Conventional Commits to determine version bumps automatically: `feat:` bumps minor, `fix:` bumps patch, `feat!:` or `BREAKING CHANGE:` bumps major. It creates and maintains a release PR that you merge when ready to ship.
+:::
+
+### Changelog Generation
+
+```yaml
+- name: Generate changelog
+  uses: orhun/git-cliff-action@v3
+  with:
+    config: cliff.toml
+    args: --verbose
+  env:
+    OUTPUT: CHANGELOG.md
+    GITHUB_REPO: ${{ github.repository }}
+
+- name: Commit changelog
+  run: |
+    git config user.name "github-actions[bot]"
+    git config user.email "github-actions[bot]@users.noreply.github.com"
+    git add CHANGELOG.md
+    git commit -m "docs: update CHANGELOG.md for ${{ github.ref_name }}" || true
+    git push
+```

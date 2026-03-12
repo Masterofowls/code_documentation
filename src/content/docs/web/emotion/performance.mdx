@@ -1,6 +1,6 @@
 ---
-title: Emotion Performance & SSR
-description: Master Emotion's rendering pipeline, server-side rendering with CacheProvider, Next.js SSR setup, and production optimization techniques.
+title: Emotion Performance
+description: Optimize Emotion for production — SSR critical CSS extraction, CacheProvider, Next.js _document setup, memoization, babel-plugin options, and best practices to avoid re-renders.
 sidebar:
   order: 6
 tags: [css, frontend]
@@ -8,315 +8,63 @@ tags: [css, frontend]
 
 import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-Emotion is designed for performance, but understanding its internals helps you avoid common pitfalls and ensure optimal rendering in both client and server environments.
+Emotion is designed to be fast, but a few key patterns make the difference between good and excellent performance — especially for server-rendered applications.
 
-## The Emotion Rendering Pipeline
+## How Emotion Renders Styles
 
-Understanding how Emotion processes styles helps you reason about performance:
+Understanding Emotion's rendering pipeline helps you optimize it:
 
-```
-1. Style serialization
-   └── css`...` or css({...}) produces a SerializedStyles object
-       with a stable hash as the className
+1. **Component renders** — a styled component or `css` prop is evaluated
+2. **Style serialization** — Emotion converts the CSS to a string and hashes it to a unique class name
+3. **Cache lookup** — if the class name already exists in the cache, skip to step 5
+4. **Style injection** — the CSS rule is injected into a `<style>` tag in the document head
+5. **Class name applied** — the generated class name is applied to the element
 
-2. Cache lookup
-   └── Emotion checks if the hash already exists in the cache
-       If yes → reuse the class name (zero CSS inserted)
-       If no  → continue
-
-3. Style injection
-   └── The CSS rule is inserted into a <style> tag in the document
-       In SSR → styles are collected server-side
-
-4. Class name applied
-   └── The hashed class name (e.g., css-abc123) is set on the element
-```
-
-**Key insight:** Identical style objects always produce the same hash. Emotion deduplicates automatically — two components with the same styles share one CSS rule.
-
-## Style Stability — Avoid Inline Object Recreation
-
-The most common Emotion performance mistake is recreating style objects on every render:
+**Key insight:** Identical style objects produce the same class name. Emotion deduplicates styles automatically.
 
 ```tsx
-// ❌ BAD: new object on every render → new hash → new CSS inserted → extra work
-function Button({ label }: { label: string }) {
-  return (
-    <button
-      css={{ background: '#3b82f6', color: 'white', padding: '0.5rem 1rem' }}
-    >
-      {label}
-    </button>
-  );
-}
-
-// ✅ GOOD: object defined outside component → stable reference → cache hit
-const buttonStyle = css({
-  background: '#3b82f6',
-  color: 'white',
-  padding: '0.5rem 1rem',
-});
-
-function Button({ label }: { label: string }) {
-  return <button css={buttonStyle}>{label}</button>;
-}
-```
-
-:::tip[The Babel Plugin Helps Here]
-With `@emotion/babel-plugin` enabled, Emotion hoists stable styles at compile time, so even inline objects defined inside render functions get serialized once. This makes development easier without sacrificing production performance.
-:::
-
-## Memoizing Computed Styles
-
-When styles depend on props or state, use `useMemo` to avoid recomputation:
-
-```tsx
-import { css } from '@emotion/react';
-import { useMemo } from 'react';
-
-interface ProgressBarProps {
-  value: number;        // 0–100
-  color?: string;
-  animated?: boolean;
-}
-
-function ProgressBar({ value, color = '#3b82f6', animated = false }: ProgressBarProps) {
-  // Memoize — only recomputes when value, color, or animated change
-  const fillStyle = useMemo(
-    () =>
-      css({
-        width: `${value}%`,
-        background: color,
-        height: '100%',
-        borderRadius: 'inherit',
-        transition: animated ? 'width 500ms ease-out' : 'none',
-      }),
-    [value, color, animated],
-  );
-
-  return (
-    <div
-      css={{
-        height: '0.5rem',
-        background: '#e5e7eb',
-        borderRadius: '9999px',
-        overflow: 'hidden',
-        width: '100%',
-      }}
-    >
-      <div css={fillStyle} />
-    </div>
-  );
-}
-```
-
-## Memoizing Styled Components
-
-If a styled component is defined inside a function or component, move it outside or memoize it:
-
-```tsx
-import styled from '@emotion/styled';
-import { useMemo } from 'react';
-
-// ❌ BAD: new styled component created on every render
-function BadExample({ color }: { color: string }) {
-  const ColoredDiv = styled.div`
-    color: ${color};
-  `;
-  return <ColoredDiv>Text</ColoredDiv>;
-}
-
-// ✅ GOOD: styled component defined at module level, uses props for dynamic values
-const ColoredDiv = styled.div<{ color: string }>`
-  color: ${({ color }) => color};
-`;
-
-function GoodExample({ color }: { color: string }) {
-  return <ColoredDiv color={color}>Text</ColoredDiv>;
-}
+// These two elements get the same class name — only one CSS rule is injected
+<div css={{ color: 'red', fontSize: 14 }}>A</div>
+<div css={{ color: 'red', fontSize: 14 }}>B</div>
 ```
 
 ## SSR with `extractCritical`
 
-For server-side rendering, you need to extract the critical CSS generated during rendering and inject it into the HTML response to prevent a flash of unstyled content (FOUC).
+Without SSR extraction, users see a flash of unstyled content (FOUC) on first load. Emotion provides two server-side APIs.
 
-### The CacheProvider + createCache Approach (Recommended)
-
-```tsx
-// server/render.tsx
-import React from 'react';
-import { renderToString } from 'react-dom/server';
-import createCache from '@emotion/cache';
-import { CacheProvider } from '@emotion/react';
-import createEmotionServer from '@emotion/server/create-instance';
-import App from '../src/App';
-
-export function renderPage(url: string): string {
-  // 1. Create a fresh cache per request (never share across requests!)
-  const cache = createCache({ key: 'css' });
-  const { extractCriticalToChunks, constructStyleTagsFromChunks } = createEmotionServer(cache);
-
-  // 2. Render the app, wrapped in CacheProvider
-  const html = renderToString(
-    <CacheProvider value={cache}>
-      <App url={url} />
-    </CacheProvider>
-  );
-
-  // 3. Extract the CSS that was generated during rendering
-  const chunks = extractCriticalToChunks(html);
-  const styleTags = constructStyleTagsFromChunks(chunks);
-
-  // 4. Inject styles into the HTML response
-  return `
-    <!DOCTYPE html>
-    <html lang="en">
-      <head>
-        <meta charset="UTF-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        ${styleTags}
-        <title>App</title>
-      </head>
-      <body>
-        <div id="root">${html}</div>
-        <script src="/bundle.js"></script>
-      </body>
-    </html>
-  `;
-}
-```
-
-:::caution[Never Reuse Cache Across Requests]
-Each server-side request must get its own Emotion cache instance. Sharing a cache across requests will cause CSS from one user's render to leak into another's response.
-:::
-
-## Next.js SSR Setup
-
-### App Router (Next.js 13+)
+### `extractCritical` (simpler, legacy)
 
 ```tsx
-// app/emotion-registry.tsx
-'use client';
-
-import React, { useState } from 'react';
-import { useServerInsertedHTML } from 'next/navigation';
-import { CacheProvider } from '@emotion/react';
-import createCache from '@emotion/cache';
-
-export function EmotionRootStyleRegistry({ children }: { children: React.ReactNode }) {
-  const [{ cache, flush }] = useState(() => {
-    const cache = createCache({ key: 'my-app', prepend: true });
-    cache.compat = true;
-
-    const prevInsert = cache.insert.bind(cache);
-    let inserted: { name: string; isGlobal: boolean }[] = [];
-
-    cache.insert = (...args) => {
-      const serialized = args[1];
-      if (cache.inserted[serialized.name] === undefined) {
-        inserted.push({ name: serialized.name, isGlobal: !serialized.map });
-      }
-      return prevInsert(...args);
-    };
-
-    const flush = () => {
-      const prevInserted = inserted;
-      inserted = [];
-      return prevInserted;
-    };
-
-    return { cache, flush };
-  });
-
-  useServerInsertedHTML(() => {
-    const names = flush();
-    if (!names.length) return null;
-
-    let styles = '';
-    for (const { name, isGlobal } of names) {
-      const style = isGlobal
-        ? cache.inserted[name]
-        : cache.inserted[name]?.slice(name.length + 1);
-      if (typeof style === 'string') {
-        styles += style;
-      }
-    }
-
-    return (
-      <style
-        key={cache.key}
-        data-emotion={`${cache.key} ${names.map((x) => x.name).join(' ')}`}
-        dangerouslySetInnerHTML={{ __html: styles }}
-      />
-    );
-  });
-
-  return <CacheProvider value={cache}>{children}</CacheProvider>;
-}
-```
-
-```tsx
-// app/layout.tsx
-import { EmotionRootStyleRegistry } from './emotion-registry';
-
-export default function RootLayout({ children }: { children: React.ReactNode }) {
-  return (
-    <html lang="en">
-      <body>
-        <EmotionRootStyleRegistry>
-          {children}
-        </EmotionRootStyleRegistry>
-      </body>
-    </html>
-  );
-}
-```
-
-### Pages Router (Next.js 12 and below)
-
-```tsx
-// pages/_document.tsx
-import Document, {
-  Html,
-  Head,
-  Main,
-  NextScript,
-  DocumentContext,
-  DocumentInitialProps,
-} from 'next/document';
-import createEmotionServer from '@emotion/server/create-instance';
-import { AppType } from 'next/app';
-import createCache from '@emotion/cache';
+// pages/_document.tsx (Next.js Pages Router)
+import Document, { Html, Head, Main, NextScript, DocumentContext } from 'next/document';
+import { extractCritical } from '@emotion/server';
 
 export default class MyDocument extends Document {
-  static async getInitialProps(ctx: DocumentContext): Promise<DocumentInitialProps> {
+  static async getInitialProps(ctx: DocumentContext) {
     const originalRenderPage = ctx.renderPage;
-    const cache = createCache({ key: 'css', prepend: true });
-    const { extractCriticalToChunks } = createEmotionServer(cache);
 
     ctx.renderPage = () =>
       originalRenderPage({
-        enhanceApp: (App: AppType) => (props) =>
-          (
-            <CacheProvider value={cache}>
-              <App {...props} />
-            </CacheProvider>
-          ),
+        enhanceApp: (App) =>
+          function EnhancedApp(props) {
+            return <App {...props} />;
+          },
       });
 
     const initialProps = await Document.getInitialProps(ctx);
-    const emotionStyles = extractCriticalToChunks(initialProps.html);
-    const emotionStyleTags = emotionStyles.styles.map((style) => (
-      <style
-        key={style.key}
-        data-emotion={`${style.key} ${style.ids.join(' ')}`}
-        dangerouslySetInnerHTML={{ __html: style.css }}
-      />
-    ));
+    const critical = extractCritical(initialProps.html);
 
     return {
       ...initialProps,
-      styles: [...React.Children.toArray(initialProps.styles), ...emotionStyleTags],
+      styles: (
+        <>
+          {initialProps.styles}
+          <style
+            data-emotion-css={critical.ids.join(' ')}
+            dangerouslySetInnerHTML={{ __html: critical.css }}
+          />
+        </>
+      ),
     };
   }
 
@@ -334,31 +82,277 @@ export default class MyDocument extends Document {
 }
 ```
 
-## Emotion Cache Configuration
+### `extractCriticalToChunks` + `CacheProvider` (recommended)
+
+This approach is more correct — it handles SSR and hydration without class name mismatches:
+
+<Steps>
+1. **Install the server package**
+
+   ```bash
+   npm install @emotion/server @emotion/cache
+   ```
+
+2. **Create a shared cache factory**
+
+   ```ts
+   // lib/emotion-cache.ts
+   import createCache from '@emotion/cache';
+   import type { EmotionCache } from '@emotion/cache';
+
+   export function createEmotionCache(): EmotionCache {
+     return createCache({
+       key: 'css',
+       prepend: true, // Insert Emotion styles before other styles in <head>
+     });
+   }
+   ```
+
+3. **Update `_document.tsx`**
+
+   ```tsx
+   // pages/_document.tsx
+   import Document, {
+     Html, Head, Main, NextScript,
+     type DocumentContext,
+     type DocumentInitialProps,
+   } from 'next/document';
+   import createEmotionServer from '@emotion/server/create-instance';
+   import { createEmotionCache } from '../lib/emotion-cache';
+
+   export default class MyDocument extends Document {
+     static async getInitialProps(ctx: DocumentContext): Promise<DocumentInitialProps> {
+       const cache = createEmotionCache();
+       const { extractCriticalToChunks, constructStyleTagsFromChunks } =
+         createEmotionServer(cache);
+
+       const originalRenderPage = ctx.renderPage;
+       ctx.renderPage = () =>
+         originalRenderPage({
+           enhanceApp: (App: React.ComponentType<React.ComponentProps<typeof App>>) =>
+             function EnhancedApp(props) {
+               return (
+                 <CacheProvider value={cache}>
+                   <App {...props} />
+                 </CacheProvider>
+               );
+             },
+         });
+
+       const initialProps = await Document.getInitialProps(ctx);
+       const emotionStyles = extractCriticalToChunks(initialProps.html);
+       const emotionStyleTags = constructStyleTagsFromChunks(emotionStyles);
+
+       return {
+         ...initialProps,
+         styles: (
+           <>
+             {initialProps.styles}
+             {/* Inject extracted Emotion styles as <style> tags */}
+             <div dangerouslySetInnerHTML={{ __html: emotionStyleTags }} />
+           </>
+         ),
+       };
+     }
+
+     render() {
+       return (
+         <Html lang="en">
+           <Head />
+           <body>
+             <Main />
+             <NextScript />
+           </body>
+         </Html>
+       );
+     }
+   }
+   ```
+
+4. **Wrap `_app.tsx` with CacheProvider**
+
+   ```tsx
+   // pages/_app.tsx
+   import type { AppProps } from 'next/app';
+   import { CacheProvider } from '@emotion/react';
+   import { createEmotionCache } from '../lib/emotion-cache';
+   import { ThemeProvider } from '@emotion/react';
+   import { theme } from '../lib/theme';
+
+   // Create a single cache instance for the client — reused across renders
+   const clientSideEmotionCache = createEmotionCache();
+
+   export default function App({
+     Component,
+     emotionCache = clientSideEmotionCache,
+     pageProps,
+   }: AppProps & { emotionCache?: import('@emotion/cache').EmotionCache }) {
+     return (
+       <CacheProvider value={emotionCache}>
+         <ThemeProvider theme={theme}>
+           <Component {...pageProps} />
+         </ThemeProvider>
+       </CacheProvider>
+     );
+   }
+   ```
+</Steps>
+
+## Next.js App Router + Emotion
+
+The App Router uses React Server Components, which are incompatible with Emotion at the root. Move Emotion to a client boundary:
 
 ```tsx
+// app/EmotionRegistry.tsx
+'use client';
+
+import { useState } from 'react';
+import { useServerInsertedHTML } from 'next/navigation';
+import { CacheProvider } from '@emotion/react';
 import createCache from '@emotion/cache';
 
-const cache = createCache({
-  // Required: prefix for generated class names (e.g., "css-abc123")
-  key: 'my-app',
+export function EmotionRegistry({ children }: { children: React.ReactNode }) {
+  const [cache] = useState(() => {
+    const c = createCache({ key: 'css' });
+    c.compat = true;
+    return c;
+  });
 
-  // Insert styles before other stylesheets — increases specificity
-  prepend: true,
+  useServerInsertedHTML(() => {
+    const names = Object.keys(cache.inserted);
+    if (!names.length) return null;
 
-  // Content Security Policy nonce for inline <style> tags
-  nonce: process.env.NEXT_PUBLIC_CSP_NONCE,
+    let styles = '';
+    const dataEmotion = names.join(' ');
 
-  // Custom style insertion point (DOM element or comment node)
-  // insertionPoint: document.getElementById('emotion-insertion-point')!,
-});
+    for (const name of names) {
+      if (cache.inserted[name] !== true) {
+        styles += cache.inserted[name];
+      }
+    }
+
+    return (
+      <style
+        key="emotion"
+        data-emotion={`${cache.key} ${dataEmotion}`}
+        // eslint-disable-next-line react/no-danger
+        dangerouslySetInnerHTML={{ __html: styles }}
+      />
+    );
+  });
+
+  return <CacheProvider value={cache}>{children}</CacheProvider>;
+}
 ```
 
-## Babel Plugin — Development vs Production
+```tsx
+// app/layout.tsx
+import { EmotionRegistry } from './EmotionRegistry';
 
-The `@emotion/babel-plugin` behaves differently by environment:
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body>
+        <EmotionRegistry>
+          {children}
+        </EmotionRegistry>
+      </body>
+    </html>
+  );
+}
+```
 
-### Development Mode
+:::caution[Emotion + Server Components]
+Emotion requires a client-side JS runtime. Components that use `css` prop or `styled` must be marked `'use client'` or be rendered inside a client boundary. Consider CSS Modules for Server Components.
+:::
+
+## Avoiding Style Recalculation
+
+### Define Styles Outside Components
+
+The most common performance mistake is defining styles inside the component body — this creates a new style object on every render:
+
+```tsx
+// ❌ New object on every render — Emotion re-serializes each time
+function BadComponent() {
+  return (
+    <div css={{ padding: 16, borderRadius: 8, background: 'white' }}>
+      Content
+    </div>
+  );
+}
+
+// ✅ Defined once at module level — Emotion serializes once, reuses class name
+const containerStyle = css`
+  padding: 16px;
+  border-radius: 8px;
+  background: white;
+`;
+
+function GoodComponent() {
+  return <div css={containerStyle}>Content</div>;
+}
+```
+
+### Memoizing Dynamic Styles
+
+When styles depend on props or state, memoize them to avoid recomputation:
+
+```tsx
+import { useMemo } from 'react';
+import { css } from '@emotion/react';
+
+type ColorProps = { hue: number; saturation: number };
+
+function ColorSwatch({ hue, saturation }: ColorProps) {
+  // Memoize — only recomputes when hue or saturation changes
+  const style = useMemo(
+    () =>
+      css`
+        width: 3rem;
+        height: 3rem;
+        border-radius: 0.5rem;
+        background-color: hsl(${hue}, ${saturation}%, 50%);
+      `,
+    [hue, saturation]
+  );
+
+  return <div css={style} />;
+}
+```
+
+## Memoizing Styled Components
+
+Styled components defined inside other components are recreated on each render, causing every child to remount:
+
+```tsx
+import { memo, useMemo } from 'react';
+import styled from '@emotion/styled';
+
+// ❌ Created on every parent render — all children remount
+function ParentBad({ color }: { color: string }) {
+  const Box = styled.div`
+    background: ${color};
+    padding: 1rem;
+  `;
+
+  return <Box>Content</Box>;
+}
+
+// ✅ Move static styled components to module scope
+const Box = styled.div<{ color: string }>`
+  background: ${({ color }) => color};
+  padding: 1rem;
+`;
+
+function ParentGood({ color }: { color: string }) {
+  return <Box color={color}>Content</Box>;
+}
+```
+
+## babel-plugin-emotion Options
+
+The Babel plugin provides build-time optimizations:
 
 ```json
 {
@@ -366,112 +360,116 @@ The `@emotion/babel-plugin` behaves differently by environment:
     [
       "@emotion/babel-plugin",
       {
+        "sourceMap": true,
         "autoLabel": "dev-only",
         "labelFormat": "[dirname]--[filename]--[local]",
-        "sourceMap": true
+        "cssPropOptimization": true,
+        "importMap": {
+          "@ui-library": {
+            "styled": {
+              "canonicalImport": ["@emotion/styled", "default"]
+            },
+            "css": {
+              "canonicalImport": ["@emotion/react", "css"]
+            }
+          }
+        }
       }
     ]
   ]
 }
 ```
 
-With `autoLabel: "dev-only"`, class names like `css-ProfileCard__card-abc123` are generated, making DevTools debugging easy. Source maps point to the original file and line number.
+| Option | Dev | Prod | Description |
+|--------|-----|------|-------------|
+| `sourceMap` | ✅ | ❌ | Source maps for CSS debugging |
+| `autoLabel` | ✅ | ❌ | Adds readable labels to class names |
+| `labelFormat` | ✅ | — | Format: `[local]` uses variable name |
+| `cssPropOptimization` | ✅ | ✅ | Optimizes `css` prop at compile time |
+| `hoist` | ✅ | ✅ | Hoists static styles to module scope |
 
-### Production Mode
-
-In production (`NODE_ENV=production`):
-- Labels are stripped from class names (just `css-abc123`)
-- Source maps are omitted
-- Styles are serialized at compile time where possible (faster runtime)
-- `autoLabel` is automatically disabled regardless of config
-
-## Production vs Development Mode Comparison
-
-| Aspect | Development | Production |
-|--------|-------------|------------|
-| Class names | `css-MyComponent__wrapper-xyz` | `css-xyz` |
-| Source maps | Yes — points to source file | No |
-| Style computation | Runtime | Partially compile-time (with plugin) |
-| Error messages | Detailed | Minimal |
-| Bundle size | Larger (source maps, labels) | Smaller |
-| Render overhead | Slightly higher | Lower |
-
-## Avoiding Re-renders — Best Practices
+### autoLabel in Action
 
 ```tsx
-// ✅ 1. Define styles outside components when they don't depend on props/state
-const staticStyles = css`
-  display: flex;
-  align-items: center;
-  gap: 1rem;
+// Input code
+const styles = css`color: red;`;
+const Button = styled.button`background: blue;`;
+
+// With autoLabel + labelFormat: "[local]"
+// Generated class names in DevTools:
+// css-abc123-styles
+// css-def456-Button
+```
+
+## Production vs Development Mode
+
+| Feature | Development | Production |
+|---------|------------|------------|
+| Source maps | Yes (with plugin) | No |
+| Auto labels | Yes | No |
+| Style injection | Runtime | Runtime + SSR extraction |
+| Error messages | Verbose | Minimal |
+| Bundle size | Larger | ~7 KB gzip |
+
+Check what's in your bundle:
+
+```bash
+# Analyze bundle
+npm run build
+npx source-map-explorer dist/*.js
+```
+
+## Comparing Bundle Impact
+
+| Library | Runtime (gzip) | SSR support | Treeshakeable |
+|---------|---------------|-------------|---------------|
+| @emotion/react | ~7 KB | Yes | Yes |
+| @emotion/styled | +3 KB | Yes | Yes |
+| styled-components | ~12 KB | Yes | Partial |
+| @vanilla-extract | ~0 KB (zero runtime) | Yes | Yes |
+| Tailwind CSS | ~0 KB (no runtime) | N/A | Yes |
+
+## Best Practices Summary
+
+```tsx
+// ✅ 1. Define static styles at module level
+const cardStyle = css`
+  background: white;
+  border-radius: 1rem;
 `;
 
-// ✅ 2. For prop-driven styles, use the styled API — it handles memoization internally
-const StyledButton = styled.button<{ primary: boolean }>`
-  background: ${({ primary }) => (primary ? '#3b82f6' : '#f3f4f6')};
+// ✅ 2. Use styled for reusable components with props
+const Button = styled.button<{ $primary?: boolean }>`
+  background: ${({ $primary }) => ($primary ? '#7c3aed' : '#f3f4f6')};
 `;
 
-// ✅ 3. For complex conditional styles, memoize with useMemo
-function ComplexComponent({ value, isActive, theme }: Props) {
-  const dynamicStyle = useMemo(
-    () =>
-      css({
-        transform: `scale(${isActive ? 1.05 : 1})`,
-        color: theme.colors.primary,
-        opacity: value > 0 ? 1 : 0.5,
-      }),
-    [isActive, theme.colors.primary, value],
-  );
+// ✅ 3. Use $ prefix for transient props (not forwarded to DOM)
+const Box = styled.div<{ $rounded?: boolean }>`
+  border-radius: ${({ $rounded }) => ($rounded ? '0.5rem' : '0')};
+`;
 
-  return <div css={[staticStyles, dynamicStyle]} />;
+// ✅ 4. Memoize dynamic styles
+function Dynamic({ size }: { size: number }) {
+  const style = useMemo(() => css`width: ${size}px; height: ${size}px;`, [size]);
+  return <div css={style} />;
 }
 
-// ✅ 4. Memoize the component itself if it renders frequently
-const PureCard = React.memo(function Card({ title, body }: CardProps) {
-  return (
-    <div css={cardStyle}>
-      <h2 css={titleStyle}>{title}</h2>
-      <p css={bodyStyle}>{body}</p>
-    </div>
-  );
-});
+// ✅ 5. Use CacheProvider for SSR
+// ✅ 6. Keep ThemeProvider close to root to minimize re-renders
+// ✅ 7. Split themes into light/dark objects — avoid computing at runtime
+
+// ❌ Don't do this — inline objects on every render
+function Bad() {
+  return <div css={{ marginTop: 8 }}>Text</div>;  // New object = re-serialization
+}
+
+// ✅ Do this instead
+const marginStyle = css`margin-top: 8px;`;
+function Good() {
+  return <div css={marginStyle}>Text</div>;
+}
 ```
 
-## Bundle Impact
-
-Emotion's runtime adds to your JavaScript bundle. Here's a realistic breakdown:
-
-| Package | Minified + Gzipped |
-|---------|--------------------|
-| `@emotion/react` | ~7 KB |
-| `@emotion/styled` | ~3.5 KB (requires `@emotion/react`) |
-| `@emotion/cache` | ~3 KB |
-| `@emotion/server` | ~2 KB (SSR only) |
-| **Total typical** | **~11–14 KB** |
-
-Compare to styled-components (~12 KB) and Tailwind CSS (5–30 KB of CSS, 0 KB JS).
-
-:::tip[Bundle Optimization]
-If you only use the `css` prop and don't need `styled`, you can avoid importing `@emotion/styled` entirely, saving ~3.5 KB. Profile with `source-map-explorer` to verify.
-:::
-
-## Debugging Tips
-
-```tsx
-// Add a label to a css block for DevTools visibility
-const myStyle = css`
-  label: MyComponent__header;
-  font-size: 1.5rem;
-  font-weight: 700;
-`;
-
-// Inspect what hash a style produces
-console.log(myStyle.name); // "abc123" or "MyComponent__header-abc123" in dev
-
-// Inspect the generated CSS string
-console.log(myStyle.styles); // "font-size:1.5rem;font-weight:700;"
-```
-
-:::caution[Avoid Emotion in Render-Heavy Hot Paths]
-For components that render at 60fps (animations, canvas overlays, scroll handlers), avoid computing new Emotion styles in each frame. Pre-compute all possible style states and swap between them with conditional logic or CSS classes.
+:::tip[When to reach for CSS Modules instead]
+If you're building a Next.js 13+ App Router project and need maximum performance with React Server Components, CSS Modules or Tailwind CSS are better choices. Emotion requires client-side JavaScript and cannot be used in RSCs without a `'use client'` boundary.
 :::

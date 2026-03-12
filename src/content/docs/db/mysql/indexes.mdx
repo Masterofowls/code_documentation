@@ -1,0 +1,411 @@
+---
+title: MySQL Indexes
+description: Deep dive into MySQL index types, InnoDB clustered indexes, covering indexes, EXPLAIN analysis, FULLTEXT search, and query optimization.
+sidebar:
+  order: 4
+tags: [database, sql]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# MySQL Indexes
+
+Indexes are the single most impactful optimization tool in MySQL. A well-indexed database
+can be orders of magnitude faster than an unindexed one. Understanding how MySQL uses indexes
+is essential for every developer working with MySQL.
+
+## Index Types in MySQL
+
+| Index Type | Engine Support | Use Case |
+|-----------|---------------|---------|
+| B-tree | InnoDB, MyISAM, Memory | Default; range queries, equality, ORDER BY |
+| Hash | Memory engine only | Equality lookups only (=); no ranges |
+| FULLTEXT | InnoDB (5.6+), MyISAM | Natural language and boolean text search |
+| SPATIAL | InnoDB (5.7+), MyISAM | Geometry/GIS data (POINT, POLYGON, etc.) |
+
+## Creating Indexes
+
+```sql
+-- Create index at table creation time
+CREATE TABLE users (
+  id       INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  email    VARCHAR(255) NOT NULL,
+  username VARCHAR(50) NOT NULL,
+  status   TINYINT DEFAULT 1,
+  created  DATETIME DEFAULT CURRENT_TIMESTAMP,
+
+  UNIQUE KEY uk_email (email),
+  KEY idx_username (username),
+  KEY idx_status_created (status, created)   -- Composite index
+);
+
+-- Add index to existing table
+CREATE INDEX idx_last_name ON users (last_name);
+CREATE UNIQUE INDEX uk_phone ON users (phone);
+
+-- Add index with ALTER TABLE
+ALTER TABLE users ADD INDEX idx_created (created);
+ALTER TABLE users ADD UNIQUE INDEX uk_email (email);
+
+-- Drop an index
+DROP INDEX idx_last_name ON users;
+ALTER TABLE users DROP INDEX idx_last_name;
+
+-- Show indexes on a table
+SHOW INDEX FROM users;
+SHOW INDEXES FROM users\G   -- Vertical format, easier to read
+
+-- Show indexes from information_schema
+SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME, CARDINALITY, INDEX_TYPE
+FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'
+ORDER BY INDEX_NAME, SEQ_IN_INDEX;
+```
+
+## PRIMARY KEY — The Clustered Index
+
+In InnoDB, the primary key is the **clustered index**: the actual table data is stored in
+B-tree leaf pages, ordered by primary key. This has important implications:
+
+```sql
+-- Every InnoDB table MUST have a primary key
+-- If none is defined, InnoDB adds a hidden 6-byte rowid column
+CREATE TABLE good_table (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,  -- Explicit PK: always do this
+  name VARCHAR(100)
+);
+
+-- Bad: no primary key — InnoDB creates hidden rowid, wastes space, slow lookups
+CREATE TABLE bad_table (
+  name VARCHAR(100),
+  email VARCHAR(255)
+);
+
+-- Best practices for primary keys:
+-- 1. Use INT/BIGINT AUTO_INCREMENT for OLTP (fast sequential inserts)
+-- 2. Avoid UUID as primary key unless using ordered UUIDs (UUID_TO_BIN with swap=true)
+-- 3. Keep primary keys small — all secondary indexes store the full PK as pointer
+-- UUIDs as PK cause page fragmentation (random inserts scatter across tree)
+
+-- Ordered UUID (MySQL 8.0+ — reduces fragmentation)
+CREATE TABLE orders (
+  id BINARY(16) DEFAULT (UUID_TO_BIN(UUID(), 1)) PRIMARY KEY,
+  -- swap_flag=1 makes UUID time-ordered to reduce fragmentation
+  amount DECIMAL(10,2)
+);
+```
+
+## Secondary Indexes in InnoDB
+
+Secondary indexes contain the indexed column values plus the primary key value as a pointer:
+
+```sql
+-- Secondary index on email column
+-- Leaf node contains: (email_value, primary_key_value)
+-- To fetch all columns, MySQL must "double-lookup":
+--   1. Search secondary index tree for email
+--   2. Use PK found to look up in clustered index (PRIMARY KEY B-tree)
+CREATE INDEX idx_email ON users (email);
+
+-- This double-lookup can be avoided with COVERING INDEXES (see below)
+```
+
+## Composite Indexes and the Leftmost Prefix Rule
+
+A composite index `(a, b, c)` can satisfy queries on `(a)`, `(a, b)`, or `(a, b, c)` — but NOT
+on `(b)`, `(c)`, `(b, c)`, or `(a, c)` alone.
+
+```sql
+-- Composite index
+CREATE INDEX idx_dept_salary ON employees (department_id, salary);
+
+-- Uses index (leftmost prefix match)
+SELECT * FROM employees WHERE department_id = 5;                          -- ✅
+SELECT * FROM employees WHERE department_id = 5 AND salary > 50000;       -- ✅
+SELECT * FROM employees WHERE department_id = 5 ORDER BY salary;          -- ✅
+
+-- Does NOT use index efficiently
+SELECT * FROM employees WHERE salary > 50000;                             -- ❌ Skips department_id
+SELECT * FROM employees WHERE salary > 50000 AND department_id = 5;       -- ❌ Wrong order in query
+
+-- But MySQL's optimizer CAN reorder WHERE conditions — check EXPLAIN
+-- The physical order in the index matters, not the WHERE clause order
+
+-- Composite index column order best practices:
+-- 1. Most selective column first (highest cardinality)
+-- 2. Equality conditions first, range conditions last
+-- 3. Columns used in ORDER BY should follow WHERE columns
+
+-- Example: query WHERE status = 1 AND created_at > '2024-01-01'
+-- Index (status, created_at) is better than (created_at, status)
+-- Because status equality filters rows, then range on created_at uses index
+CREATE INDEX idx_status_created ON orders (status, created_at);
+```
+
+## Covering Index
+
+A covering index satisfies the entire query from the index alone — no lookup in the main table:
+
+```sql
+-- Query: SELECT name, email FROM users WHERE status = 1
+-- A covering index for this query:
+CREATE INDEX idx_covering ON users (status, name, email);
+-- index contains: (status, name, email, id)  <-- id always included in InnoDB secondary
+-- MySQL can answer the query entirely from the index (faster, no double-lookup)
+
+-- EXPLAIN output will show: "Using index" (no "Using where" in Extra = best case)
+
+-- Check if an index is being used as covering:
+EXPLAIN SELECT name, email FROM users WHERE status = 1;
+-- Look for "Using index" in Extra column
+```
+
+## UNIQUE Index
+
+```sql
+-- UNIQUE index enforces uniqueness and also speeds up lookups
+CREATE UNIQUE INDEX uk_email ON users (email);
+ALTER TABLE users ADD CONSTRAINT uk_username UNIQUE (username);
+
+-- Multi-column unique constraint
+ALTER TABLE order_items ADD UNIQUE INDEX uk_order_product (order_id, product_id);
+
+-- UNIQUE allows NULLs (multiple NULL values are permitted)
+ALTER TABLE users ADD UNIQUE INDEX uk_phone (phone);  -- Multiple rows with NULL phone OK
+
+-- Check for duplicates before adding UNIQUE index
+SELECT email, COUNT(*) cnt FROM users GROUP BY email HAVING cnt > 1;
+```
+
+## Invisible Indexes (MySQL 8.0+)
+
+```sql
+-- Create invisible index — exists but optimizer ignores it
+CREATE INDEX idx_created INVISIBLE ON orders (created_at);
+ALTER TABLE orders ALTER INDEX idx_created INVISIBLE;
+
+-- Make an existing index invisible to test if removing it impacts queries
+ALTER TABLE orders ALTER INDEX idx_created INVISIBLE;
+
+-- Force optimizer to use invisible indexes (for testing)
+SET SESSION optimizer_switch = 'use_invisible_indexes=on';
+
+-- EXPLAIN will show index is available but not used by default
+SHOW INDEX FROM orders;  -- Visible column shows 'YES'/'NO'
+
+-- Re-enable the index
+ALTER TABLE orders ALTER INDEX idx_created VISIBLE;
+```
+
+## Functional Indexes (MySQL 8.0+)
+
+```sql
+-- Index on an expression, not just a column value
+CREATE INDEX idx_lower_email ON users ((LOWER(email)));
+-- Now this query uses the index:
+SELECT * FROM users WHERE LOWER(email) = 'alice@example.com';
+
+-- Index on JSON path
+CREATE TABLE events (data JSON);
+ALTER TABLE events ADD COLUMN ts DATETIME AS (data->>'$.timestamp') VIRTUAL;
+CREATE INDEX idx_ts ON events (ts);
+-- Or with functional index (MySQL 8.0.13+):
+CREATE INDEX idx_json_ts ON events ((CAST(data->>'$.timestamp' AS DATETIME)));
+```
+
+## FULLTEXT Indexes
+
+```sql
+-- Create FULLTEXT index
+CREATE TABLE articles (
+  id      INT AUTO_INCREMENT PRIMARY KEY,
+  title   VARCHAR(255),
+  body    LONGTEXT,
+  FULLTEXT INDEX ft_title_body (title, body)
+);
+
+-- Add FULLTEXT to existing table
+ALTER TABLE articles ADD FULLTEXT INDEX ft_body (body);
+
+-- Natural Language Mode (default) — ranked by relevance
+SELECT id, title, MATCH(title, body) AGAINST ('mysql performance') AS score
+FROM articles
+WHERE MATCH(title, body) AGAINST ('mysql performance')
+ORDER BY score DESC;
+
+-- Boolean Mode — supports operators
+SELECT * FROM articles
+WHERE MATCH(title, body) AGAINST ('+mysql -oracle +performance' IN BOOLEAN MODE);
+-- +word = must include
+-- -word = must exclude
+-- *     = wildcard: 'data*' matches 'database', 'datastore'
+-- "phrase" = exact phrase match
+-- >word  = increase relevance, <word = decrease
+
+-- Query Expansion Mode — two passes: first finds matches, then finds similar docs
+SELECT * FROM articles
+WHERE MATCH(title, body) AGAINST ('database' WITH QUERY EXPANSION);
+
+-- FULLTEXT minimum word length (default: 4 chars — shorter words ignored)
+SHOW VARIABLES LIKE 'ft_min_word_len';
+SHOW VARIABLES LIKE 'innodb_ft_min_token_size';
+```
+
+:::tip[FULLTEXT Stopwords]
+Common words like "the", "a", "is" are stopwords and are ignored by FULLTEXT search.
+You can customize the stopword list with `innodb_ft_server_stopword_table`.
+:::
+
+## EXPLAIN Output Interpretation
+
+`EXPLAIN` reveals the query execution plan and is your primary tool for optimization:
+
+```sql
+EXPLAIN SELECT u.name, o.total
+FROM users u
+JOIN orders o ON u.id = o.user_id
+WHERE u.status = 1
+  AND o.created_at > '2024-01-01';
+
+-- Extended output (MySQL 8.0+)
+EXPLAIN FORMAT=JSON SELECT ...;
+EXPLAIN ANALYZE SELECT ...;  -- Actually runs query and shows actual vs estimated
+```
+
+**EXPLAIN columns:**
+
+| Column | Meaning |
+|--------|---------|
+| `id` | Query identifier; higher = executes first |
+| `select_type` | SIMPLE, PRIMARY, SUBQUERY, UNION, DERIVED… |
+| `table` | Table being accessed |
+| `partitions` | Partitions used (NULL if not partitioned) |
+| `type` | **Join type** — most important column (see below) |
+| `possible_keys` | Indexes MySQL considered |
+| `key` | Index MySQL actually chose |
+| `key_len` | Bytes of index used (longer = more columns used) |
+| `ref` | Columns/constants compared against the key |
+| `rows` | Estimated rows to examine (lower = better) |
+| `filtered` | % of rows passing WHERE after index scan |
+| `Extra` | Additional info (Using index, Using filesort…) |
+
+**`type` column values (best to worst):**
+
+| Type | Description |
+|------|-------------|
+| `system` | Table has exactly one row |
+| `const` | PK/UNIQUE lookup with constant — at most one row |
+| `eq_ref` | PK/UNIQUE join — one row per row of previous table |
+| `ref` | Non-unique index lookup |
+| `fulltext` | FULLTEXT index used |
+| `ref_or_null` | Like ref, but also fetches NULL rows |
+| `range` | Index range scan (BETWEEN, >, <, IN) |
+| `index` | Full index scan (all index entries) |
+| `ALL` | Full table scan — **avoid this** |
+
+**`Extra` column values:**
+
+| Value | Meaning |
+|-------|---------|
+| `Using index` | Covering index — data served from index only |
+| `Using where` | WHERE clause filters after index lookup |
+| `Using filesort` | MySQL sorts result set in memory/disk (not via index) |
+| `Using temporary` | Temporary table created (often for GROUP BY/ORDER BY) |
+| `Using index condition` | Index Condition Pushdown (ICP) optimization |
+| `Using join buffer` | Block nested loop join — missing index on join column |
+| `Impossible WHERE` | WHERE condition can never be true |
+
+```sql
+-- key_len calculation helps verify how many columns of a composite index are used
+-- key_len = sum of bytes for each column used:
+--   INT     = 4 bytes (+ 1 if nullable)
+--   BIGINT  = 8 bytes
+--   VARCHAR(n) utf8mb4 = n*4 + 2 bytes (length prefix)
+--   DATETIME = 5 bytes
+--   TINYINT  = 1 byte
+
+-- Example: index (status TINYINT NOT NULL, created DATETIME)
+-- key_len = 1 + 5 = 6 if both columns used
+-- key_len = 1 if only status used
+```
+
+## Index Hints
+
+```sql
+-- Suggest an index to the optimizer (optimizer may still ignore it)
+SELECT * FROM users USE INDEX (idx_status) WHERE status = 1;
+
+-- Force the optimizer to use a specific index
+SELECT * FROM users FORCE INDEX (idx_email) WHERE email = 'alice@example.com';
+
+-- Ignore a specific index
+SELECT * FROM users IGNORE INDEX (idx_old_column) WHERE status = 1;
+
+-- Multiple hints
+SELECT * FROM orders
+  USE INDEX FOR JOIN (idx_user_id)
+  USE INDEX FOR ORDER BY (idx_created)
+WHERE user_id = 1 ORDER BY created_at;
+```
+
+## Table Maintenance
+
+```sql
+-- Update index statistics so optimizer makes better decisions
+ANALYZE TABLE users;
+ANALYZE TABLE users, orders, products;  -- Multiple tables at once
+
+-- Rebuild table and indexes, reclaim fragmented space (InnoDB)
+OPTIMIZE TABLE users;
+-- For InnoDB, OPTIMIZE TABLE rebuilds the table with ALTER TABLE ... FORCE internally
+
+-- Check table for errors
+CHECK TABLE users;
+CHECK TABLE users EXTENDED;  -- More thorough but slower
+
+-- Repair table (MyISAM only; InnoDB uses crash recovery instead)
+REPAIR TABLE myisam_table;
+
+-- Show table fragmentation
+SELECT TABLE_NAME,
+       DATA_LENGTH/1024/1024 AS data_mb,
+       INDEX_LENGTH/1024/1024 AS index_mb,
+       DATA_FREE/1024/1024 AS free_mb,
+       ROUND(DATA_FREE/(DATA_LENGTH+INDEX_LENGTH)*100, 1) AS fragmentation_pct
+FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = DATABASE()
+ORDER BY DATA_FREE DESC;
+```
+
+## Slow Query Log Setup
+
+```sql
+-- Enable slow query log (can be done at runtime)
+SET GLOBAL slow_query_log = 'ON';
+SET GLOBAL slow_query_log_file = '/var/log/mysql/slow.log';
+SET GLOBAL long_query_time = 2;                  -- Log queries > 2 seconds
+SET GLOBAL log_queries_not_using_indexes = 'ON'; -- Log full table scans too
+SET GLOBAL log_throttle_queries_not_using_indexes = 10; -- Max 10 per minute to prevent log flood
+
+-- Check current settings
+SHOW VARIABLES LIKE 'slow%';
+SHOW VARIABLES LIKE 'long_query_time';
+SHOW VARIABLES LIKE 'log_queries_not_using_indexes';
+```
+
+```bash
+# Analyze slow query log with mysqldumpslow
+mysqldumpslow -s t -t 10 /var/log/mysql/slow.log   # Top 10 by total time
+mysqldumpslow -s c -t 10 /var/log/mysql/slow.log   # Top 10 by count
+mysqldumpslow -s r -t 10 /var/log/mysql/slow.log   # Top 10 by rows examined
+
+# Use pt-query-digest (Percona Toolkit) for detailed analysis
+pt-query-digest /var/log/mysql/slow.log > report.txt
+pt-query-digest --since='1h' /var/log/mysql/slow.log
+```
+
+:::caution[log_queries_not_using_indexes]
+Enabling `log_queries_not_using_indexes` can flood your slow query log very quickly on
+a busy server. Use `log_throttle_queries_not_using_indexes` to limit the rate, or only
+enable this temporarily during analysis periods.
+:::

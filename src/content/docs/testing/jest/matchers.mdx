@@ -1,6 +1,6 @@
 ---
 title: Jest Matchers
-description: Complete reference for Jest's built-in expect() matchers — equality, truthiness, numbers, strings, arrays, objects, errors, and custom matchers with expect.extend().
+description: Complete reference for all Jest built-in expect() matchers — equality, truthiness, numbers, strings, arrays, objects, errors, and custom matchers with expect.extend().
 sidebar:
   order: 3
 tags: [testing, javascript]
@@ -8,399 +8,456 @@ tags: [testing, javascript]
 
 import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-Matchers are the heart of Jest assertions. Every assertion follows the same pattern: `expect(received).matcherName(expected)`. Jest provides over 40 built-in matchers and supports custom extensions via `expect.extend()`.
+Matchers are the methods chained onto `expect()` that define what condition must hold for a test to pass. Jest ships with over 40 built-in matchers and supports extending the set with custom matchers via `expect.extend()`.
+
+## Negating Matchers
+
+Every matcher can be negated by chaining `.not`:
+
+```typescript
+expect(42).not.toBe(0);
+expect([]).not.toContain('item');
+expect(() => safeFunc()).not.toThrow();
+```
+
+---
 
 ## Equality Matchers
 
-Equality is the most common type of assertion. Jest provides three levels of equality checking:
+### `toBe`
+
+Uses `Object.is` (strict equality, `===`) to compare primitives. **Do not use for objects or arrays** — it compares references, not structure.
 
 ```typescript
-// toBe — strict equality (Object.is)
-expect(2 + 2).toBe(4);
+expect(1 + 1).toBe(2);
 expect('hello').toBe('hello');
 expect(null).toBe(null);
 
-// toEqual — deep equality (recursively checks all properties)
-expect({ name: 'Alice', age: 30 }).toEqual({ name: 'Alice', age: 30 });
-expect([1, 2, 3]).toEqual([1, 2, 3]);
-
-// toStrictEqual — deep equality, but also checks object types and undefined properties
-expect({ a: undefined }).not.toStrictEqual({});  // fails — different structures
-class Point { constructor(public x: number, public y: number) {} }
-expect(new Point(1, 2)).not.toStrictEqual({ x: 1, y: 2 }); // fails — different class
+const obj = { a: 1 };
+expect(obj).toBe(obj);       // ✓ same reference
+expect(obj).not.toBe({ a: 1 }); // ✓ different reference
 ```
 
-### toBe vs toEqual vs toStrictEqual
+### `toEqual`
 
-| Matcher | Use case | Distinguishes class instances | Checks `undefined` props |
-|---|---|---|---|
-| `toBe` | Primitives, same object reference | N/A | N/A |
-| `toEqual` | Value equality, ignores `undefined` props | No | No |
-| `toStrictEqual` | Value equality, strict structure | Yes | Yes |
-
-:::caution[Never Use toBe for Objects or Arrays]
-`toBe` uses `Object.is` which checks reference equality. Two objects with identical properties will fail `toBe` unless they are the exact same reference. Always use `toEqual` or `toStrictEqual` for objects and arrays.
+Recursively checks that two objects have the same structure and values. **Use for objects and arrays.** Ignores `undefined` properties and array holes.
 
 ```typescript
-const obj = { x: 1 };
-expect(obj).toBe(obj);          // ✓ same reference
-expect({ x: 1 }).toBe({ x: 1 }); // ✗ different references!
-expect({ x: 1 }).toEqual({ x: 1 }); // ✓ same values
+expect({ a: 1, b: { c: 2 } }).toEqual({ a: 1, b: { c: 2 } });
+expect([1, 2, 3]).toEqual([1, 2, 3]);
+
+// toEqual ignores undefined properties
+expect({ a: 1, b: undefined }).toEqual({ a: 1 }); // ✓ passes
 ```
-:::
+
+### `toStrictEqual`
+
+Like `toEqual` but **does not ignore** `undefined` properties and distinguishes between object types (e.g., class instances vs plain objects).
+
+```typescript
+class Person {
+  constructor(public name: string) {}
+}
+
+// toEqual passes — same shape
+expect(new Person('Alice')).toEqual({ name: 'Alice' });
+
+// toStrictEqual fails — different types
+expect(new Person('Alice')).not.toStrictEqual({ name: 'Alice' });
+
+// toStrictEqual catches undefined
+expect({ a: 1, b: undefined }).not.toStrictEqual({ a: 1 });
+```
+
+### When to Use Each
+
+| Matcher | Use case |
+|---------|----------|
+| `toBe` | Primitives (numbers, strings, booleans, null, undefined) |
+| `toEqual` | Plain objects and arrays where class identity doesn't matter |
+| `toStrictEqual` | Class instances and when `undefined` properties are significant |
+
+---
 
 ## Truthiness Matchers
 
 ```typescript
-// Truthy / Falsy
+// toBeTruthy — any value that coerces to true
 expect(1).toBeTruthy();
 expect('hello').toBeTruthy();
-expect({}).toBeTruthy();
-expect([]).toBeTruthy();
+expect([]).toBeTruthy();      // empty array is truthy!
+expect({}).toBeTruthy();      // empty object is truthy!
 
+// toBeFalsy — any value that coerces to false
 expect(0).toBeFalsy();
 expect('').toBeFalsy();
 expect(null).toBeFalsy();
 expect(undefined).toBeFalsy();
-expect(false).toBeFalsy();
 expect(NaN).toBeFalsy();
 
 // Specific null / undefined checks
 expect(null).toBeNull();
 expect(undefined).toBeUndefined();
-expect('hello').toBeDefined();
-expect(null).not.toBeDefined();
-
-// Boolean exact checks (prefer these over toBeTruthy for boolean values)
-expect(true).toBe(true);
-expect(false).toBe(false);
+expect('hello').not.toBeNull();
+expect(42).toBeDefined();       // not undefined
+expect(undefined).toBeUndefined();
 ```
 
-:::tip[toBeTruthy vs toBe(true)]
-`toBeTruthy()` passes for any truthy value: `1`, `'hello'`, `{}`. Use it when you only care that a value is not falsy. Use `toBe(true)` when you need to assert the exact boolean `true`.
+:::tip[Prefer Specific Matchers]
+Use `toBeNull()` instead of `toBe(null)`, and `toBeUndefined()` instead of `toBe(undefined)`. Specific matchers produce clearer error messages and communicate intent better.
 :::
+
+---
 
 ## Number Matchers
 
 ```typescript
-const PI = 3.14159;
+const price = 19.99;
 
-// Comparison
-expect(10).toBeGreaterThan(5);
-expect(10).toBeGreaterThanOrEqual(10);
-expect(3).toBeLessThan(5);
-expect(3).toBeLessThanOrEqual(3);
+expect(price).toBeGreaterThan(10);
+expect(price).toBeGreaterThanOrEqual(19.99);
+expect(price).toBeLessThan(100);
+expect(price).toBeLessThanOrEqual(19.99);
 
-// Range check (common pattern)
-expect(score).toBeGreaterThanOrEqual(0);
-expect(score).toBeLessThanOrEqual(100);
+// Floating point precision — never use toBe for float arithmetic
+expect(0.1 + 0.2).toBeCloseTo(0.3);           // default 2 decimal places
+expect(0.1 + 0.2).toBeCloseTo(0.3, 5);        // 5 decimal places precision
+expect(Math.PI).toBeCloseTo(3.14159, 4);
 
-// Floating point — never use toBe with floats
-expect(0.1 + 0.2).toBeCloseTo(0.3);          // default: 2 decimal places
-expect(0.1 + 0.2).toBeCloseTo(0.3, 5);       // 5 decimal places precision
-expect(1 / 3).toBeCloseTo(0.333, 3);
-
-// Special values
+// NaN
 expect(NaN).toBeNaN();
-expect(Infinity).not.toBeNaN();
-expect(Infinity).toBe(Infinity);
-expect(Number.isFinite(42)).toBe(true);
+expect(parseInt('not a number')).toBeNaN();
+expect(42).not.toBeNaN();
+
+// Finite / Infinite (use jest-extended for these)
+expect(Infinity).not.toBeFinite?.();           // if jest-extended is installed
 ```
 
-:::caution[Floating Point Precision]
-Due to IEEE 754 floating-point representation, `0.1 + 0.2 !== 0.3` in JavaScript. Always use `toBeCloseTo()` for floating-point arithmetic. The second argument controls precision: `toBeCloseTo(expected, numDigits)` where `numDigits` defaults to 2.
+:::caution[Never Use toBe for Floating Point]
+Due to IEEE 754 floating-point arithmetic, `0.1 + 0.2` equals `0.30000000000000004` in JavaScript. Always use `toBeCloseTo` when comparing the results of floating-point calculations.
 :::
+
+---
 
 ## String Matchers
 
+### `toMatch`
+
+Tests a string against a regular expression or substring:
+
 ```typescript
-const greeting = 'Hello, World!';
+const email = 'user@example.com';
 
-// Exact substring containment
-expect(greeting).toContain('World');
-expect(greeting).not.toContain('Goodbye');
+// With a regex
+expect(email).toMatch(/^[\w.-]+@[\w.-]+\.\w+$/);
+expect(email).toMatch(/@example\.com$/);
 
-// Regex matching
-expect(greeting).toMatch(/hello/i);                  // case-insensitive
-expect(greeting).toMatch(/^Hello/);                  // starts with
-expect('test@example.com').toMatch(/^\S+@\S+\.\S+$/); // email-like
-
-// String equality
-expect(greeting).toBe('Hello, World!');
-
-// Length
-expect(greeting).toHaveLength(13);
-expect('').toHaveLength(0);
-
-// Starts / ends with (use toMatch with regex)
-expect(greeting).toMatch(/^Hello/);
-expect(greeting).toMatch(/!$/);
-
-// Common string validation patterns
-const uuid = '550e8400-e29b-41d4-a716-446655440000';
-expect(uuid).toMatch(
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-);
+// With a substring
+expect(email).toMatch('example.com');
+expect('Hello World').toMatch('World');
+expect('Hello World').not.toMatch('Goodbye');
 ```
+
+### `toContain` (strings)
+
+```typescript
+expect('Hello, World!').toContain('World');
+expect('Testing with Jest').toContain('Jest');
+```
+
+### `toHaveLength`
+
+Works for both strings and arrays:
+
+```typescript
+expect('hello').toHaveLength(5);
+expect('').toHaveLength(0);
+```
+
+---
 
 ## Array Matchers
 
+### `toContain`
+
+Checks that an array contains a specific item using `===` equality:
+
 ```typescript
 const fruits = ['apple', 'banana', 'cherry'];
-const numbers = [1, 2, 3, 4, 5];
 
-// Containment
 expect(fruits).toContain('banana');
-expect(fruits).not.toContain('mango');
-
-// Length
-expect(fruits).toHaveLength(3);
-expect([]).toHaveLength(0);
-
-// Deep equality (exact order and content)
-expect(numbers).toEqual([1, 2, 3, 4, 5]);
-
-// Partial array match — all listed items must be present (order doesn't matter)
-expect(numbers).toEqual(expect.arrayContaining([3, 1, 5]));
-expect(fruits).toEqual(expect.arrayContaining(['cherry', 'apple']));
-
-// Inverse — array does NOT contain these items
-expect(numbers).not.toEqual(expect.arrayContaining([99, 100]));
-
-// Every element matches a condition (use with .toEqual)
-const prices = [10.99, 5.49, 19.99];
-prices.forEach(price => {
-  expect(price).toBeGreaterThan(0);
-  expect(price).toBeLessThan(100);
-});
-
-// Check shape of each element
-const users = [
-  { id: 1, name: 'Alice' },
-  { id: 2, name: 'Bob' },
-];
-users.forEach(user => {
-  expect(user).toMatchObject({ id: expect.any(Number), name: expect.any(String) });
-});
+expect(fruits).not.toContain('grape');
 ```
 
+### `toHaveLength`
+
+```typescript
+expect([1, 2, 3]).toHaveLength(3);
+expect([]).toHaveLength(0);
+```
+
+### `toEqual` with `expect.arrayContaining`
+
+`expect.arrayContaining` checks that the array contains all specified items (in any order), regardless of extra items:
+
+```typescript
+const result = ['dog', 'cat', 'bird', 'fish'];
+
+// Passes — result contains all of these
+expect(result).toEqual(expect.arrayContaining(['dog', 'fish']));
+
+// Also useful with toMatchObject
+expect({ animals: result }).toMatchObject({
+  animals: expect.arrayContaining(['cat', 'bird']),
+});
+
+// Strict — only these items, no extras
+expect(['a', 'b']).toEqual(['a', 'b']); // exact match via toEqual
+```
+
+### Checking Every Element
+
+```typescript
+const numbers = [2, 4, 6, 8];
+numbers.forEach(n => expect(n % 2).toBe(0));
+```
+
+---
+
 ## Object Matchers
+
+### `toHaveProperty`
+
+Checks that an object has a property at the given path (dot-notation or array syntax), optionally matching its value:
 
 ```typescript
 const user = {
   id: 1,
   name: 'Alice',
-  email: 'alice@example.com',
   address: {
-    city: 'Wonderland',
-    country: 'UK',
+    city: 'London',
+    postcode: 'EC1A 1BB',
   },
+  roles: ['admin', 'editor'],
 };
 
-// Partial object match — only checks specified keys
-expect(user).toMatchObject({ name: 'Alice', email: 'alice@example.com' });
-expect(user).toMatchObject({ address: { country: 'UK' } }); // nested
-
-// Has a property (with optional value check)
+// Property existence
 expect(user).toHaveProperty('name');
+expect(user).toHaveProperty('address.city');     // nested path
+expect(user).toHaveProperty(['address', 'city']); // array path syntax
+
+// Property value
 expect(user).toHaveProperty('name', 'Alice');
-expect(user).toHaveProperty('address.city', 'Wonderland'); // dot-path notation
-expect(user).toHaveProperty(['address', 'city'], 'Wonderland'); // array path
-
-// expect.objectContaining — for use inside toEqual
-expect(user).toEqual(expect.objectContaining({
-  name: expect.any(String),
-  id: expect.any(Number),
-}));
-
-// Check for specific keys' existence
-expect(Object.keys(user)).toContain('email');
-expect(user).toHaveProperty('address');
-expect(user.address).toHaveProperty('city');
-
-// Object without certain properties
-const { email, ...userWithoutEmail } = user;
-expect(userWithoutEmail).not.toHaveProperty('email');
+expect(user).toHaveProperty('address.city', 'London');
+expect(user).toHaveProperty('roles[0]', 'admin'); // array index
 ```
 
-### Asymmetric Matchers
+### `toMatchObject`
 
-Asymmetric matchers can be embedded inside `toEqual` and `toMatchObject` to express flexible expectations:
+Checks that a received object contains the expected subset of properties. Extra properties on the received object are ignored:
 
 ```typescript
-expect(result).toEqual({
-  id: expect.any(Number),           // any number
-  name: expect.any(String),         // any string
-  createdAt: expect.any(Date),      // any Date instance
-  tags: expect.arrayContaining(['active']), // array includes 'active'
-  meta: expect.objectContaining({ version: 2 }), // object includes version: 2
-  secret: expect.not.stringContaining('password'), // string doesn't contain
+const apiResponse = {
+  status: 200,
+  data: { id: 1, name: 'Alice', createdAt: '2024-01-01' },
+  headers: { 'content-type': 'application/json' },
+};
+
+// Only checks the specified properties — extra properties are fine
+expect(apiResponse).toMatchObject({
+  status: 200,
+  data: { name: 'Alice' },
 });
+
+// Works with arrays of objects
+const users = [
+  { id: 1, name: 'Alice', role: 'admin' },
+  { id: 2, name: 'Bob', role: 'user' },
+];
+
+expect(users).toMatchObject([
+  { name: 'Alice' },
+  { name: 'Bob' },
+]);
 ```
+
+### `expect.objectContaining`
+
+An asymmetric matcher that can be nested inside `toEqual` or `toMatchObject`:
+
+```typescript
+const event = { type: 'click', target: '#btn', timestamp: Date.now() };
+
+// timestamp changes every run — use objectContaining to ignore it
+expect(event).toEqual(expect.objectContaining({
+  type: 'click',
+  target: '#btn',
+}));
+```
+
+---
 
 ## Error Matchers
 
-```typescript
-function riskyOperation(input: string): string {
-  if (!input) throw new Error('Input is required');
-  if (input.length > 100) throw new RangeError('Input too long');
-  return input.toUpperCase();
-}
+### `toThrow`
 
-// Check that a function throws (wrap in arrow function!)
-expect(() => riskyOperation('')).toThrow();
-
-// Check error message (string or regex)
-expect(() => riskyOperation('')).toThrow('Input is required');
-expect(() => riskyOperation('')).toThrow(/required/i);
-
-// Check error class
-expect(() => riskyOperation('x'.repeat(101))).toThrow(RangeError);
-
-// Check both class and message
-expect(() => riskyOperation('x'.repeat(101))).toThrow(
-  new RangeError('Input too long')
-);
-
-// toThrowError is an alias for toThrow
-expect(() => riskyOperation('')).toThrowError('Input is required');
-
-// Testing thrown error properties
-let thrownError: Error | null = null;
-try {
-  riskyOperation('');
-} catch (e) {
-  thrownError = e as Error;
-}
-expect(thrownError).not.toBeNull();
-expect(thrownError?.message).toBe('Input is required');
-```
-
-:::caution[Always Wrap in Arrow Function]
-You must pass a function to `toThrow`, not the result of calling the function. Calling `riskyOperation('')` directly evaluates before Jest can catch the error.
+Test that a function throws an error. **The function must be wrapped in an arrow function**:
 
 ```typescript
-// ✗ WRONG — throws before Jest can catch it
-expect(riskyOperation('')).toThrow();
+function parseJson(input: string) {
+  return JSON.parse(input); // throws SyntaxError on invalid input
+}
 
-// ✓ CORRECT — Jest calls the function and catches the error
-expect(() => riskyOperation('')).toThrow();
+// Check that it throws (any error)
+expect(() => parseJson('invalid')).toThrow();
+
+// Check error message (substring)
+expect(() => parseJson('invalid')).toThrow('JSON');
+
+// Check error message (exact)
+expect(() => parseJson('{')).toThrow('Unexpected end of JSON input');
+
+// Check error message (regex)
+expect(() => parseJson('{')).toThrow(/Unexpected/);
+
+// Check error type
+expect(() => parseJson('invalid')).toThrow(SyntaxError);
+
+// Check both type and message
+expect(() => parseJson('invalid')).toThrow(new SyntaxError());
 ```
+
+:::caution[Wrap Throwing Functions in Arrow Functions]
+If you write `expect(parseJson('invalid')).toThrow()`, the function executes immediately and throws _before_ Jest can catch it, causing the test to fail with an unhandled error. Always wrap: `expect(() => parseJson('invalid')).toThrow()`.
 :::
 
-## Custom Matchers with expect.extend()
+### `toThrowError`
 
-When built-in matchers are not expressive enough, create custom matchers with `expect.extend()`:
+An alias for `toThrow` — they behave identically.
+
+### Async errors
+
+For async functions that reject, use `rejects`:
 
 ```typescript
-// src/test-utils/matchers.ts
+async function fetchUser(id: number) {
+  if (id <= 0) throw new Error('Invalid ID');
+  return { id, name: 'Alice' };
+}
+
+await expect(fetchUser(-1)).rejects.toThrow('Invalid ID');
+await expect(fetchUser(-1)).rejects.toBeInstanceOf(Error);
+```
+
+---
+
+## Custom Matchers with `expect.extend`
+
+You can add project-specific matchers to improve test readability:
+
+```typescript
+// jest.setup.ts (or a matchers.ts file imported in setup)
+
+interface CustomMatchers<R = unknown> {
+  toBeWithinRange(min: number, max: number): R;
+  toBeValidEmail(): R;
+  toHaveBeenCalledExactlyOnce(): R;
+}
+
+declare global {
+  namespace jest {
+    interface Expect extends CustomMatchers {}
+    interface Matchers<R> extends CustomMatchers<R> {}
+    interface InverseAsymmetricMatchers extends CustomMatchers {}
+  }
+}
+
 expect.extend({
-  toBeWithinRange(received: number, floor: number, ceiling: number) {
-    const pass = received >= floor && received <= ceiling;
-    if (pass) {
-      return {
-        message: () =>
-          `expected ${received} not to be within range ${floor} - ${ceiling}`,
-        pass: true,
-      };
-    } else {
-      return {
-        message: () =>
-          `expected ${received} to be within range ${floor} - ${ceiling}`,
-        pass: false,
-      };
-    }
+  toBeWithinRange(received: number, min: number, max: number) {
+    const pass = received >= min && received <= max;
+    return {
+      pass,
+      message: () =>
+        pass
+          ? `expected ${received} not to be within range [${min}, ${max}]`
+          : `expected ${received} to be within range [${min}, ${max}]`,
+    };
   },
 
   toBeValidEmail(received: string) {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     const pass = emailRegex.test(received);
     return {
+      pass,
       message: () =>
         pass
-          ? `expected "${received}" not to be a valid email`
-          : `expected "${received}" to be a valid email`,
-      pass,
+          ? `expected "${received}" not to be a valid email address`
+          : `expected "${received}" to be a valid email address`,
     };
   },
 });
+```
 
-// TypeScript: extend the expect type
-declare global {
-  namespace jest {
-    interface Matchers<R> {
-      toBeWithinRange(floor: number, ceiling: number): R;
-      toBeValidEmail(): R;
-    }
-  }
-}
+Usage in tests:
+
+```typescript
+expect(42).toBeWithinRange(1, 100);         // ✓
+expect(150).not.toBeWithinRange(1, 100);    // ✓
+expect('user@example.com').toBeValidEmail(); // ✓
+expect('not-an-email').not.toBeValidEmail(); // ✓
+```
+
+:::tip[jest-extended]
+The `jest-extended` package provides 70+ ready-to-use additional matchers like `toBeArray()`, `toBeString()`, `toStartWith()`, `toEndWith()`, `toBePositive()`, `toBeNegative()`, and many more — saving you from writing custom matchers for common cases.
+
+```bash
+npm install --save-dev jest-extended
 ```
 
 ```typescript
-// Usage in tests
-import './test-utils/matchers';
-
-describe('custom matchers', () => {
-  it('validates a score is within range', () => {
-    expect(75).toBeWithinRange(0, 100);
-    expect(105).not.toBeWithinRange(0, 100);
-  });
-
-  it('validates email addresses', () => {
-    expect('alice@example.com').toBeValidEmail();
-    expect('not-an-email').not.toBeValidEmail();
-  });
-});
+// jest.setup.ts
+import 'jest-extended';
 ```
-
-### Loading Custom Matchers Globally
-
-To make custom matchers available in all tests without importing, add your matcher file to `setupFilesAfterFramework` in `jest.config.ts`:
-
-```typescript
-// jest.config.ts
-export default {
-  setupFilesAfterFramework: ['<rootDir>/src/test-utils/matchers.ts'],
-};
-```
-
-## The not Modifier
-
-Every matcher can be negated with `.not`:
-
-```typescript
-expect(value).not.toBe(null);
-expect(arr).not.toContain('forbidden');
-expect(fn).not.toThrow();
-expect(str).not.toMatch(/error/i);
-expect(obj).not.toHaveProperty('password');
-```
-
-## expect.assertions and expect.hasAssertions
-
-Use these to guard async tests and ensure assertions actually ran:
-
-```typescript
-// Assert that exactly 2 assertions were called
-it('calls the callback with an error', async () => {
-  expect.assertions(2);
-  try {
-    await fetchUser(-1);
-  } catch (e) {
-    expect(e).toBeInstanceOf(Error);
-    expect((e as Error).message).toContain('not found');
-  }
-});
-
-// Assert that at least 1 assertion was called
-it('processes results', async () => {
-  expect.hasAssertions();
-  const results = await processItems([]);
-  // If processItems returns early without calling expect, this test fails
-  results.forEach(r => expect(r.status).toBe('ok'));
-});
-```
-
-:::tip[Prevent Silent Test Passes]
-`expect.assertions(N)` is invaluable for async tests with try/catch. If the async code doesn't throw, the catch block is never entered and no assertions run — Jest would mark the test as passing with 0 assertions. `expect.assertions(2)` makes it fail instead.
 :::
+
+---
+
+## Asymmetric Matchers Reference
+
+Asymmetric matchers can be used _inside_ `toEqual`, `toMatchObject`, or anywhere a value is expected — they match without requiring exact equality.
+
+```typescript
+// expect.anything() — matches anything except null or undefined
+expect({ id: 1, token: 'xyz123' }).toMatchObject({
+  id: 1,
+  token: expect.anything(),
+});
+
+// expect.any(Constructor) — matches any instance of the given class
+expect({ createdAt: new Date() }).toMatchObject({
+  createdAt: expect.any(Date),
+});
+
+// expect.stringContaining — matches strings containing the substring
+expect({ message: 'Hello, World!' }).toMatchObject({
+  message: expect.stringContaining('World'),
+});
+
+// expect.stringMatching — matches strings matching a regex
+expect({ email: 'user@example.com' }).toMatchObject({
+  email: expect.stringMatching(/^[\w.-]+@[\w.-]+\.\w+$/),
+});
+
+// expect.arrayContaining — subset match for arrays
+expect({ tags: ['a', 'b', 'c'] }).toMatchObject({
+  tags: expect.arrayContaining(['a', 'c']),
+});
+
+// expect.objectContaining — subset match for objects
+expect({ user: { id: 1, name: 'Alice', role: 'admin' } }).toMatchObject({
+  user: expect.objectContaining({ name: 'Alice' }),
+});
+
+// expect.not.arrayContaining — array must not contain these items
+expect([1, 2, 3]).toEqual(expect.not.arrayContaining([4, 5]));
+```

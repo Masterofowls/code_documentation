@@ -1,0 +1,465 @@
+---
+title: Reusable Workflows & Custom Actions
+description: Build reusable workflows, composite actions, JavaScript actions, and Docker container actions. Share logic across repositories and publish to the Marketplace.
+sidebar:
+  order: 6
+tags: [devops, ci-cd]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+GitHub Actions provides two primary mechanisms for sharing logic: **reusable workflows** (shared CI/CD pipelines) and **custom actions** (reusable steps). Understanding when to use each is key to building maintainable automation.
+
+## Reusable Workflows
+
+A reusable workflow is a regular workflow file that exposes a `workflow_call` trigger. Other workflows can call it as a job, passing inputs and secrets.
+
+### Creating a Reusable Workflow
+
+```yaml
+# .github/workflows/deploy.yml (in myorg/shared-workflows repo)
+name: Reusable Deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Target environment'
+        type: string
+        required: true
+      image-tag:
+        description: 'Docker image tag to deploy'
+        type: string
+        required: true
+      dry-run:
+        description: 'Simulate without making changes'
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      DEPLOY_KEY:
+        required: true
+      REGISTRY_TOKEN:
+        required: false
+    outputs:
+      deployment-url:
+        description: 'URL of the deployed application'
+        value: ${{ jobs.deploy.outputs.url }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy
+        id: deploy
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          if [ "${{ inputs.dry-run }}" = "true" ]; then
+            echo "DRY RUN: would deploy ${{ inputs.image-tag }} to ${{ inputs.environment }}"
+            echo "url=https://dry-run.example.com" >> $GITHUB_OUTPUT
+          else
+            URL=$(./deploy.sh ${{ inputs.environment }} ${{ inputs.image-tag }})
+            echo "url=$URL" >> $GITHUB_OUTPUT
+          fi
+```
+
+### Calling a Reusable Workflow
+
+```yaml
+# .github/workflows/ci.yml (in a consuming repository)
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: tag
+        run: echo "tag=myapp:${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
+      - run: docker build -t ${{ steps.tag.outputs.tag }} .
+
+  deploy-staging:
+    needs: build
+    uses: myorg/shared-workflows/.github/workflows/deploy.yml@main
+    with:
+      environment: staging
+      image-tag: ${{ needs.build.outputs.image-tag }}
+      dry-run: false
+    secrets:
+      DEPLOY_KEY: ${{ secrets.STAGING_DEPLOY_KEY }}
+
+  deploy-production:
+    needs: deploy-staging
+    uses: myorg/shared-workflows/.github/workflows/deploy.yml@v2
+    with:
+      environment: production
+      image-tag: ${{ needs.build.outputs.image-tag }}
+    secrets: inherit   # pass all caller secrets to the callee
+```
+
+### Secrets: `inherit` vs Explicit
+
+```yaml
+# Option 1: pass all secrets (simple but less explicit)
+secrets: inherit
+
+# Option 2: pass specific secrets
+secrets:
+  DEPLOY_KEY: ${{ secrets.PROD_DEPLOY_KEY }}
+  DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
+```
+
+:::tip[Reusable Workflow Versioning]
+Reference reusable workflows with a specific SHA, tag, or branch: `uses: org/repo/.github/workflows/file.yml@v2`. Using `@main` means breaking changes in the shared workflow immediately affect all callers.
+:::
+
+## Composite Actions
+
+A composite action packages a sequence of steps (including `uses:` and `run:`) into a single reusable step. Unlike reusable workflows, composite actions run as a **step** within an existing job, not as a separate job.
+
+### Directory Structure
+
+```bash
+.github/
+└── actions/
+    └── setup-app/
+        └── action.yml    # composite action definition
+```
+
+Or in a standalone repository:
+
+```bash
+my-action/
+├── action.yml
+├── README.md
+└── scripts/
+    └── setup.sh
+```
+
+### Composite Action Definition (`action.yml`)
+
+```yaml
+# .github/actions/setup-app/action.yml
+name: 'Setup Application'
+description: 'Installs dependencies and configures the environment'
+author: 'myorg'
+
+inputs:
+  node-version:
+    description: 'Node.js version to use'
+    required: false
+    default: '20'
+  install-command:
+    description: 'Package install command'
+    required: false
+    default: 'npm ci'
+  cache:
+    description: 'Enable dependency caching'
+    required: false
+    default: 'true'
+
+outputs:
+  cache-hit:
+    description: 'Whether dependencies were restored from cache'
+    value: ${{ steps.cache.outputs.cache-hit }}
+  node-version:
+    description: 'The Node.js version that was installed'
+    value: ${{ steps.setup.outputs.node-version }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Node.js
+      id: setup
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: ${{ inputs.cache == 'true' && 'npm' || '' }}
+
+    - name: Cache dependencies
+      id: cache
+      if: inputs.cache == 'true'
+      uses: actions/cache@v4
+      with:
+        path: node_modules
+        key: node_modules-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+
+    - name: Install dependencies
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: ${{ inputs.install-command }}
+
+    - name: Verify installation
+      shell: bash
+      run: |
+        echo "Node: $(node --version)"
+        echo "npm: $(npm --version)"
+```
+
+:::caution[Shell Required in Composite Actions]
+Every `run:` step in a composite action **must** specify `shell:`. Unlike regular workflow steps, there is no default shell in composite actions.
+:::
+
+### Using a Composite Action
+
+```yaml
+# From the same repository
+- uses: ./.github/actions/setup-app
+  with:
+    node-version: '20'
+
+# From another repository at a specific tag
+- uses: myorg/actions/setup-app@v1
+  with:
+    node-version: '22'
+    cache: 'true'
+```
+
+## JavaScript Actions
+
+JavaScript actions run directly on the runner without a container spin-up overhead. They're the fastest action type.
+
+### Directory Structure
+
+```bash
+my-js-action/
+├── action.yml
+├── package.json
+├── index.js          # entry point
+└── dist/
+    └── index.js      # bundled output (committed to repo)
+```
+
+### `action.yml` for JavaScript Action
+
+```yaml
+name: 'My JavaScript Action'
+description: 'Does something useful'
+author: 'myorg'
+
+inputs:
+  api-endpoint:
+    description: 'API endpoint URL'
+    required: true
+  timeout:
+    description: 'Timeout in seconds'
+    required: false
+    default: '30'
+
+outputs:
+  result:
+    description: 'The result of the operation'
+
+runs:
+  using: 'node20'      # node16 | node20
+  main: 'dist/index.js'
+  pre: 'dist/pre.js'   # optional: runs before main
+  post: 'dist/post.js' # optional: cleanup after job
+```
+
+### `index.js` Implementation
+
+```javascript
+const core = require('@actions/core');
+const github = require('@actions/github');
+
+async function run() {
+  try {
+    // Get inputs
+    const apiEndpoint = core.getInput('api-endpoint', { required: true });
+    const timeout = parseInt(core.getInput('timeout'));
+
+    core.info(`Calling ${apiEndpoint} with timeout ${timeout}s`);
+
+    // Access GitHub context
+    const context = github.context;
+    core.info(`Running in ${context.repo.owner}/${context.repo.repo}`);
+
+    // Set outputs
+    core.setOutput('result', 'success');
+
+    // Add to job summary
+    await core.summary
+      .addHeading('Action Result')
+      .addTable([
+        [{ data: 'Endpoint', header: true }, { data: 'Status', header: true }],
+        [apiEndpoint, '✅ Success'],
+      ])
+      .write();
+
+  } catch (error) {
+    core.setFailed(`Action failed: ${error.message}`);
+  }
+}
+
+run();
+```
+
+### Building the Action
+
+```bash
+# Install dependencies
+npm install @actions/core @actions/github
+
+# Bundle for distribution (using @vercel/ncc)
+npm install --save-dev @vercel/ncc
+npx ncc build index.js --license licenses.txt -o dist/
+
+# Commit the dist/ directory
+git add dist/
+git commit -m "build: bundle action"
+```
+
+:::tip[Bundle dist/]
+JavaScript actions must commit the `dist/` directory. The runner does NOT run `npm install` — it executes the bundled file directly. Use `@vercel/ncc` or `esbuild` to bundle all dependencies into a single file.
+:::
+
+## Docker Container Actions
+
+Docker actions run inside a container — useful for actions with specific system dependencies.
+
+```yaml
+# action.yml
+name: 'Docker Action'
+description: 'Runs a custom script in Docker'
+
+inputs:
+  command:
+    description: 'Command to run'
+    required: true
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'   # or a pre-built image: 'docker://alpine:3.18'
+  args:
+    - ${{ inputs.command }}
+  env:
+    CUSTOM_VAR: 'value'
+```
+
+```dockerfile
+# Dockerfile
+FROM alpine:3.18
+RUN apk add --no-cache bash curl jq
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
+```
+
+## Action `action.yml` Full Schema
+
+```yaml
+name: 'Action Name'
+description: 'Description'
+author: 'Author Name'
+branding:
+  icon: 'activity'      # Feather icon name
+  color: 'blue'         # white | yellow | blue | green | orange | red | purple | gray-dark
+
+inputs:
+  my-input:
+    description: 'What this input does'
+    required: true
+    default: 'default-value'
+    deprecationMessage: 'Use new-input instead'
+
+outputs:
+  my-output:
+    description: 'What this output contains'
+
+runs:
+  using: 'composite'  # composite | node20 | node16 | docker
+  steps: []           # for composite
+
+# OR for JavaScript:
+# runs:
+#   using: 'node20'
+#   main: 'dist/index.js'
+```
+
+## Action Versioning
+
+```bash
+# Tag with semantic version
+git tag v1.0.0
+git push origin v1.0.0
+
+# Also maintain a floating major version tag
+git tag -fa v1 -m "Update v1 tag"
+git push origin v1 --force
+```
+
+Users reference your action at:
+
+```yaml
+# Pinned to exact version (most secure)
+- uses: myorg/my-action@v1.0.0
+
+# Major version tag (gets patches automatically)
+- uses: myorg/my-action@v1
+
+# Full SHA (most reproducible)
+- uses: myorg/my-action@a1b2c3d4e5f6...
+```
+
+## When to Use Reusable Workflow vs Composite Action
+
+| Concern | Reusable Workflow | Composite Action |
+|---|---|---|
+| **Runs as** | Separate job | Step within a job |
+| **Has own runner** | Yes | No (uses calling job's runner) |
+| **Can use services** | Yes | No |
+| **Can use matrix** | Yes | No |
+| **Environment access** | Yes | No |
+| **Callable from** | Other workflows only | Any step |
+| **Secrets** | Passed explicitly or `inherit` | Via `inputs` (not secrets) |
+| **Best for** | Entire pipelines, deployment logic | Reusable setup steps |
+
+## Publishing to the Marketplace
+
+<Steps>
+1. Ensure your repo has a valid `action.yml` at the root
+2. Add a `README.md` with usage documentation
+3. Go to the repository's releases page → Create release
+4. Check "Publish this Action to the GitHub Marketplace"
+5. Select a category and fill in the description
+6. Publish the release
+</Steps>
+
+```yaml
+# README usage example section
+## Usage
+
+\`\`\`yaml
+- uses: myorg/my-action@v1
+  with:
+    api-endpoint: 'https://api.example.com'
+    timeout: '60'
+\`\`\`
+
+## Inputs
+
+| Input | Required | Default | Description |
+|---|---|---|---|
+| `api-endpoint` | Yes | — | API endpoint URL |
+| `timeout` | No | `30` | Timeout in seconds |
+
+## Outputs
+
+| Output | Description |
+|---|---|
+| `result` | Result of the operation |
+\`\`\`
+```

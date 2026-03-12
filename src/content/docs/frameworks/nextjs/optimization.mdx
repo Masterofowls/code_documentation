@@ -1,0 +1,456 @@
+---
+title: Performance Optimization
+description: Optimize your Next.js application with next/image, next/font, next/script, bundle analysis, code splitting, Partial Prerendering, Turbopack, and Web Vitals monitoring.
+sidebar:
+  order: 8
+tags: [react, javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Next.js ships with a suite of built-in optimisation components and techniques that meaningfully improve Core Web Vitals and Lighthouse scores with minimal effort.
+
+## next/image
+
+The `Image` component automatically optimises images: resizing, converting to WebP/AVIF, lazy loading, and preventing layout shift with intrinsic dimensions.
+
+```tsx
+import Image from 'next/image';
+
+// Fixed size image (knows exact dimensions)
+export function ProductImage({ src, alt }: { src: string; alt: string }) {
+  return (
+    <Image
+      src={src}
+      alt={alt}
+      width={400}
+      height={300}
+      quality={85}                  // 1-100, default 75
+      priority={false}              // Set true for LCP images (above fold)
+      loading="lazy"                // 'lazy' (default) | 'eager'
+      placeholder="blur"            // 'blur' | 'empty' (default)
+      blurDataURL="data:image/png;base64,..." // Required for remote images with blur
+      sizes="(max-width: 640px) 100vw, 400px"  // Responsive size hints
+      className="rounded-xl object-cover"
+    />
+  );
+}
+
+// Fill parent container (unknown dimensions)
+export function HeroImage({ src }: { src: string }) {
+  return (
+    <div className="relative h-[500px] w-full">
+      <Image
+        src={src}
+        alt="Hero"
+        fill                         // Fills parent — parent must have position: relative
+        sizes="100vw"
+        priority                     // Load immediately — this IS the LCP element
+        quality={90}
+        className="object-cover object-center"
+      />
+    </div>
+  );
+}
+
+// Static local image (auto-detects dimensions + generates blur placeholder)
+import heroImage from '@/public/hero.jpg';
+
+export function StaticHero() {
+  return (
+    <Image
+      src={heroImage}
+      alt="Hero"
+      placeholder="blur"    // Works automatically for local images
+      priority
+      quality={90}
+      className="w-full"
+    />
+  );
+}
+```
+
+### Remote Image Configuration
+
+```typescript
+// next.config.ts
+const nextConfig = {
+  images: {
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: 'cdn.example.com',
+        port: '',
+        pathname: '/images/**',
+      },
+    ],
+    formats: ['image/avif', 'image/webp'],
+    deviceSizes: [640, 750, 828, 1080, 1200, 1920],
+    imageSizes: [16, 32, 48, 64, 96, 128, 256, 384],
+    minimumCacheTTL: 60,
+  },
+};
+```
+
+:::tip[Set sizes Correctly]
+The `sizes` prop is the most impactful `Image` option for performance. It tells the browser what viewport width the image occupies, so it downloads the right resolution. Without it, the browser may download a full-width image even for a 300px thumbnail.
+
+```tsx
+// Full-width on mobile, half-width on desktop
+<Image sizes="(max-width: 768px) 100vw, 50vw" ... />
+
+// Fixed 300px column in a sidebar
+<Image sizes="300px" ... />
+```
+:::
+
+---
+
+## next/font
+
+`next/font` downloads and self-hosts fonts at build time — zero layout shift, no external requests at runtime.
+
+### Google Fonts
+
+```tsx
+// src/app/layout.tsx
+import { Inter, Playfair_Display, JetBrains_Mono } from 'next/font/google';
+
+const inter = Inter({
+  subsets: ['latin'],
+  variable: '--font-inter',
+  display: 'swap',         // 'auto' | 'block' | 'swap' | 'fallback' | 'optional'
+  weight: ['400', '500', '600', '700'],
+  preload: true,           // Preload the default subset
+});
+
+const playfair = Playfair_Display({
+  subsets: ['latin'],
+  variable: '--font-display',
+  display: 'swap',
+  style: ['normal', 'italic'],
+});
+
+const mono = JetBrains_Mono({
+  subsets: ['latin'],
+  variable: '--font-mono',
+  display: 'swap',
+  weight: '400',
+});
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html className={`${inter.variable} ${playfair.variable} ${mono.variable}`}>
+      <body className="font-sans">{children}</body>
+    </html>
+  );
+}
+```
+
+```css
+/* globals.css */
+:root {
+  --font-inter: /* injected by next/font */;
+  --font-display: /* injected by next/font */;
+  --font-mono: /* injected by next/font */;
+}
+
+.font-sans { font-family: var(--font-inter), ui-sans-serif, system-ui; }
+.font-display { font-family: var(--font-display), ui-serif, Georgia; }
+.font-mono { font-family: var(--font-mono), ui-monospace, Menlo; }
+```
+
+### Local Fonts
+
+```tsx
+import localFont from 'next/font/local';
+
+const geistSans = localFont({
+  src: [
+    { path: '../public/fonts/GeistVF.woff', weight: '100 900' },
+    { path: '../public/fonts/Geist-Bold.woff2', weight: '700', style: 'normal' },
+  ],
+  variable: '--font-geist-sans',
+  display: 'swap',
+});
+```
+
+---
+
+## next/script
+
+Control when and how third-party scripts load.
+
+```tsx
+import Script from 'next/script';
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html>
+      <body>
+        {children}
+
+        {/* Loads before the page becomes interactive — use sparingly */}
+        <Script src="/critical-polyfill.js" strategy="beforeInteractive" />
+
+        {/* Loads after page hydration — safe for most analytics/chat widgets */}
+        <Script
+          src="https://cdn.example.com/analytics.js"
+          strategy="afterInteractive"
+          onLoad={() => console.log('Analytics loaded')}
+          onError={(e) => console.error('Analytics failed to load', e)}
+        />
+
+        {/* Loads in a Web Worker via Partytown — highest perf for tracking scripts */}
+        <Script
+          src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXX"
+          strategy="worker"
+        />
+
+        {/* Inline script */}
+        <Script id="gtm-init" strategy="afterInteractive">
+          {`
+            window.dataLayer = window.dataLayer || [];
+            function gtag(){dataLayer.push(arguments);}
+            gtag('js', new Date());
+            gtag('config', 'G-XXXXXXXX');
+          `}
+        </Script>
+
+        {/* Absolute last — non-critical widgets */}
+        <Script src="https://cdn.example.com/feedback-widget.js" strategy="lazyOnload" />
+      </body>
+    </html>
+  );
+}
+```
+
+---
+
+## Bundle Analyzer
+
+```bash
+npm install --save-dev @next/bundle-analyzer
+```
+
+```typescript
+// next.config.ts
+import bundleAnalyzer from '@next/bundle-analyzer';
+
+const withBundleAnalyzer = bundleAnalyzer({
+  enabled: process.env.ANALYZE === 'true',
+});
+
+export default withBundleAnalyzer({
+  // ...your config
+});
+```
+
+```bash
+# Analyze the bundle
+ANALYZE=true npm run build
+```
+
+### What to Look For
+
+- **Duplicate dependencies** — two versions of the same library
+- **Large libraries** — consider lighter alternatives (e.g., `date-fns` instead of `moment`)
+- **Unexpected inclusions** — server-only code in the client bundle
+- **Chunks > 250kb** — split or lazy-load them
+
+---
+
+## Code Splitting with Dynamic Imports
+
+```tsx
+import dynamic from 'next/dynamic';
+
+// Basic dynamic import — splits into its own chunk
+const HeavyEditor = dynamic(() => import('@/components/HeavyEditor'), {
+  loading: () => <div className="h-64 animate-pulse rounded-xl bg-slate-200" />,
+  ssr: false,    // Don't render server-side (for browser-only libraries)
+});
+
+// With named export
+const Chart = dynamic(
+  () => import('@/components/Charts').then((mod) => mod.LineChart),
+  { ssr: false },
+);
+
+// Conditional loading
+export function PostEditor({ isAdmin }: { isAdmin: boolean }) {
+  return (
+    <div>
+      {isAdmin && <HeavyEditor />}
+    </div>
+  );
+}
+```
+
+### React.lazy (Client Components only)
+
+```tsx
+'use client';
+import { lazy, Suspense } from 'react';
+
+const LazyModal = lazy(() => import('./HeavyModal'));
+
+export function Page() {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div>
+      <button onClick={() => setOpen(true)}>Open</button>
+      {open && (
+        <Suspense fallback={<div>Loading...</div>}>
+          <LazyModal onClose={() => setOpen(false)} />
+        </Suspense>
+      )}
+    </div>
+  );
+}
+```
+
+---
+
+## Partial Prerendering (PPR)
+
+PPR combines static and dynamic rendering in a single page — the static shell is served instantly from the CDN, while dynamic holes stream in.
+
+```typescript
+// next.config.ts — enable PPR (Next.js 14+ experimental, 15+ stable)
+const nextConfig = {
+  experimental: {
+    ppr: true,
+  },
+};
+```
+
+```tsx
+// src/app/product/[id]/page.tsx
+import { Suspense } from 'react';
+
+export const experimental_ppr = true; // Enable for this route
+
+export default async function ProductPage({ params }: { params: { id: string } }) {
+  // This part is static and pre-rendered
+  const product = await getProduct(params.id); // Cached
+
+  return (
+    <div>
+      {/* Static content — served from CDN edge instantly */}
+      <ProductDetails product={product} />
+
+      {/* Dynamic content — streams in after the shell */}
+      <Suspense fallback={<RecommendationsSkeleton />}>
+        <PersonalisedRecommendations productId={params.id} />
+      </Suspense>
+
+      <Suspense fallback={<ReviewsSkeleton />}>
+        <LiveReviews productId={params.id} />
+      </Suspense>
+    </div>
+  );
+}
+
+async function PersonalisedRecommendations({ productId }: { productId: string }) {
+  // Uses cookies() — triggers dynamic rendering for this subtree only
+  const { cookies } = await import('next/headers');
+  const cookieStore = await cookies();
+  const userId = cookieStore.get('userId')?.value;
+
+  const recs = await getPersonalisedRecs(productId, userId);
+  return <RecommendationsGrid items={recs} />;
+}
+```
+
+---
+
+## Turbopack
+
+Turbopack is the Rust-based bundler that replaces Webpack in Next.js 15 for development. It is **significantly faster** on large projects.
+
+```bash
+# Turbopack is the default in Next.js 15 dev:
+next dev --turbopack
+
+# Or explicitly in package.json:
+"dev": "next dev --turbopack"
+```
+
+Turbopack benefits:
+- **Fast Refresh** in < 100ms for most edits (vs. 2-10s with Webpack on large codebases)
+- Incremental compilation — only rebuilds changed modules
+- Memory-efficient persistent caching
+
+:::caution[Turbopack in Production]
+Turbopack is stable for **development** (`next dev`) in Next.js 15. Production builds (`next build`) still use Webpack by default. Turbopack production builds are in progress and expected to land as stable in an upcoming release.
+:::
+
+---
+
+## Web Vitals with useReportWebVitals
+
+```tsx
+// src/components/WebVitals.tsx
+'use client';
+
+import { useReportWebVitals } from 'next/web-vitals';
+
+export function WebVitalsReporter() {
+  useReportWebVitals((metric) => {
+    // metric.name: 'TTFB' | 'FCP' | 'LCP' | 'FID' | 'CLS' | 'INP' | 'Next.js-*'
+    const { name, value, id, rating } = metric;
+
+    // Send to analytics
+    if (typeof window !== 'undefined' && window.gtag) {
+      window.gtag('event', name, {
+        event_category: 'Web Vitals',
+        event_label: id,
+        value: Math.round(name === 'CLS' ? value * 1000 : value),
+        non_interaction: true,
+      });
+    }
+
+    // Target thresholds
+    if (rating === 'poor') {
+      console.warn(`[WebVitals] Poor ${name}: ${value}ms`);
+    }
+  });
+
+  return null; // Renders nothing
+}
+
+// Add to root layout
+// src/app/layout.tsx
+import { WebVitalsReporter } from '@/components/WebVitals';
+export default function Layout({ children }: { children: React.ReactNode }) {
+  return (
+    <html>
+      <body>
+        {children}
+        <WebVitalsReporter />
+      </body>
+    </html>
+  );
+}
+```
+
+---
+
+## Caching Layers Summary
+
+| Layer | Mechanism | Duration | Invalidation |
+|---|---|---|---|
+| **Browser cache** | `Cache-Control` headers | Minutes–days | Manual or version-based |
+| **CDN / Edge cache** | `s-maxage`, Vercel edge | Minutes–days | `revalidateTag`, `revalidatePath` |
+| **Next.js fetch cache** | `fetch` with `cache` option | Build–infinity | On-demand or time-based |
+| **React cache()** | Per-request deduplication | Single request | N/A (request-scoped) |
+| **unstable_cache** | Persistent tagged cache | Minutes–hours | `revalidateTag` |
+| **ISR** | Stale-while-revalidate | `revalidate` seconds | Time or on-demand |
+| **Full Route Cache** | Pre-rendered static pages | Build time | `revalidatePath` or `revalidateTag` |
+| **Router Cache** | Client-side in-memory | 30s–5min | `router.refresh()` |
+
+:::tip[Cache Debugging]
+Add `NEXT_PRIVATE_DEBUG_CACHE=1` to your `.env.local` to log cache hit/miss information during development. This helps identify which fetches are cached and which are not.
+:::

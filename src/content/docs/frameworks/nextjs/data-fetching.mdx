@@ -1,0 +1,463 @@
+---
+title: Data Fetching
+description: Master data fetching in Next.js — fetch caching strategies, React cache(), parallel fetching, Suspense streaming, Server Actions, ISR, and client-side fetching with SWR.
+sidebar:
+  order: 5
+tags: [react, javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Next.js extends the native `fetch` API with caching controls and revalidation, making it the primary mechanism for server-side data fetching in Server Components.
+
+## fetch in Server Components
+
+### Caching Strategies
+
+```tsx
+// STATIC — cache indefinitely (default in Next.js 14; opt-in in Next.js 15)
+// Equivalent to getStaticProps
+const data = await fetch('https://api.example.com/products', {
+  cache: 'force-cache',
+});
+
+// DYNAMIC — never cache, re-fetch on every request
+// Equivalent to getServerSideProps
+const data = await fetch('https://api.example.com/user', {
+  cache: 'no-store',
+});
+
+// ISR — revalidate every N seconds
+const data = await fetch('https://api.example.com/posts', {
+  next: { revalidate: 60 },  // Refresh at most every 60 seconds
+});
+
+// TAG-BASED revalidation — revalidate manually by tag
+const data = await fetch('https://api.example.com/posts', {
+  next: { tags: ['posts'] },
+});
+```
+
+:::tip[Next.js 15 Caching Default Change]
+In Next.js 14, `fetch()` defaults to `force-cache`. In **Next.js 15**, `fetch()` defaults to **`no-store`** (not cached). Explicitly set `cache: 'force-cache'` or `next: { revalidate: N }` for static or ISR behaviour.
+:::
+
+### Tag-Based On-Demand Revalidation
+
+```typescript
+// Trigger revalidation from a Route Handler or Server Action
+import { revalidateTag } from 'next/cache';
+
+export async function POST() {
+  await updatePost(); // Some mutation
+  revalidateTag('posts');  // Invalidate all fetches tagged 'posts'
+  return Response.json({ success: true });
+}
+```
+
+### Path-Based Revalidation
+
+```typescript
+import { revalidatePath } from 'next/cache';
+
+// Revalidate a specific page
+revalidatePath('/blog');
+
+// Revalidate a dynamic page
+revalidatePath('/blog/[slug]', 'page');
+
+// Revalidate an entire layout tree
+revalidatePath('/dashboard', 'layout');
+```
+
+---
+
+## React cache() Function
+
+`cache()` deduplicates identical function calls within a single request. Useful when multiple components need the same data.
+
+```typescript
+// lib/data.ts
+import { cache } from 'react';
+import { db } from './db';
+
+// This function can be called multiple times in a render pass
+// but the database query only runs once per request
+export const getUser = cache(async (userId: string) => {
+  const user = await db.user.findUnique({
+    where: { id: userId },
+    include: { profile: true },
+  });
+  return user;
+});
+
+export const getPost = cache(async (slug: string) => {
+  return db.post.findUnique({
+    where: { slug },
+    include: { author: true, tags: true },
+  });
+});
+```
+
+```tsx
+// Both components call getUser() with the same ID
+// but the DB query only runs once per request cycle
+
+// src/app/dashboard/page.tsx
+import { getUser } from '@/lib/data';
+
+export default async function DashboardPage({ params }: { params: { userId: string } }) {
+  const user = await getUser(params.userId);
+  return (
+    <div>
+      <UserHeader userId={params.userId} />
+      <UserStats userId={params.userId} />
+    </div>
+  );
+}
+
+// src/components/UserHeader.tsx
+async function UserHeader({ userId }: { userId: string }) {
+  const user = await getUser(userId); // Cache hit — no extra DB call
+  return <h1>{user?.name}</h1>;
+}
+```
+
+---
+
+## Parallel Data Fetching
+
+Avoid sequential waterfall fetches by awaiting multiple promises simultaneously.
+
+```tsx
+// ❌ Sequential — 300ms + 200ms = 500ms total
+async function SlowPage({ id }: { id: string }) {
+  const user = await getUser(id);          // 300ms
+  const posts = await getUserPosts(id);    // 200ms (starts AFTER user)
+  return <div />;
+}
+
+// ✅ Parallel — max(300ms, 200ms) = 300ms total
+async function FastPage({ id }: { id: string }) {
+  const [user, posts] = await Promise.all([
+    getUser(id),
+    getUserPosts(id),
+  ]);
+  return <div />;
+}
+
+// ✅ Also parallel — spread across multiple Server Components
+export default async function DashboardPage({ params }: { params: { id: string } }) {
+  // Kick off all three fetches before any awaits
+  const userPromise = getUser(params.id);
+  const postsPromise = getUserPosts(params.id);
+  const analyticsPromise = getAnalytics(params.id);
+
+  // Components can suspend independently as each resolves
+  return (
+    <div>
+      <Suspense fallback={<UserSkeleton />}>
+        <UserSection userPromise={userPromise} />
+      </Suspense>
+      <Suspense fallback={<PostsSkeleton />}>
+        <PostsSection postsPromise={postsPromise} />
+      </Suspense>
+      <Suspense fallback={<AnalyticsSkeleton />}>
+        <AnalyticsSection analyticsPromise={analyticsPromise} />
+      </Suspense>
+    </div>
+  );
+}
+```
+
+---
+
+## Streaming with Suspense
+
+Suspense boundaries let Next.js stream HTML progressively — the page shell renders immediately while slow data sections load in.
+
+```tsx
+// src/app/blog/page.tsx
+import { Suspense } from 'react';
+import { PostGrid } from '@/components/PostGrid';
+import { FeaturedPost } from '@/components/FeaturedPost';
+
+export default function BlogPage() {
+  return (
+    <main>
+      {/* This renders immediately — no async data needed */}
+      <h1 className="text-4xl font-bold">Blog</h1>
+
+      {/* Featured post streams in when ready */}
+      <Suspense fallback={<FeaturedPostSkeleton />}>
+        <FeaturedPost />
+      </Suspense>
+
+      {/* Post grid streams independently */}
+      <Suspense fallback={<PostGridSkeleton />}>
+        <PostGrid />
+      </Suspense>
+    </main>
+  );
+}
+
+// Each async component fetches its own data
+async function FeaturedPost() {
+  const post = await getFeaturedPost();  // May take 800ms
+  return <article>{post.title}</article>;
+}
+
+async function PostGrid() {
+  const posts = await getLatestPosts();  // May take 300ms
+  return <ul>{posts.map(p => <li key={p.id}>{p.title}</li>)}</ul>;
+}
+```
+
+---
+
+## generateStaticParams for SSG
+
+```tsx
+// src/app/blog/[slug]/page.tsx
+import { getAllPosts, getPost } from '@/lib/posts';
+import { notFound } from 'next/navigation';
+import type { Metadata } from 'next';
+
+// Fetch and cache all slugs at build time
+export async function generateStaticParams() {
+  const posts = await getAllPosts();
+  return posts.map((post) => ({ slug: post.slug }));
+}
+
+// Revalidate static pages every hour
+export const revalidate = 3600;
+
+export async function generateMetadata({
+  params,
+}: {
+  params: { slug: string };
+}): Promise<Metadata> {
+  const post = await getPost(params.slug);
+  return { title: post?.title };
+}
+
+export default async function BlogPostPage({ params }: { params: { slug: string } }) {
+  const post = await getPost(params.slug);
+  if (!post) notFound();
+  return <article dangerouslySetInnerHTML={{ __html: post.html }} />;
+}
+```
+
+---
+
+## unstable_cache
+
+`unstable_cache` caches the result of any async function — not just `fetch`. Use it to cache database calls with the same revalidation controls.
+
+```typescript
+import { unstable_cache } from 'next/cache';
+import { db } from './db';
+
+export const getCachedUser = unstable_cache(
+  async (userId: string) => {
+    return db.user.findUnique({ where: { id: userId } });
+  },
+  ['user'],                           // Cache key parts
+  {
+    revalidate: 300,                  // Revalidate every 5 minutes
+    tags: ['users', `user-${userId}`], // For tag-based invalidation
+  },
+);
+```
+
+---
+
+## Server Actions
+
+Server Actions are functions that run on the server, callable directly from Client Components without a custom API route.
+
+```typescript
+// src/lib/actions/post.ts
+'use server';
+
+import { db } from '@/lib/db';
+import { revalidatePath } from 'next/cache';
+import { z } from 'zod';
+import { requireAuth } from '@/lib/auth';
+
+const createPostSchema = z.object({
+  title: z.string().min(1).max(200),
+  content: z.string().min(10),
+  published: z.boolean().default(false),
+});
+
+export async function createPost(formData: FormData) {
+  const user = await requireAuth();
+
+  const raw = {
+    title: formData.get('title'),
+    content: formData.get('content'),
+    published: formData.get('published') === 'true',
+  };
+
+  const parsed = createPostSchema.safeParse(raw);
+  if (!parsed.success) {
+    return { error: parsed.error.flatten().fieldErrors };
+  }
+
+  const post = await db.post.create({
+    data: { ...parsed.data, authorId: user.id },
+  });
+
+  revalidatePath('/blog');
+  return { success: true, postId: post.id };
+}
+
+export async function deletePost(postId: string) {
+  const user = await requireAuth();
+
+  const post = await db.post.findUnique({ where: { id: postId } });
+  if (!post || post.authorId !== user.id) {
+    throw new Error('Not authorized');
+  }
+
+  await db.post.delete({ where: { id: postId } });
+  revalidatePath('/blog');
+}
+```
+
+### useActionState (React 19 / Next.js 15)
+
+```tsx
+// src/components/CreatePostForm.tsx
+'use client';
+
+import { useActionState, useTransition } from 'react';
+import { createPost } from '@/lib/actions/post';
+
+interface FormState {
+  error?: { title?: string[]; content?: string[] };
+  success?: boolean;
+}
+
+const initialState: FormState = {};
+
+export function CreatePostForm() {
+  const [state, formAction, isPending] = useActionState(createPost, initialState);
+
+  return (
+    <form action={formAction}>
+      <div>
+        <label htmlFor="title">Title</label>
+        <input id="title" name="title" type="text" required />
+        {state.error?.title && (
+          <p className="text-red-500">{state.error.title[0]}</p>
+        )}
+      </div>
+
+      <div>
+        <label htmlFor="content">Content</label>
+        <textarea id="content" name="content" required />
+        {state.error?.content && (
+          <p className="text-red-500">{state.error.content[0]}</p>
+        )}
+      </div>
+
+      {state.success && (
+        <p className="text-green-600">Post created successfully!</p>
+      )}
+
+      <button type="submit" disabled={isPending}>
+        {isPending ? 'Creating...' : 'Create Post'}
+      </button>
+    </form>
+  );
+}
+```
+
+---
+
+## Client-Side Fetching with SWR
+
+```bash
+npm install swr
+```
+
+```tsx
+'use client';
+
+import useSWR, { mutate } from 'swr';
+import type { User } from '@/types';
+
+const fetcher = (url: string) =>
+  fetch(url).then((res) => {
+    if (!res.ok) throw new Error('Fetch failed');
+    return res.json() as Promise<User>;
+  });
+
+export function UserProfile({ userId }: { userId: string }) {
+  const { data: user, error, isLoading, isValidating } = useSWR(
+    `/api/users/${userId}`,
+    fetcher,
+    {
+      revalidateOnFocus: true,
+      revalidateOnReconnect: true,
+      refreshInterval: 0,             // Manual revalidation only
+      dedupingInterval: 2000,         // Dedup requests within 2 seconds
+      fallbackData: undefined,
+    },
+  );
+
+  if (isLoading) return <p>Loading...</p>;
+  if (error) return <p>Error loading user.</p>;
+
+  return (
+    <div>
+      <h2>{user?.name}</h2>
+      {isValidating && <span>Refreshing...</span>}
+      <button onClick={() => mutate(`/api/users/${userId}`)}>Refresh</button>
+    </div>
+  );
+}
+```
+
+### SWR with Optimistic Updates
+
+```tsx
+'use client';
+
+import useSWR, { useSWRConfig } from 'swr';
+
+export function FollowButton({ userId }: { userId: string }) {
+  const { mutate } = useSWRConfig();
+  const { data: user } = useSWR<User>(`/api/users/${userId}`, fetcher);
+
+  const toggleFollow = async () => {
+    const isFollowing = user?.isFollowing;
+
+    // Optimistic update
+    await mutate(
+      `/api/users/${userId}`,
+      { ...user, isFollowing: !isFollowing },
+      { revalidate: false },
+    );
+
+    try {
+      await fetch(`/api/users/${userId}/follow`, {
+        method: isFollowing ? 'DELETE' : 'POST',
+      });
+      // Revalidate on success
+      mutate(`/api/users/${userId}`);
+    } catch {
+      // Rollback on failure
+      mutate(`/api/users/${userId}`, user, { revalidate: false });
+    }
+  };
+
+  return (
+    <button onClick={toggleFollow}>
+      {user?.isFollowing ? 'Unfollow' : 'Follow'}
+    </button>
+  );
+}
+```

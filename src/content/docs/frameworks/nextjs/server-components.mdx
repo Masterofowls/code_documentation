@@ -1,0 +1,477 @@
+---
+title: Server Components
+description: A deep dive into React Server Components in Next.js — server vs client boundaries, composition patterns, async components, accessing databases, headers, cookies, and third-party wrappers.
+sidebar:
+  order: 6
+tags: [react, javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+React Server Components (RSC) are one of the most significant advances in React since hooks. They enable components to run exclusively on the server, fetch data without waterfalls, and send only HTML to the client — with zero JavaScript bundle cost.
+
+## What Are React Server Components?
+
+Server Components are React components that:
+
+- Run **only on the server** (or at build time)
+- Can `await` data directly — no `useEffect`, no `useState` for loading
+- Never hydrate — they contribute **zero JavaScript** to the client bundle
+- Can access server-only resources: databases, file system, secrets, internal APIs
+- Cannot use browser APIs, event handlers, or stateful React hooks
+
+```tsx
+// This entire component — including its dependencies — ships ZERO JS to the browser
+// src/app/dashboard/page.tsx
+import { db } from '@/lib/db';          // Prisma client — server only
+import { getServerSession } from '@/lib/auth'; // Auth — server only
+
+export default async function DashboardPage() {
+  const session = await getServerSession();
+  if (!session) throw new Error('Unauthorized');
+
+  // Direct database query — no API roundtrip
+  const stats = await db.analytics.aggregate({
+    where: { userId: session.user.id },
+    _sum: { revenue: true, orders: true },
+    _avg: { conversionRate: true },
+  });
+
+  const recentOrders = await db.order.findMany({
+    where: { userId: session.user.id },
+    take: 5,
+    orderBy: { createdAt: 'desc' },
+    include: { items: { include: { product: true } } },
+  });
+
+  return (
+    <div>
+      <StatsGrid stats={stats} />
+      <RecentOrdersTable orders={recentOrders} />
+    </div>
+  );
+}
+```
+
+---
+
+## The Server/Client Boundary
+
+In Next.js App Router, **all components are Server Components by default**. Adding `'use client'` at the top of a file marks it and all its imports as Client Components.
+
+```tsx
+// ✅ Server Component (default) — no directive needed
+export async function PostList() {
+  const posts = await db.post.findMany(); // Works fine
+  return <ul>{posts.map(p => <li key={p.id}>{p.title}</li>)}</ul>;
+}
+
+// ✅ Client Component — must add 'use client'
+'use client';
+import { useState } from 'react';
+
+export function Counter() {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount(c => c + 1)}>{count}</button>;
+}
+```
+
+:::caution['use client' is a Boundary, Not a Component Type]
+`'use client'` marks the **boundary** between the server and client module graphs. Every component imported by a `'use client'` file is also a Client Component — even if it doesn't have the directive itself. Keep Client Component trees small: push `'use client'` as deep into the component tree as possible.
+:::
+
+---
+
+## When to Use Client Components
+
+Use `'use client'` when the component needs:
+
+| Need | Example |
+|---|---|
+| **Interactivity** | `onClick`, `onChange`, form inputs |
+| **State** | `useState`, `useReducer` |
+| **Lifecycle effects** | `useEffect`, `useLayoutEffect` |
+| **Browser APIs** | `window`, `localStorage`, `document` |
+| **React hooks** | `useContext`, `useRef`, `useTransition` |
+| **Third-party libraries** | Most UI libraries (shadcn/ui, Framer Motion) |
+
+```tsx
+// ❌ This needs client because of event handlers and state
+// But it's only ONE interactive piece — keep the rest server
+'use client';
+
+export function LikeButton({ postId, initialCount }: { postId: string; initialCount: number }) {
+  const [count, setCount] = useState(initialCount);
+  const [liked, setLiked] = useState(false);
+
+  const handleLike = async () => {
+    setLiked((l) => !l);
+    setCount((c) => c + (liked ? -1 : 1));
+    await fetch(`/api/posts/${postId}/like`, { method: liked ? 'DELETE' : 'POST' });
+  };
+
+  return (
+    <button onClick={handleLike} aria-pressed={liked}>
+      {liked ? '♥' : '♡'} {count}
+    </button>
+  );
+}
+```
+
+---
+
+## Composition Patterns
+
+### Pattern 1: Server Component Renders Client Component
+
+The most common pattern — Server Component fetches data, Client Component handles interaction.
+
+```tsx
+// Server Component — fetches data
+export default async function PostPage({ params }: { params: { id: string } }) {
+  const post = await db.post.findUnique({ where: { id: params.id } });
+  if (!post) notFound();
+
+  return (
+    <article>
+      <h1>{post.title}</h1>
+      <p>{post.body}</p>
+      {/* Client Component receives serializable data as props */}
+      <LikeButton postId={post.id} initialCount={post.likeCount} />
+      <CommentSection postId={post.id} initialComments={post.comments} />
+    </article>
+  );
+}
+```
+
+### Pattern 2: Passing Server Components as Children
+
+You can pass Server Components as `children` to Client Components. The Server Component renders on the server; the Client Component receives it as an opaque React node.
+
+```tsx
+// Client Component — handles slide-over state
+'use client';
+
+import { useState } from 'react';
+
+export function SlideOver({ children }: { children: React.ReactNode }) {
+  const [isOpen, setIsOpen] = useState(false);
+
+  return (
+    <div>
+      <button onClick={() => setIsOpen(true)}>Open</button>
+      {isOpen && (
+        <div className="fixed inset-0 flex justify-end">
+          <div className="w-96 bg-white shadow-xl p-6">
+            <button onClick={() => setIsOpen(false)}>✕</button>
+            {children}  {/* Server Component renders here */}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Server Component — uses the pattern
+export default async function DashboardPage() {
+  return (
+    <SlideOver>
+      {/* This is a Server Component passed as children — runs on server */}
+      <UserDetailsPanel userId="123" />
+    </SlideOver>
+  );
+}
+
+async function UserDetailsPanel({ userId }: { userId: string }) {
+  const user = await db.user.findUnique({ where: { id: userId } });
+  return <div>{user?.name}</div>;
+}
+```
+
+### Pattern 3: Splitting Components
+
+When only part of a component needs interactivity, split it:
+
+```tsx
+// ❌ Don't make the entire page a Client Component for one interactive element
+'use client'; // This forces ALL children to be client — expensive!
+export default function Page() {
+  const [tab, setTab] = useState('overview');
+  const data = use(fetchData()); // This would need Suspense + use()
+  return <div>...</div>;
+}
+
+// ✅ Extract only the interactive part
+// Server Component — all the heavy data fetching stays here
+export default async function Page() {
+  const [overview, analytics, team] = await Promise.all([
+    fetchOverview(),
+    fetchAnalytics(),
+    fetchTeam(),
+  ]);
+
+  return (
+    <div>
+      {/* Only the tab UI is a Client Component */}
+      <TabbedContent
+        overview={<OverviewSection data={overview} />}
+        analytics={<AnalyticsSection data={analytics} />}
+        team={<TeamSection data={team} />}
+      />
+    </div>
+  );
+}
+```
+
+---
+
+## Async Server Components
+
+Server Components can be `async` — they can `await` any Promise.
+
+```tsx
+// Chained async Server Components (renders as waterfall — each awaits parent)
+export default async function BlogPage() {
+  const categories = await getCategories();
+  return (
+    <div>
+      {categories.map((cat) => (
+        // Each CategorySection is its own async Server Component
+        <Suspense key={cat.id} fallback={<CategorySkeleton />}>
+          <CategorySection categoryId={cat.id} />
+        </Suspense>
+      ))}
+    </div>
+  );
+}
+
+async function CategorySection({ categoryId }: { categoryId: string }) {
+  const posts = await getPostsByCategory(categoryId);
+  return (
+    <section>
+      {posts.map((post) => (
+        <PostCard key={post.id} post={post} />
+      ))}
+    </section>
+  );
+}
+```
+
+---
+
+## headers() and cookies()
+
+Access request headers and cookies in Server Components using `next/headers`.
+
+```tsx
+import { headers, cookies } from 'next/headers';
+
+export default async function Page() {
+  // Read request headers
+  const headersList = await headers();
+  const userAgent = headersList.get('user-agent');
+  const country = headersList.get('x-vercel-ip-country') ?? 'US';
+  const forwardedFor = headersList.get('x-forwarded-for');
+
+  // Read cookies
+  const cookieStore = await cookies();
+  const theme = cookieStore.get('theme')?.value ?? 'light';
+  const sessionToken = cookieStore.get('session')?.value;
+
+  // Dynamically personalize content based on request data
+  return (
+    <div className={theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white text-slate-900'}>
+      <p>Country: {country}</p>
+    </div>
+  );
+}
+```
+
+### Setting Cookies from Server Actions
+
+```typescript
+'use server';
+
+import { cookies } from 'next/headers';
+
+export async function setThemeAction(theme: 'light' | 'dark') {
+  const cookieStore = await cookies();
+  cookieStore.set('theme', theme, {
+    httpOnly: false,    // Readable by JavaScript for client-side theming
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 60 * 60 * 24 * 365,  // 1 year
+    path: '/',
+    sameSite: 'lax',
+  });
+}
+```
+
+---
+
+## draftMode()
+
+Enable draft/preview mode to bypass static generation and serve unpublished content.
+
+```typescript
+// src/app/api/draft/route.ts
+import { draftMode } from 'next/headers';
+import { redirect } from 'next/navigation';
+
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const secret = searchParams.get('secret');
+  const slug = searchParams.get('slug');
+
+  // Validate the secret token
+  if (secret !== process.env.DRAFT_SECRET) {
+    return new Response('Invalid token', { status: 401 });
+  }
+
+  const draft = await draftMode();
+  draft.enable();
+
+  redirect(`/blog/${slug}`);
+}
+
+// Usage in a Server Component
+export default async function BlogPost({ params }: { params: { slug: string } }) {
+  const { isEnabled } = await draftMode();
+
+  // Fetch draft content if in preview mode
+  const post = await getPost(params.slug, { preview: isEnabled });
+  return <article>{post.content}</article>;
+}
+```
+
+---
+
+## Context in App Router
+
+React Context requires a Client Component provider. However, you can still consume context in Client Components nested inside Server Components.
+
+```tsx
+// src/components/Providers.tsx — must be a Client Component
+'use client';
+
+import { ThemeProvider } from 'next-themes';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { useState } from 'react';
+
+export function Providers({ children }: { children: React.ReactNode }) {
+  const [queryClient] = useState(() => new QueryClient());
+
+  return (
+    <QueryClientProvider client={queryClient}>
+      <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
+        {children}
+      </ThemeProvider>
+    </QueryClientProvider>
+  );
+}
+
+// src/app/layout.tsx — Server Component wraps Client Provider
+import { Providers } from '@/components/Providers';
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html>
+      <body>
+        {/* Providers is a Client Component, but children can still be Server Components */}
+        <Providers>{children}</Providers>
+      </body>
+    </html>
+  );
+}
+```
+
+---
+
+## Wrapping Third-Party Client Libraries
+
+Many npm packages haven't added `'use client'` yet. Wrap them in your own Client Component.
+
+```tsx
+// src/components/ui/Tooltip.tsx — wrapper for a third-party UI library
+'use client';
+
+// This library doesn't have 'use client' in its package
+import { Tooltip as RadixTooltip, TooltipContent, TooltipTrigger, TooltipProvider } from '@radix-ui/react-tooltip';
+
+interface TooltipProps {
+  content: string;
+  children: React.ReactNode;
+}
+
+export function Tooltip({ content, children }: TooltipProps) {
+  return (
+    <TooltipProvider>
+      <RadixTooltip>
+        <TooltipTrigger asChild>{children}</TooltipTrigger>
+        <TooltipContent>
+          <p>{content}</p>
+        </TooltipContent>
+      </RadixTooltip>
+    </TooltipProvider>
+  );
+}
+
+// Now you can use Tooltip in Server Components — the boundary is in the wrapper
+export default async function ServerPage() {
+  const data = await fetchData();
+  return (
+    <div>
+      <Tooltip content="Click to learn more">
+        <button>{data.label}</button>
+      </Tooltip>
+    </div>
+  );
+}
+```
+
+---
+
+## Server-Only Utilities
+
+Mark modules as server-only to prevent accidental client imports.
+
+```bash
+npm install server-only
+```
+
+```typescript
+// src/lib/db.ts
+import 'server-only'; // Build error if imported in client bundle
+
+import { PrismaClient } from '@prisma/client';
+
+const globalForPrisma = globalThis as unknown as { prisma: PrismaClient };
+
+export const db =
+  globalForPrisma.prisma ||
+  new PrismaClient({
+    log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
+  });
+
+if (process.env.NODE_ENV !== 'production') {
+  globalForPrisma.prisma = db;
+}
+```
+
+```typescript
+// src/lib/auth.ts
+import 'server-only';
+
+import { getServerSession as nextAuthGetServerSession } from 'next-auth';
+import { authConfig } from './auth-config';
+import { redirect } from 'next/navigation';
+
+export async function getServerSession() {
+  return nextAuthGetServerSession(authConfig);
+}
+
+export async function requireAuth() {
+  const session = await getServerSession();
+  if (!session?.user) redirect('/login');
+  return session.user;
+}
+```

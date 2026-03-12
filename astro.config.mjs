@@ -17,7 +17,7 @@ import typograf from 'astro-typograf';
 import starlightBlog from 'starlight-blog';
 import starlightCodeblockFullscreen from 'starlight-codeblock-fullscreen';
 import starlightCoolerCredit from 'starlight-cooler-credit';
-import starlightGiscus from 'starlight-giscus';
+// import starlightGiscus from 'starlight-giscus'; // Disabled - needs real GitHub repo config
 import starlightGithubAlerts from 'starlight-github-alerts';
 import starlightHeadingBadges from 'starlight-heading-badges';
 import starlightImageZoom from 'starlight-image-zoom';
@@ -41,16 +41,14 @@ export default defineConfig({
     assets: '_assets',
     format: 'file',
   },
-  prefetch: {
-    prefetchAll: false,
-    defaultStrategy: 'viewport',
-  },
+  prefetch: false,
   vite: {
     plugins: [
-      biomePlugin({
-        mode: 'check',
-        applyFixes: true,
-      }),
+      // biomePlugin disabled for Vercel builds - run locally instead
+      // biomePlugin({
+      //   mode: 'check',
+      //   applyFixes: true,
+      // }),
     ],
     build: {
       cssCodeSplit: true,
@@ -60,10 +58,6 @@ export default defineConfig({
       chunkSizeWarningLimit: 1000,
       rollupOptions: {
         output: {
-          manualChunks: {
-            'vendor-core': ['astro:content'],
-            'vendor-starlight': ['@astrojs/starlight'],
-          },
           assetFileNames: (assetInfo) => {
             const name = assetInfo.name || '';
             if (/\.(woff2?|ttf|eot|otf)$/i.test(name)) {
@@ -87,7 +81,13 @@ export default defineConfig({
     },
     optimizeDeps: {
       include: ['mermaid'],
-      exclude: ['@astrojs/starlight'],
+      exclude: [
+        '@astrojs/starlight',
+        'starlight-blog',
+        'starlight-giscus',
+        'virtual:starlight/*',
+        'virtual:starlight-blog/*',
+      ],
     },
     esbuild: {
       legalComments: 'none',
@@ -145,7 +145,7 @@ export default defineConfig({
         baseUrl:
           'https://github.com/your-username/code-documentation/edit/main/',
       },
-      customCss: ['./src/styles/custom.css'],
+      customCss: ['./src/styles/tailwind.css', './src/styles/custom.css'],
       defaultLocale: 'root',
       locales: {
         root: { label: 'English', lang: 'en' },
@@ -171,12 +171,12 @@ export default defineConfig({
             { id: 'win', label: 'Windows' },
           ],
         }),
-        starlightGiscus({
-          repo: 'your-username/code-documentation',
-          repoId: 'REPLACE_WITH_REPO_ID',
-          category: 'Docs Comments',
-          categoryId: 'REPLACE_WITH_CATEGORY_ID',
-        }),
+        // starlightGiscus({  // Disabled - configure with real GitHub repo values
+        //   repo: 'your-username/code-documentation',
+        //   repoId: 'REPLACE_WITH_REPO_ID',
+        //   category: 'Docs Comments',
+        //   categoryId: 'REPLACE_WITH_CATEGORY_ID',
+        // }),
         starlightSidebarTopics(
           [
             {
@@ -472,7 +472,29 @@ export default defineConfig({
           ],
           {
             topics: {},
-            exclude: ['/tags', '/tags/**'],
+            exclude: [
+              '/tags',
+              '/tags/**',
+              '/blog',
+              '/blog/**',
+              // Orphan folders (content duplicated in other locations or not mapped to topics)
+              '/react/nextjs',
+              '/react/nextjs/**',
+              '/databases',
+              '/databases/**',
+              '/infrastructure',
+              '/infrastructure/**',
+              '/styling',
+              '/styling/**',
+              '/scripting',
+              '/scripting/**',
+              '/unreal',
+              '/unreal/**',
+              '/web/threejs',
+              '/web/threejs/**',
+              '/web/emotion',
+              '/web/emotion/**',
+            ],
           },
         ),
         starlightPageActions(),

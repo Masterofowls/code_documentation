@@ -1,0 +1,457 @@
+---
+title: Routing
+description: File-based routing in Next.js — dynamic segments, the Link component, useRouter, usePathname, middleware, redirects, and internationalization patterns.
+sidebar:
+  order: 4
+tags: [react, javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Next.js uses a file-system based router where every file in `app/` automatically becomes a route. Understanding the routing mechanics is essential for building well-structured Next.js applications.
+
+## File-Based Routing Mechanics
+
+Each `page.tsx` file in the `app/` directory creates a publicly accessible URL:
+
+```
+app/
+├── page.tsx                  →  /
+├── about/
+│   └── page.tsx              →  /about
+├── blog/
+│   ├── page.tsx              →  /blog
+│   └── [slug]/
+│       └── page.tsx          →  /blog/:slug
+├── shop/
+│   ├── page.tsx              →  /shop
+│   └── [category]/
+│       └── [product]/
+│           └── page.tsx      →  /shop/:category/:product
+└── api/
+    └── users/
+        └── route.ts          →  /api/users (Route Handler — no page)
+```
+
+---
+
+## Dynamic Segments
+
+### Single Dynamic Segment `[param]`
+
+```tsx
+// src/app/blog/[slug]/page.tsx
+interface Props {
+  params: { slug: string };
+  searchParams: { [key: string]: string | string[] | undefined };
+}
+
+export default async function BlogPost({ params, searchParams }: Props) {
+  const { slug } = params;
+  const tab = searchParams['tab'] as string | undefined;
+
+  const post = await getPost(slug);
+  return <article>{post.title}</article>;
+}
+```
+
+### Catch-All Segments `[...slug]`
+
+Matches `/docs/a`, `/docs/a/b`, `/docs/a/b/c`:
+
+```tsx
+// src/app/docs/[...slug]/page.tsx
+interface Props {
+  params: { slug: string[] };
+}
+
+export default async function DocsPage({ params }: Props) {
+  const { slug } = params; // e.g. ['getting-started', 'installation']
+  const path = slug.join('/');
+  const doc = await getDoc(path);
+  return <div>{/* doc content */}</div>;
+}
+```
+
+### Optional Catch-All `[[...slug]]`
+
+Also matches the root route `/docs`:
+
+```tsx
+// src/app/docs/[[...slug]]/page.tsx
+interface Props {
+  params: { slug?: string[] };
+}
+
+export default async function DocsPage({ params }: Props) {
+  const slug = params.slug ?? []; // undefined at /docs, array otherwise
+  return <div>{/* doc content */}</div>;
+}
+```
+
+---
+
+## Link Component
+
+`Link` is the primary navigation component. It prefetches routes when they enter the viewport, enabling instant navigation.
+
+```tsx
+import Link from 'next/link';
+
+// Basic link
+<Link href="/about">About</Link>
+
+// Dynamic link
+<Link href={`/blog/${post.slug}`}>{post.title}</Link>
+
+// Link with all options
+<Link
+  href={{
+    pathname: '/search',
+    query: { q: 'nextjs', page: '2' },
+  }}
+  prefetch={true}          // true (default in viewport), false (disable), null (default)
+  replace={false}          // Replace history entry instead of pushing
+  scroll={true}            // Scroll to top after navigation (default: true)
+  className="nav-link"
+>
+  Search
+</Link>
+
+// Programmatic active state
+import { usePathname } from 'next/navigation';
+
+function NavLink({ href, children }: { href: string; children: React.ReactNode }) {
+  const pathname = usePathname();
+  const isActive = pathname === href || pathname.startsWith(href + '/');
+
+  return (
+    <Link
+      href={href}
+      className={`nav-link ${isActive ? 'nav-link--active' : ''}`}
+      aria-current={isActive ? 'page' : undefined}
+    >
+      {children}
+    </Link>
+  );
+}
+```
+
+:::tip[Prefetching Behaviour]
+In production, Next.js automatically prefetches Link routes when they become visible in the viewport. This makes subsequent navigations nearly instant. Disable with `prefetch={false}` for links to rarely-visited or expensive pages.
+:::
+
+---
+
+## useRouter
+
+`useRouter` is a Client Component hook for programmatic navigation.
+
+```tsx
+'use client';
+
+import { useRouter } from 'next/navigation';
+
+export function SearchForm() {
+  const router = useRouter();
+
+  const handleSearch = (query: string) => {
+    // Push a new entry to the history stack
+    router.push(`/search?q=${encodeURIComponent(query)}`);
+
+    // Replace current entry (no back button)
+    router.replace('/login');
+
+    // Go back
+    router.back();
+
+    // Go forward
+    router.forward();
+
+    // Refresh the current route (re-runs Server Components)
+    router.refresh();
+
+    // Prefetch a route manually
+    router.prefetch('/dashboard');
+  };
+
+  return <form onSubmit={(e) => { e.preventDefault(); handleSearch('nextjs'); }}>
+    {/* form fields */}
+  </form>;
+}
+```
+
+:::caution[useRouter in Server Components]
+`useRouter`, `usePathname`, and `useSearchParams` are Client Component hooks. They cannot be used in Server Components. For server-side redirects, use the `redirect()` and `permanentRedirect()` functions from `next/navigation`.
+:::
+
+---
+
+## usePathname and useSearchParams
+
+```tsx
+'use client';
+
+import { usePathname, useSearchParams } from 'next/navigation';
+import { useCallback } from 'react';
+
+export function FilterPanel() {
+  const pathname = usePathname();       // e.g. '/search'
+  const searchParams = useSearchParams();
+
+  const currentQuery = searchParams.get('q') ?? '';
+  const currentPage = Number(searchParams.get('page') ?? '1');
+
+  const createUrl = useCallback(
+    (params: Record<string, string | undefined>) => {
+      const current = new URLSearchParams(Array.from(searchParams.entries()));
+
+      Object.entries(params).forEach(([key, value]) => {
+        if (value === undefined) {
+          current.delete(key);
+        } else {
+          current.set(key, value);
+        }
+      });
+
+      return `${pathname}?${current.toString()}`;
+    },
+    [pathname, searchParams],
+  );
+
+  return (
+    <div>
+      <p>Current query: {currentQuery}</p>
+      <a href={createUrl({ page: String(currentPage + 1) })}>Next page</a>
+    </div>
+  );
+}
+```
+
+---
+
+## Server-Side Redirects
+
+```tsx
+// In Server Components and Route Handlers
+import { redirect, permanentRedirect } from 'next/navigation';
+
+// 307 Temporary redirect
+export default async function LegacyPage() {
+  redirect('/new-location');
+}
+
+// 308 Permanent redirect
+export default async function OldPage() {
+  permanentRedirect('/new-location');
+}
+
+// Conditional redirect (e.g., auth check)
+import { requireAuth } from '@/lib/auth';
+
+export default async function ProtectedPage() {
+  const user = await requireAuth();
+  if (!user) redirect('/login?callbackUrl=/dashboard');
+  return <div>Protected content</div>;
+}
+```
+
+### Static Redirects in next.config.ts
+
+```typescript
+// next.config.ts
+const nextConfig = {
+  async redirects() {
+    return [
+      {
+        source: '/old-blog/:slug',
+        destination: '/blog/:slug',
+        permanent: true,   // 308
+      },
+      {
+        source: '/docs',
+        destination: '/docs/getting-started',
+        permanent: false,  // 307
+      },
+      // Redirect with regex
+      {
+        source: '/blog/:slug(\\d{4}-\\d{2}-\\d{2}-.*)',
+        destination: '/archive/:slug',
+        permanent: true,
+      },
+    ];
+  },
+};
+```
+
+---
+
+## Middleware
+
+Middleware runs on the Edge before every matched request. Use it for auth, redirects, A/B testing, and locale detection.
+
+```typescript
+// src/middleware.ts
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
+import { verifyToken } from '@/lib/auth-edge'; // Edge-compatible auth
+
+export function middleware(request: NextRequest) {
+  const pathname = request.nextUrl.pathname;
+
+  // Auth protection for dashboard routes
+  if (pathname.startsWith('/dashboard')) {
+    const token = request.cookies.get('session')?.value;
+
+    if (!token || !verifyToken(token)) {
+      const loginUrl = new URL('/login', request.url);
+      loginUrl.searchParams.set('callbackUrl', pathname);
+      return NextResponse.redirect(loginUrl);
+    }
+  }
+
+  // Redirect old blog paths
+  if (pathname.startsWith('/old-blog/')) {
+    const newPath = pathname.replace('/old-blog/', '/blog/');
+    return NextResponse.redirect(new URL(newPath, request.url));
+  }
+
+  // Add custom response headers
+  const response = NextResponse.next();
+  response.headers.set('X-Frame-Options', 'DENY');
+  response.headers.set('X-Content-Type-Options', 'nosniff');
+  return response;
+}
+
+// Only run middleware on these paths
+export const config = {
+  matcher: [
+    // Run on all paths except static assets and API routes
+    '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+    // Or specifically:
+    '/dashboard/:path*',
+    '/api/protected/:path*',
+  ],
+};
+```
+
+### NextResponse Methods
+
+```typescript
+// Allow the request to continue
+NextResponse.next()
+
+// Redirect (changes the URL)
+NextResponse.redirect(new URL('/login', request.url))
+
+// Rewrite (changes what renders, URL stays the same)
+NextResponse.rewrite(new URL('/landing-v2', request.url))
+
+// Return a custom response (stops the request)
+new NextResponse('Unauthorized', { status: 401 })
+
+// Return JSON
+NextResponse.json({ error: 'Not found' }, { status: 404 })
+```
+
+:::caution[Edge Runtime Limitations]
+Middleware runs in the Edge Runtime (V8 isolate), which has a restricted API. It does **not** support Node.js APIs (`fs`, `crypto`, `Buffer`, etc.). Use only Web APIs and Edge-compatible libraries.
+:::
+
+---
+
+## Internationalization with next-intl
+
+```bash
+npm install next-intl
+```
+
+```
+src/
+├── messages/
+│   ├── en.json
+│   └── fr.json
+├── app/
+│   └── [locale]/
+│       ├── layout.tsx
+│       └── page.tsx
+└── middleware.ts
+```
+
+```typescript
+// src/middleware.ts
+import createMiddleware from 'next-intl/middleware';
+
+export default createMiddleware({
+  locales: ['en', 'fr', 'de'],
+  defaultLocale: 'en',
+  localePrefix: 'as-needed', // No prefix for default locale
+});
+
+export const config = {
+  matcher: ['/((?!api|_next|.*\\..*).*)'],
+};
+```
+
+```tsx
+// src/app/[locale]/layout.tsx
+import { NextIntlClientProvider } from 'next-intl';
+import { getMessages } from 'next-intl/server';
+
+export default async function LocaleLayout({
+  children,
+  params: { locale },
+}: {
+  children: React.ReactNode;
+  params: { locale: string };
+}) {
+  const messages = await getMessages();
+  return (
+    <html lang={locale}>
+      <body>
+        <NextIntlClientProvider messages={messages}>
+          {children}
+        </NextIntlClientProvider>
+      </body>
+    </html>
+  );
+}
+```
+
+```tsx
+// Usage in a component
+import { useTranslations } from 'next-intl';
+
+export function Header() {
+  const t = useTranslations('Header');
+  return <h1>{t('title')}</h1>;
+}
+```
+
+```json
+// src/messages/en.json
+{
+  "Header": {
+    "title": "Welcome to My App"
+  }
+}
+```
+
+---
+
+## Dynamic Route Utilities
+
+```typescript
+// Generate a URL from a pattern
+import { generatePath } from 'next/dist/shared/lib/router/utils/route-regex';
+
+// Check if a path matches a pattern
+import { pathToRegexp } from 'path-to-regexp';
+
+// Decode route parameters safely
+function decodeParam(param: string | string[] | undefined): string {
+  if (!param) return '';
+  const decoded = Array.isArray(param) ? param[0] : param;
+  return decodeURIComponent(decoded ?? '');
+}
+```

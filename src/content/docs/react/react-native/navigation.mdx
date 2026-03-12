@@ -1,6 +1,6 @@
 ---
 title: Navigation
-description: Set up React Navigation v6/v7 with Stack, Tab, and Drawer navigators; deep linking; and authentication flows.
+description: Master React Navigation v6/v7 with stack, tab, drawer, and nested navigators. Learn screen params, deep linking, authentication flows, and navigation hooks.
 sidebar:
   order: 4
 tags: [react, mobile]
@@ -8,34 +8,29 @@ tags: [react, mobile]
 
 import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-React Navigation is the standard navigation library for React Native. It provides composable navigators — Stack, Tabs, Drawer — and supports deep linking, typed routes, and authentication patterns.
+React Navigation is the standard navigation library for React Native. It provides stack, tab, drawer, and material navigators with deep linking, authentication flows, and a powerful hooks API.
 
 ## Installation
 
 ```bash
 npx expo install @react-navigation/native
-
-# Dependencies
 npx expo install react-native-screens react-native-safe-area-context
 
-# Navigators (install only what you need)
-npm install @react-navigation/native-stack
-npm install @react-navigation/bottom-tabs
-npm install @react-navigation/drawer
+# Stack Navigator
+npx expo install @react-navigation/native-stack
 
-# Drawer requires these additional deps
-npx expo install react-native-gesture-handler react-native-reanimated
+# Tab Navigator
+npx expo install @react-navigation/bottom-tabs
+
+# Drawer Navigator
+npx expo install @react-navigation/drawer react-native-gesture-handler react-native-reanimated
 ```
 
-For bare React Native (non-Expo):
-
-```bash
-cd ios && pod install && cd ..
-```
+For bare React Native, run `pod install` after installing iOS dependencies.
 
 ## NavigationContainer
 
-Wrap your entire app in `NavigationContainer`. This manages the navigation state tree.
+Wrap your root component with `NavigationContainer`. It manages navigation state and provides context to all child navigators.
 
 ```tsx
 // App.tsx
@@ -51,35 +46,39 @@ export default function App() {
 }
 ```
 
-## Type-Safe Routes
+## Type-Safe Navigation
 
-Define your route params in a central types file:
+Define your param types before creating navigators for full TypeScript support:
 
 ```typescript
-// src/types/navigation.ts
+// src/navigation/types.ts
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { BottomTabScreenProps } from '@react-navigation/bottom-tabs';
 
-// Root Stack
+// Root stack param list
 export type RootStackParamList = {
   Home: undefined;
-  ProductDetail: { productId: string; title: string };
-  Cart: undefined;
-  Checkout: { items: string[] };
+  PostDetail: { postId: string; title?: string };
+  UserProfile: { userId: string };
+  Settings: undefined;
+  NotFound: undefined;
 };
 
-// Tab Navigator
+// Tab param list
 export type TabParamList = {
   Feed: undefined;
-  Search: undefined;
-  Profile: undefined;
+  Search: { initialQuery?: string };
+  Notifications: undefined;
+  Profile: { userId: string };
 };
 
-// Screen props helpers
-export type HomeScreenProps = NativeStackScreenProps<RootStackParamList, 'Home'>;
-export type ProductDetailScreenProps = NativeStackScreenProps<RootStackParamList, 'ProductDetail'>;
+// Typed screen props
+export type PostDetailScreenProps = NativeStackScreenProps<
+  RootStackParamList,
+  'PostDetail'
+>;
 
-// Global type augmentation for useNavigation
+// Global type augmentation for useNavigation()
 declare global {
   namespace ReactNavigation {
     interface RootParamList extends RootStackParamList {}
@@ -89,14 +88,15 @@ declare global {
 
 ## Stack Navigator
 
-The Stack Navigator presents screens as a stack — new screens slide in from the right (iOS) or fade in (Android).
+The `createNativeStackNavigator` uses native UINavigationController on iOS and Fragments on Android — giving you native transitions and gestures.
 
 ```tsx
 // src/navigation/RootNavigator.tsx
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { RootStackParamList } from '../types/navigation';
 import { HomeScreen } from '../screens/HomeScreen';
-import { ProductDetailScreen } from '../screens/ProductDetailScreen';
+import { PostDetailScreen } from '../screens/PostDetailScreen';
+import { SettingsScreen } from '../screens/SettingsScreen';
+import type { RootStackParamList } from './types';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
@@ -108,30 +108,31 @@ export function RootNavigator() {
         headerStyle: { backgroundColor: '#fff' },
         headerTintColor: '#007AFF',
         headerTitleStyle: { fontWeight: '600' },
+        headerBackTitleVisible: false,  // iOS: hide back title
         animation: 'slide_from_right',
-        headerBackTitleVisible: false,
+        contentStyle: { backgroundColor: '#f9f9f9' },
       }}
     >
       <Stack.Screen
         name="Home"
         component={HomeScreen}
-        options={{ title: 'Home', headerShown: true }}
+        options={{ title: 'Feed', headerShown: true }}
       />
       <Stack.Screen
-        name="ProductDetail"
-        component={ProductDetailScreen}
+        name="PostDetail"
+        component={PostDetailScreen}
         options={({ route }) => ({
-          title: route.params.title,
-          headerLargeTitle: true,
+          title: route.params.title ?? 'Post',
+          headerLargeTitle: true,      // iOS large title on scroll
         })}
       />
       <Stack.Screen
-        name="Cart"
-        component={CartScreen}
+        name="Settings"
+        component={SettingsScreen}
         options={{
-          title: 'Cart',
-          presentation: 'modal',
+          presentation: 'modal',       // iOS: card-style modal
           animation: 'slide_from_bottom',
+          headerShown: false,
         }}
       />
     </Stack.Navigator>
@@ -139,33 +140,54 @@ export function RootNavigator() {
 }
 ```
 
-**`animation` options:** `slide_from_right`, `slide_from_left`, `slide_from_bottom`, `fade`, `fade_from_bottom`, `flip`, `simple_push`, `none`
+### Stack Animation Options
 
-**`presentation` options:** `card` (default), `modal`, `transparentModal`, `containedModal`, `fullScreenModal`
+```typescript
+// Available animations for native stack:
+type StackAnimation =
+  | 'default'           // Platform default
+  | 'fade'
+  | 'fade_from_bottom'
+  | 'flip'
+  | 'none'
+  | 'simple_push'
+  | 'slide_from_bottom'
+  | 'slide_from_right'
+  | 'slide_from_left'
+  | 'ios'               // iOS-style slide
+```
 
-## Bottom Tab Navigator
+## Tab Navigator
 
 ```tsx
 // src/navigation/TabNavigator.tsx
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
-import { TabParamList } from '../types/navigation';
+import { FeedScreen } from '../screens/FeedScreen';
+import { SearchScreen } from '../screens/SearchScreen';
+import { NotificationsScreen } from '../screens/NotificationsScreen';
+import { ProfileScreen } from '../screens/ProfileScreen';
+import type { TabParamList } from './types';
 
 const Tab = createBottomTabNavigator<TabParamList>();
 
 export function TabNavigator() {
+  const unreadCount = useNotificationCount(); // your hook
+
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
-        tabBarIcon: ({ color, size, focused }) => {
-          const icons: Record<keyof TabParamList, string> = {
-            Feed: focused ? 'home' : 'home-outline',
-            Search: focused ? 'search' : 'search-outline',
-            Profile: focused ? 'person' : 'person-outline',
+        tabBarIcon: ({ focused, color, size }) => {
+          const icons: Record<keyof TabParamList, [string, string]> = {
+            Feed: ['home', 'home-outline'],
+            Search: ['search', 'search-outline'],
+            Notifications: ['notifications', 'notifications-outline'],
+            Profile: ['person', 'person-outline'],
           };
+          const [filled, outline] = icons[route.name];
           return (
             <Ionicons
-              name={icons[route.name] as any}
+              name={(focused ? filled : outline) as any}
               size={size}
               color={color}
             />
@@ -173,20 +195,28 @@ export function TabNavigator() {
         },
         tabBarActiveTintColor: '#007AFF',
         tabBarInactiveTintColor: '#8E8E93',
-        tabBarStyle: { borderTopWidth: StyleSheet.hairlineWidth },
+        tabBarStyle: {
+          backgroundColor: '#fff',
+          borderTopColor: '#eee',
+        },
         headerShown: false,
       })}
     >
+      <Tab.Screen name="Feed" component={FeedScreen} options={{ tabBarLabel: 'Home' }} />
+      <Tab.Screen name="Search" component={SearchScreen} />
       <Tab.Screen
-        name="Feed"
-        component={FeedScreen}
+        name="Notifications"
+        component={NotificationsScreen}
         options={{
-          tabBarLabel: 'Home',
-          tabBarBadge: 3, // notification badge
+          tabBarBadge: unreadCount > 0 ? unreadCount : undefined,
+          tabBarBadgeStyle: { backgroundColor: '#FF3B30' },
         }}
       />
-      <Tab.Screen name="Search" component={SearchScreen} />
-      <Tab.Screen name="Profile" component={ProfileScreen} />
+      <Tab.Screen
+        name="Profile"
+        component={ProfileScreen}
+        initialParams={{ userId: 'me' }}
+      />
     </Tab.Navigator>
   );
 }
@@ -195,121 +225,151 @@ export function TabNavigator() {
 ## Drawer Navigator
 
 ```tsx
+// src/navigation/DrawerNavigator.tsx
 import { createDrawerNavigator } from '@react-navigation/drawer';
-import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { View, Text, Pressable, StyleSheet } from 'react-native';
+import { DrawerContentScrollView, DrawerItemList } from '@react-navigation/drawer';
 
 const Drawer = createDrawerNavigator();
 
-export function DrawerNavigator() {
+function CustomDrawerContent(props: any) {
   return (
-    // GestureHandlerRootView must wrap the entire app for Drawer to work
-    <GestureHandlerRootView style={{ flex: 1 }}>
-      <Drawer.Navigator
-        screenOptions={{
-          drawerStyle: { backgroundColor: '#f5f5f5', width: 260 },
-          drawerActiveTintColor: '#007AFF',
-          drawerInactiveTintColor: '#333',
-        }}
-      >
-        <Drawer.Screen name="Dashboard" component={DashboardScreen} />
-        <Drawer.Screen name="Settings" component={SettingsScreen} />
-        <Drawer.Screen name="About" component={AboutScreen} />
-      </Drawer.Navigator>
-    </GestureHandlerRootView>
+    <DrawerContentScrollView {...props}>
+      <View style={styles.drawerHeader}>
+        <Text style={styles.drawerUserName}>John Doe</Text>
+        <Text style={styles.drawerUserEmail}>john@example.com</Text>
+      </View>
+      <DrawerItemList {...props} />
+      <Pressable style={styles.logoutBtn} onPress={() => signOut()}>
+        <Text style={styles.logoutText}>Sign Out</Text>
+      </Pressable>
+    </DrawerContentScrollView>
   );
 }
+
+export function DrawerNavigator() {
+  return (
+    <Drawer.Navigator
+      drawerContent={props => <CustomDrawerContent {...props} />}
+      screenOptions={{
+        drawerType: 'slide',
+        drawerStyle: { backgroundColor: '#fff', width: 280 },
+        overlayColor: 'rgba(0,0,0,0.4)',
+        drawerActiveTintColor: '#007AFF',
+        drawerInactiveTintColor: '#333',
+      }}
+    >
+      <Drawer.Screen name="Home" component={HomeScreen} />
+      <Drawer.Screen name="Settings" component={SettingsScreen} />
+    </Drawer.Navigator>
+  );
+}
+
+const styles = StyleSheet.create({
+  drawerHeader: { padding: 24, borderBottomWidth: 1, borderBottomColor: '#eee', marginBottom: 8 },
+  drawerUserName: { fontSize: 18, fontWeight: 'bold' },
+  drawerUserEmail: { fontSize: 14, color: '#666', marginTop: 4 },
+  logoutBtn: { margin: 16, padding: 12, borderRadius: 8, backgroundColor: '#FFF0F0' },
+  logoutText: { color: '#FF3B30', fontWeight: '600', textAlign: 'center' },
+});
 ```
 
 ## Nested Navigators
 
-The most common pattern: Tabs at the root with a Stack inside each tab.
+Real apps combine multiple navigator types. A common pattern is a root stack that contains a tab navigator:
 
 ```tsx
-// src/navigation/AppNavigator.tsx
-import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { TabNavigator } from './TabNavigator';
+// src/navigation/RootNavigator.tsx
+const RootStack = createNativeStackNavigator<RootStackParamList>();
 
-type AppStackParamList = {
-  Tabs: undefined;
-  ProductDetail: { productId: string };
-  Settings: undefined;
-};
+export function RootNavigator() {
+  const { isAuthenticated } = useAuth();
 
-const AppStack = createNativeStackNavigator<AppStackParamList>();
-
-export function AppNavigator() {
   return (
-    <AppStack.Navigator screenOptions={{ headerShown: false }}>
-      {/* Tabs is nested inside the root stack */}
-      <AppStack.Screen name="Tabs" component={TabNavigator} />
-      {/* These screens appear on top of tabs (no tab bar) */}
-      <AppStack.Screen
-        name="ProductDetail"
-        component={ProductDetailScreen}
-        options={{ headerShown: true, title: 'Product' }}
-      />
-      <AppStack.Screen
-        name="Settings"
-        component={SettingsScreen}
-        options={{ headerShown: true }}
-      />
-    </AppStack.Navigator>
+    <RootStack.Navigator screenOptions={{ headerShown: false }}>
+      {isAuthenticated ? (
+        // Authenticated screens
+        <>
+          <RootStack.Screen name="Tabs" component={TabNavigator} />
+          <RootStack.Screen
+            name="PostDetail"
+            component={PostDetailScreen}
+            options={{ headerShown: true }}
+          />
+          <RootStack.Screen
+            name="Settings"
+            component={SettingsScreen}
+            options={{ presentation: 'modal', headerShown: true }}
+          />
+        </>
+      ) : (
+        // Auth screens
+        <>
+          <RootStack.Screen name="Login" component={LoginScreen} />
+          <RootStack.Screen name="Register" component={RegisterScreen} />
+          <RootStack.Screen name="ForgotPassword" component={ForgotPasswordScreen} />
+        </>
+      )}
+    </RootStack.Navigator>
   );
 }
 ```
+
+:::tip[Conditional Navigation for Auth]
+React Navigation recommends using conditional rendering rather than navigation.navigate() to switch between auth and app screens. When `isAuthenticated` changes, the navigator automatically shows the correct screens.
+:::
 
 ## Passing Params to Screens
 
 ```tsx
-// Navigating with params
-navigation.navigate('ProductDetail', {
-  productId: '123',
-  title: 'Blue Sneakers',
-});
-
-// Reading params in the destination screen
-import { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { RootStackParamList } from '../types/navigation';
-
-type Props = NativeStackScreenProps<RootStackParamList, 'ProductDetail'>;
-
-export function ProductDetailScreen({ route, navigation }: Props) {
-  const { productId, title } = route.params;
+// Navigate with params
+function PostListItem({ post }: { post: Post }) {
+  const navigation = useNavigation<NavigationProp<RootStackParamList>>();
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>{title}</Text>
-      <Text>ID: {productId}</Text>
-    </View>
+    <Pressable
+      onPress={() =>
+        navigation.navigate('PostDetail', {
+          postId: post.id,
+          title: post.title,
+        })
+      }
+    >
+      <Text>{post.title}</Text>
+    </Pressable>
   );
+}
+
+// Receive params in screen
+function PostDetailScreen({ route, navigation }: PostDetailScreenProps) {
+  const { postId, title } = route.params;
+
+  // Update params (e.g., after loading data)
+  React.useLayoutEffect(() => {
+    navigation.setOptions({ title: title ?? 'Post' });
+  }, [navigation, title]);
+
+  return <PostContent id={postId} />;
 }
 ```
 
-:::caution[Params are not state]
-Do not pass mutable objects or functions as route params. Params are serialized to JSON for deep linking. Pass only primitive values — IDs, strings, numbers. Fetch the full object from your store or API inside the destination screen using the ID.
-:::
-
-## Hooks
+## Navigation Hooks
 
 ### useNavigation
-
-Access navigation without prop drilling:
 
 ```tsx
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { RootStackParamList } from '../types/navigation';
+import type { RootStackParamList } from '../navigation/types';
 
-type NavigationProp = NativeStackNavigationProp<RootStackParamList>;
+type NavProp = NativeStackNavigationProp<RootStackParamList>;
 
-export function ProductCard({ id, title }: { id: string; title: string }) {
-  const navigation = useNavigation<NavigationProp>();
+export function BackButton() {
+  const navigation = useNavigation<NavProp>();
 
   return (
-    <Pressable
-      onPress={() => navigation.navigate('ProductDetail', { productId: id, title })}
-    >
-      <Text>{title}</Text>
+    <Pressable onPress={() => navigation.goBack()}>
+      <Text>← Back</Text>
     </Pressable>
   );
 }
@@ -317,206 +377,187 @@ export function ProductCard({ id, title }: { id: string; title: string }) {
 
 ### useRoute
 
-Access route params without prop drilling:
-
 ```tsx
 import { useRoute } from '@react-navigation/native';
-import { RouteProp } from '@react-navigation/native';
-import { RootStackParamList } from '../types/navigation';
+import type { RouteProp } from '@react-navigation/native';
+import type { RootStackParamList } from '../navigation/types';
 
-type ProductDetailRoute = RouteProp<RootStackParamList, 'ProductDetail'>;
-
-export function ProductDetailScreen() {
-  const route = useRoute<ProductDetailRoute>();
-  const { productId, title } = route.params;
-
-  return <Text>{title}</Text>;
+export function PostTitle() {
+  const route = useRoute<RouteProp<RootStackParamList, 'PostDetail'>>();
+  return <Text>{route.params.title}</Text>;
 }
 ```
 
 ## Navigation Methods
 
-```tsx
-// Navigate to a screen (go there, but don't add a duplicate if already in stack)
-navigation.navigate('Settings');
+```typescript
+// Navigate to a screen (won't go if already there)
+navigation.navigate('PostDetail', { postId: '123' });
 
-// Push: always adds a new entry, even if already in stack
-navigation.push('ProductDetail', { productId: '456' });
+// Push a new instance (even if already in stack)
+navigation.push('PostDetail', { postId: '456' });
 
-// Replace: replace current screen (useful for auth flow)
-navigation.replace('Home');
+// Replace current screen
+navigation.replace('Login');
 
-// Go back
+// Go back one screen
 navigation.goBack();
-navigation.navigate('Home'); // jump to a specific screen in the stack
 
-// Reset: replace entire navigation state
+// Go back to specific screen
+navigation.navigate('Home');
+
+// Go back to the first screen in stack
+navigation.popToTop();
+
+// Reset navigation state completely
 navigation.reset({
   index: 0,
   routes: [{ name: 'Home' }],
 });
 
-// Set options imperatively
-navigation.setOptions({ title: 'Updated Title' });
+// Navigate inside a nested navigator
+navigation.navigate('Tabs', {
+  screen: 'Profile',
+  params: { userId: '123' },
+});
 ```
 
 ## Deep Linking
 
-Configure deep links so URLs open specific screens.
-
 ```typescript
-// src/navigation/linking.ts
-import { LinkingOptions } from '@react-navigation/native';
-import { RootStackParamList } from '../types/navigation';
-
-export const linking: LinkingOptions<RootStackParamList> = {
-  prefixes: ['myapp://', 'https://myapp.com'],
-  config: {
-    screens: {
-      Home: '',
-      ProductDetail: 'products/:productId',
-      Cart: 'cart',
-      Checkout: 'checkout',
-    },
-  },
-};
-```
-
-```tsx
-// Pass linking config to NavigationContainer
-<NavigationContainer linking={linking} fallback={<ActivityIndicator />}>
-  <RootNavigator />
-</NavigationContainer>
-```
-
-Register URL schemes in `app.json` (Expo):
-
-```json
+// app.json — configure scheme
 {
   "expo": {
     "scheme": "myapp",
-    "ios": { "bundleIdentifier": "com.example.myapp" },
-    "android": { "package": "com.example.myapp" }
+    "web": { "bundler": "metro" }
   }
 }
 ```
 
-Test deep links:
+```tsx
+// Navigation container with deep linking
+const linking = {
+  prefixes: ['myapp://', 'https://myapp.com'],
+  config: {
+    screens: {
+      Home: '',
+      PostDetail: 'posts/:postId',
+      UserProfile: 'users/:userId',
+      Settings: 'settings',
+      Tabs: {
+        screens: {
+          Feed: 'feed',
+          Search: 'search',
+          Profile: 'profile',
+        },
+      },
+    },
+  },
+};
+
+export default function App() {
+  return (
+    <NavigationContainer linking={linking} fallback={<LoadingScreen />}>
+      <RootNavigator />
+    </NavigationContainer>
+  );
+}
+```
 
 ```bash
+# Test deep links from terminal:
 # iOS Simulator
-xcrun simctl openurl booted "myapp://products/123"
+xcrun simctl openurl booted "myapp://posts/123"
 
 # Android Emulator
-adb shell am start -a android.intent.action.VIEW -d "myapp://products/123"
+adb shell am start -W -a android.intent.action.VIEW -d "myapp://posts/123" com.myapp
 ```
 
 ## Linking Module
 
-Open external URLs with the `Linking` module:
-
-```tsx
+```typescript
 import { Linking } from 'react-native';
 
-// Open a URL in the browser
-await Linking.openURL('https://example.com');
+// Open a URL in the default browser / app
+async function openExternalLink(url: string) {
+  const canOpen = await Linking.canOpenURL(url);
+  if (canOpen) {
+    await Linking.openURL(url);
+  } else {
+    console.warn(`Cannot open URL: ${url}`);
+  }
+}
 
-// Open system settings
+// Open app settings
 await Linking.openSettings();
 
-// Check if a URL can be opened
-const canOpen = await Linking.canOpenURL('tel:+15551234567');
-if (canOpen) {
-  await Linking.openURL('tel:+15551234567');
-}
+// Listen for incoming deep links when app is already open
+useEffect(() => {
+  const subscription = Linking.addEventListener('url', ({ url }) => {
+    console.log('Incoming deep link:', url);
+  });
+
+  // Handle initial URL (app launched from a link)
+  Linking.getInitialURL().then(url => {
+    if (url) console.log('Launched from link:', url);
+  });
+
+  return () => subscription.remove();
+}, []);
 ```
 
 ## Authentication Flow
 
-The standard pattern: conditionally render different navigators based on auth state.
+The recommended pattern uses conditional rendering based on auth state rather than navigation:
 
 ```tsx
-// src/navigation/AppNavigator.tsx
-import { useAuthStore } from '../stores/useAuthStore';
+// src/navigation/RootNavigator.tsx
+import { useAuthStore } from '../store/authStore';
 
-export function AppNavigator() {
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+const AuthStack = createNativeStackNavigator();
+const AppStack = createNativeStackNavigator();
 
+function AuthNavigator() {
   return (
-    <NavigationContainer>
-      {isAuthenticated ? <AuthenticatedNavigator /> : <GuestNavigator />}
-    </NavigationContainer>
+    <AuthStack.Navigator screenOptions={{ headerShown: false }}>
+      <AuthStack.Screen name="Welcome" component={WelcomeScreen} />
+      <AuthStack.Screen name="Login" component={LoginScreen} />
+      <AuthStack.Screen name="Register" component={RegisterScreen} />
+    </AuthStack.Navigator>
   );
 }
 
-// Guest navigator — only shows auth screens
-function GuestNavigator() {
-  const Stack = createNativeStackNavigator();
+function AppNavigator() {
   return (
-    <Stack.Navigator screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="Welcome" component={WelcomeScreen} />
-      <Stack.Screen name="Login" component={LoginScreen} />
-      <Stack.Screen name="Register" component={RegisterScreen} />
-    </Stack.Navigator>
+    <AppStack.Navigator screenOptions={{ headerShown: false }}>
+      <AppStack.Screen name="Tabs" component={TabNavigator} />
+      <AppStack.Screen name="PostDetail" component={PostDetailScreen} options={{ headerShown: true }} />
+    </AppStack.Navigator>
   );
 }
 
-// Authenticated navigator — full app
-function AuthenticatedNavigator() {
-  return <TabNavigator />;
+export function RootNavigator() {
+  const { token, isLoading } = useAuthStore();
+
+  if (isLoading) {
+    return <SplashScreen />;
+  }
+
+  return token ? <AppNavigator /> : <AuthNavigator />;
 }
 ```
 
-:::tip[Prevent navigation flash]
-While your app checks stored tokens on startup, show a splash screen or loading state instead of briefly flashing the login screen. Use `SplashScreen.preventAutoHideAsync()` from `expo-splash-screen` and hide it once the auth check completes.
+:::caution[Navigation Ref for Imperative Navigation]
+If you need to navigate from outside a React component (e.g., from an API interceptor or push notification handler), use a navigation ref:
+
+```typescript
+import { createNavigationContainerRef } from '@react-navigation/native';
+export const navigationRef = createNavigationContainerRef<RootStackParamList>();
+
+// In your NavigationContainer:
+<NavigationContainer ref={navigationRef}>
+
+// Then imperatively:
+navigationRef.navigate('Login');
+```
 :::
-
-## Screen Listeners
-
-React to navigation events (focus, blur, etc.):
-
-```tsx
-import { useFocusEffect } from '@react-navigation/native';
-import { useCallback } from 'react';
-
-export function HomeScreen() {
-  // Runs when the screen comes into focus
-  useFocusEffect(
-    useCallback(() => {
-      console.log('Screen focused — refresh data');
-      fetchData();
-
-      return () => {
-        // Cleanup when screen loses focus
-        console.log('Screen blurred');
-      };
-    }, []),
-  );
-
-  return <View />;
-}
-```
-
-## Header Customization
-
-```tsx
-<Stack.Screen
-  name="Profile"
-  component={ProfileScreen}
-  options={({ navigation, route }) => ({
-    title: 'Profile',
-    headerRight: () => (
-      <Pressable onPress={() => navigation.navigate('Settings')}>
-        <Ionicons name="settings-outline" size={22} color="#007AFF" />
-      </Pressable>
-    ),
-    headerLeft: () => (
-      <Pressable onPress={navigation.goBack}>
-        <Text style={{ color: '#007AFF' }}>Back</Text>
-      </Pressable>
-    ),
-    headerBlurEffect: 'regular',
-    headerTransparent: true,
-  })}
-/>
-```

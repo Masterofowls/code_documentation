@@ -1,6 +1,6 @@
 ---
 title: Getting Started with MySQL
-description: Install MySQL, secure it, create users, manage permissions, and configure your database for production use.
+description: Install MySQL, secure it, create users with proper privileges, and configure your first database.
 sidebar:
   order: 2
 tags: [database, sql]
@@ -10,424 +10,439 @@ import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/
 
 # Getting Started with MySQL
 
-This guide covers installing MySQL, initial security hardening, user and privilege management,
-database creation, and essential configuration for development and production environments.
-
 ## Installation
 
 <Tabs>
   <TabItem label="Ubuntu/Debian">
     ```bash
-    # Add MySQL APT repository
+    # Ubuntu 22.04 — install from official MySQL APT repository
     wget https://dev.mysql.com/get/mysql-apt-config_0.8.29-1_all.deb
     sudo dpkg -i mysql-apt-config_0.8.29-1_all.deb
     sudo apt update
-
-    # Install MySQL 8.0
     sudo apt install mysql-server
 
-    # Start and enable service
+    # Or install directly from Ubuntu's package mirror
+    sudo apt update && sudo apt install mysql-server
+
+    # Start and enable
     sudo systemctl start mysql
     sudo systemctl enable mysql
-
-    # Check status
     sudo systemctl status mysql
     ```
   </TabItem>
   <TabItem label="RHEL/CentOS/Rocky">
     ```bash
-    # Add MySQL Yum Repository
-    sudo rpm -Uvh https://dev.mysql.com/get/mysql84-community-release-el9-1.noarch.rpm
-
-    # Install MySQL
+    # RHEL 9 / Rocky 9 / AlmaLinux 9
+    sudo dnf install https://dev.mysql.com/get/mysql84-community-release-el9-1.noarch.rpm
     sudo dnf install mysql-community-server
 
-    # Start and enable
     sudo systemctl start mysqld
     sudo systemctl enable mysqld
 
-    # Get temporary root password (RHEL/CentOS only)
+    # Grab the temporary root password from the log
     sudo grep 'temporary password' /var/log/mysqld.log
     ```
   </TabItem>
   <TabItem label="macOS (Homebrew)">
     ```bash
-    # Install via Homebrew
     brew install mysql
 
-    # Start MySQL service
+    # Start as a background service
     brew services start mysql
 
-    # Or run manually
+    # Or run in foreground
     mysql.server start
 
-    # Connect (no password on fresh install via Homebrew)
-    mysql -u root
+    # Check status
+    brew services list | grep mysql
+    ```
+  </TabItem>
+  <TabItem label="Windows MSI">
+    ```powershell
+    # Download MySQL Installer from https://dev.mysql.com/downloads/installer/
+    # Run mysql-installer-community-*.msi
+    # Choose "Developer Default" or "Server Only"
+    # The installer configures the Windows service automatically
+
+    # Start/stop via Services or:
+    net start MySQL80
+    net stop MySQL80
     ```
   </TabItem>
   <TabItem label="Docker">
     ```bash
-    # Run MySQL 8.0 in Docker
+    # Quick start with latest MySQL 8
     docker run -d \
       --name mysql8 \
-      -e MYSQL_ROOT_PASSWORD=strongpassword \
+      -e MYSQL_ROOT_PASSWORD=secret \
       -e MYSQL_DATABASE=myapp \
       -e MYSQL_USER=appuser \
-      -e MYSQL_PASSWORD=apppassword \
+      -e MYSQL_PASSWORD=apppass \
       -p 3306:3306 \
       -v mysql_data:/var/lib/mysql \
       mysql:8.0
 
-    # Connect from host
-    mysql -h 127.0.0.1 -P 3306 -u root -p
+    # Connect to the running container
+    docker exec -it mysql8 mysql -u root -p
 
+    # Docker Compose (recommended for development)
+    ```
+    ```yaml
     # docker-compose.yml
-    # version: '3.8'
-    # services:
-    #   mysql:
-    #     image: mysql:8.0
-    #     environment:
-    #       MYSQL_ROOT_PASSWORD: rootpass
-    #       MYSQL_DATABASE: myapp
-    #     ports:
-    #       - "3306:3306"
-    #     volumes:
-    #       - mysql_data:/var/lib/mysql
-    # volumes:
-    #   mysql_data:
+    services:
+      db:
+        image: mysql:8.0
+        restart: unless-stopped
+        environment:
+          MYSQL_ROOT_PASSWORD: rootsecret
+          MYSQL_DATABASE: myapp
+          MYSQL_USER: appuser
+          MYSQL_PASSWORD: apppass
+        ports:
+          - "3306:3306"
+        volumes:
+          - db_data:/var/lib/mysql
+          - ./init:/docker-entrypoint-initdb.d   # .sql files run on first start
+    volumes:
+      db_data:
     ```
   </TabItem>
 </Tabs>
 
-## Initial Security Setup
+## Securing the Installation
 
-After installation, run the security script to harden your MySQL instance:
+After installation, run `mysql_secure_installation` to remove insecure defaults:
 
 ```bash
 sudo mysql_secure_installation
 ```
 
-This script will:
-1. Set or change the root password
-2. Remove anonymous user accounts
-3. Disable remote root login
-4. Remove the test database
+This interactive wizard will:
+1. Set (or change) the root password and configure password validation policy
+2. Remove anonymous users created by default
+3. Disallow remote root login (root should only connect from `localhost`)
+4. Remove the `test` database
 5. Reload privilege tables
 
-:::tip[Validate Password Plugin]
-The script may ask about the `validate_password` component which enforces password complexity.
-For development, choose LOW (0). For production, use MEDIUM (1) or STRONG (2).
+:::tip[On Fresh Ubuntu Installs]
+Ubuntu's MySQL package may install with `auth_socket` for root, meaning root logs in via the OS user, not a password. Run `sudo mysql` to connect, then change the auth plugin if you need password-based root access:
+
+```sql
+ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'StrongPassword!1';
+FLUSH PRIVILEGES;
+```
 :::
 
-## MySQL CLI
+## The mysql CLI
 
 ```bash
-# Connect as root
+# Connect as root locally
 mysql -u root -p
 
 # Connect to a specific database
-mysql -u appuser -p mydb
+mysql -u root -p myapp
 
-# Connect to remote server
-mysql -h 192.168.1.100 -P 3306 -u appuser -p mydb
+# Connect to a remote server
+mysql -h db.example.com -P 3306 -u appuser -p myapp
 
-# Execute a query directly
-mysql -u root -p -e "SHOW DATABASES;"
+# Execute a single query without interactive mode
+mysql -u root -p myapp -e "SELECT COUNT(*) FROM orders;"
 
-# Run a SQL file
-mysql -u root -p mydb < schema.sql
+# Execute a SQL file
+mysql -u root -p myapp < schema.sql
 
-# Dump and restore (covered later)
+# Output as tab-separated (useful in scripts)
+mysql -u root -p myapp --batch --silent -e "SELECT id, name FROM users;"
 ```
 
-**Useful CLI commands inside the MySQL shell:**
+Useful CLI shortcuts inside the mysql shell:
 
-```sql
--- Show current user and database
-SELECT USER(), DATABASE();
-
--- Show current status
-STATUS;   -- or \s
-
--- Show all databases
-SHOW DATABASES;
-
--- Switch database
-USE mydb;
-
--- Show tables in current database
-SHOW TABLES;
-
--- Show table structure
-DESCRIBE users;
-SHOW CREATE TABLE users\G
-
--- Show warnings from last statement
-SHOW WARNINGS;
-
--- Show errors
-SHOW ERRORS;
-
--- Clear screen
-\! clear   -- or system clear
-
--- Exit
-EXIT;   -- or QUIT; or \q
-```
+| Command | Effect |
+|---------|--------|
+| `\g` or `;` | Execute query |
+| `\G` | Execute query, vertical output |
+| `\c` | Cancel current input |
+| `\h` | Help |
+| `\q` or `exit` | Quit |
+| `SHOW WARNINGS;` | Show warnings from last statement |
+| `\! clear` | Clear screen |
+| `SOURCE file.sql` | Execute a SQL file |
+| `\P less` | Set pager |
 
 ## MySQL Workbench
 
-MySQL Workbench is the official GUI for MySQL. It provides:
+MySQL Workbench is the official GUI for MySQL. Download from [dev.mysql.com/downloads/workbench](https://dev.mysql.com/downloads/workbench/).
+
+Features:
 - Visual schema design (EER diagrams)
-- SQL editor with auto-complete and syntax highlighting
-- Database connection management
-- Data import/export wizards
-- Server performance dashboards
-- Migration wizard (from SQL Server, PostgreSQL, SQLite)
+- SQL editor with syntax highlighting and autocomplete
+- Query result grid with export
+- Server administration (user management, server status)
+- Performance Dashboard
+- Data migration wizard
+- Visual EXPLAIN plan
 
-Download from [dev.mysql.com/downloads/workbench/](https://dev.mysql.com/downloads/workbench/).
-
-:::caution[Workbench vs CLI]
-For scripting and automation, always use the CLI or a programmatic driver.
-Workbench is excellent for exploration and schema design but is not suitable for
-production automation workflows.
+:::tip[VS Code Alternative]
+The **MySQL** extension by cweijan in VS Code provides a lightweight alternative to Workbench with a connection panel, query editor, and result viewer.
 :::
 
 ## User Management
 
-### Creating Users
+### Create a User
 
 ```sql
--- Create user with password (MySQL 8.0 default: caching_sha2_password)
-CREATE USER 'alice'@'localhost' IDENTIFIED BY 'SecurePass123!';
+-- Create user with password
+CREATE USER 'alice'@'localhost' IDENTIFIED BY 'SecurePass!42';
 
--- Create user for any host
-CREATE USER 'appuser'@'%' IDENTIFIED BY 'AppPass456!';
+-- Allow connection from any host
+CREATE USER 'bob'@'%' IDENTIFIED BY 'SecurePass!42';
 
--- Create user with specific auth plugin
-CREATE USER 'legacy_user'@'localhost'
-  IDENTIFIED WITH mysql_native_password BY 'LegacyPass789!';
+-- Allow connection from a specific subnet
+CREATE USER 'api'@'10.0.1.%' IDENTIFIED BY 'ApiPass!99';
 
--- Create user with password expiry
-CREATE USER 'temp_user'@'localhost'
-  IDENTIFIED BY 'TempPass!'
-  PASSWORD EXPIRE INTERVAL 90 DAY;
+-- Create with caching_sha2_password (MySQL 8.0 default auth plugin)
+CREATE USER 'charlie'@'%' IDENTIFIED WITH caching_sha2_password BY 'Pass!123';
 
--- Create user with connection limits
-CREATE USER 'limited_user'@'%'
-  IDENTIFIED BY 'LimitedPass!'
-  WITH MAX_QUERIES_PER_HOUR 1000
-       MAX_CONNECTIONS_PER_HOUR 100
-       MAX_USER_CONNECTIONS 10;
+-- Create with mysql_native_password (for older clients)
+CREATE USER 'legacy'@'%' IDENTIFIED WITH mysql_native_password BY 'Pass!123';
 
--- View all users
-SELECT User, Host, plugin, authentication_string
-FROM mysql.user;
-
--- Show grants for a user
-SHOW GRANTS FOR 'alice'@'localhost';
+-- Create with no password expiry and locked account
+CREATE USER 'service'@'localhost' IDENTIFIED BY 'SvcPass!77'
+  PASSWORD EXPIRE NEVER
+  ACCOUNT UNLOCK;
 ```
 
-### Granting Privileges
+:::caution[Always Restrict Hosts]
+Avoid `'user'@'%'` in production unless you have network-level restrictions (VPC, firewall, security groups). Prefer specific hosts or IP ranges to minimize attack surface.
+:::
+
+### Authentication Plugins
+
+MySQL 8.0 changed the default auth plugin from `mysql_native_password` to `caching_sha2_password`. This is more secure but can cause issues with older clients:
 
 ```sql
--- Grant all privileges on a database
-GRANT ALL PRIVILEGES ON mydb.* TO 'alice'@'localhost';
+-- Check auth plugin for all users
+SELECT user, host, plugin FROM mysql.user;
 
--- Grant specific privileges on a database
-GRANT SELECT, INSERT, UPDATE, DELETE ON mydb.* TO 'appuser'@'%';
+-- Change auth plugin for a user
+ALTER USER 'alice'@'localhost' IDENTIFIED WITH mysql_native_password BY 'NewPass!1';
 
--- Grant on a specific table
-GRANT SELECT ON mydb.products TO 'readonly_user'@'localhost';
-
--- Grant on specific columns (column-level privilege)
-GRANT SELECT (id, name, email), UPDATE (email)
-  ON mydb.users TO 'support_user'@'localhost';
-
--- Grant with ability to re-grant (GRANT OPTION)
-GRANT SELECT ON mydb.* TO 'manager'@'localhost' WITH GRANT OPTION;
-
--- Grant SUPER privilege (be careful — very powerful)
-GRANT SUPER ON *.* TO 'dba'@'localhost';
-
--- Grant EXECUTE on a stored procedure
-GRANT EXECUTE ON PROCEDURE mydb.process_order TO 'appuser'@'%';
-
--- Grant EXECUTE on all routines in a database
-GRANT EXECUTE ON mydb.* TO 'appuser'@'%';
-
--- Grant CREATE, DROP, ALTER for schema management
-GRANT CREATE, DROP, ALTER, INDEX, CREATE ROUTINE, ALTER ROUTINE
-  ON mydb.* TO 'developer'@'localhost';
-
--- Apply privileges immediately (usually automatic in MySQL 8.0)
-FLUSH PRIVILEGES;
+-- Set default auth plugin globally (my.cnf)
+-- [mysqld]
+-- default_authentication_plugin=mysql_native_password
 ```
 
-### Revoking Privileges
+### GRANT — Assigning Privileges
+
+```sql
+-- Database-level grants
+GRANT ALL PRIVILEGES ON myapp.* TO 'alice'@'localhost';
+GRANT SELECT, INSERT, UPDATE, DELETE ON myapp.* TO 'bob'@'%';
+GRANT SELECT ON myapp.* TO 'readonly'@'%';
+
+-- Table-level grants
+GRANT SELECT, INSERT ON myapp.orders TO 'alice'@'localhost';
+GRANT UPDATE ON myapp.products TO 'pricing_service'@'10.0.0.%';
+
+-- Column-level grants
+GRANT SELECT (id, name, email) ON myapp.users TO 'limited'@'localhost';
+GRANT UPDATE (status) ON myapp.orders TO 'fulfillment'@'%';
+
+-- Grant GRANT OPTION (allows user to grant their privileges to others)
+GRANT SELECT ON myapp.* TO 'team_lead'@'%' WITH GRANT OPTION;
+
+-- Global grants (use sparingly)
+GRANT PROCESS ON *.* TO 'monitor'@'localhost';   -- can see SHOW PROCESSLIST
+GRANT RELOAD ON *.* TO 'admin'@'localhost';       -- can FLUSH
+
+-- Grant a role (MySQL 8.0+)
+GRANT 'app_read' TO 'bob'@'%';
+```
+
+### REVOKE — Removing Privileges
 
 ```sql
 -- Revoke specific privilege
-REVOKE INSERT ON mydb.* FROM 'appuser'@'%';
+REVOKE INSERT ON myapp.* FROM 'bob'@'%';
 
--- Revoke all privileges from a database
-REVOKE ALL PRIVILEGES ON mydb.* FROM 'alice'@'localhost';
+-- Revoke all privileges on a database
+REVOKE ALL PRIVILEGES ON myapp.* FROM 'alice'@'localhost';
 
--- Revoke GRANT OPTION
-REVOKE GRANT OPTION ON mydb.* FROM 'manager'@'localhost';
+-- Revoke grant option only
+REVOKE GRANT OPTION ON myapp.* FROM 'team_lead'@'%';
 
--- Drop a user entirely
-DROP USER 'temp_user'@'localhost';
-
--- Rename a user
-RENAME USER 'old_name'@'localhost' TO 'new_name'@'localhost';
-
--- Change password
-ALTER USER 'alice'@'localhost' IDENTIFIED BY 'NewPassword123!';
--- Or:
-SET PASSWORD FOR 'alice'@'localhost' = 'NewPassword123!';
+-- View current grants for a user
+SHOW GRANTS FOR 'alice'@'localhost';
+SHOW GRANTS FOR CURRENT_USER();
 ```
 
-:::tip[FLUSH PRIVILEGES]
-In MySQL 8.0+, `GRANT`, `REVOKE`, `CREATE USER`, and `DROP USER` automatically
-reload the grant tables. You only need `FLUSH PRIVILEGES` if you modified the
-`mysql.user` table directly with `INSERT`/`UPDATE` (which you should avoid).
-:::
-
-## Creating Databases
+### FLUSH PRIVILEGES
 
 ```sql
--- Create database with proper character set
--- ALWAYS use utf8mb4, not utf8 (utf8 in MySQL is actually utf8mb3 — only 3 bytes)
+-- Required after direct manipulation of grant tables
+-- (UPDATE mysql.user, INSERT INTO mysql.db, etc.)
+FLUSH PRIVILEGES;
+
+-- NOT required after using GRANT/REVOKE/CREATE USER/ALTER USER
+-- Those statements automatically reload the grant tables
+```
+
+:::tip[Modern User Management]
+If you use `CREATE USER`, `GRANT`, `REVOKE`, and `ALTER USER` statements (rather than directly editing `mysql.user` tables), you **do not need** `FLUSH PRIVILEGES`. MySQL automatically updates the in-memory grant cache.
+:::
+
+### Drop and Alter Users
+
+```sql
+-- Drop a user
+DROP USER 'alice'@'localhost';
+DROP USER IF EXISTS 'alice'@'localhost';
+
+-- Rename a user
+RENAME USER 'alice'@'localhost' TO 'alice'@'%';
+
+-- Change password
+ALTER USER 'alice'@'localhost' IDENTIFIED BY 'NewSecurePass!1';
+
+-- Force password expiry
+ALTER USER 'alice'@'localhost' PASSWORD EXPIRE;
+
+-- Lock/unlock an account
+ALTER USER 'alice'@'localhost' ACCOUNT LOCK;
+ALTER USER 'alice'@'localhost' ACCOUNT UNLOCK;
+```
+
+## Database Operations
+
+### Creating Databases
+
+```sql
+-- Always specify utf8mb4 and a unicode collation
 CREATE DATABASE myapp
   CHARACTER SET utf8mb4
   COLLATE utf8mb4_unicode_ci;
 
--- utf8mb4_unicode_ci: accurate Unicode sorting, case-insensitive
--- utf8mb4_general_ci: slightly faster but less accurate sorting
--- utf8mb4_0900_ai_ci: MySQL 8.0 default, best performance + accuracy
-
--- Create if not exists
+-- With IF NOT EXISTS
 CREATE DATABASE IF NOT EXISTS myapp
   CHARACTER SET utf8mb4
   COLLATE utf8mb4_unicode_ci;
 
--- Switch to database
-USE myapp;
-
--- Check current database
-SELECT DATABASE();
-
--- Show database creation info
-SHOW CREATE DATABASE myapp;
-
--- List all databases
+-- Show existing databases
 SHOW DATABASES;
 
--- Show databases matching a pattern
-SHOW DATABASES LIKE 'my%';
-
--- Drop a database (DANGEROUS — drops all tables)
-DROP DATABASE IF EXISTS old_db;
-```
-
-:::caution[utf8 vs utf8mb4]
-**Always use `utf8mb4`**. MySQL's `utf8` charset is actually `utf8mb3` — it only supports
-3-byte Unicode characters and cannot store emoji (4-byte characters like 😀).
-`utf8mb4` is the true UTF-8 encoding and is the MySQL 8.0 default.
-:::
-
-## Basic Table Operations
-
-```sql
+-- Select a database to use
 USE myapp;
 
--- Show all tables
-SHOW TABLES;
-
--- Show tables with metadata
-SHOW TABLE STATUS;
-
--- Describe table structure
-DESCRIBE users;
-DESC users;
-
--- Full CREATE TABLE syntax
-SHOW CREATE TABLE users\G
-
--- Check table from information_schema
-SELECT TABLE_NAME, ENGINE, TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH
-FROM information_schema.TABLES
-WHERE TABLE_SCHEMA = 'myapp';
+-- Show the current database
+SELECT DATABASE();
 ```
 
-## MySQL Configuration File
+:::caution[Always Use utf8mb4, Never utf8]
+MySQL's `utf8` character set is **not real UTF-8** — it only supports up to 3-byte characters and cannot store emoji (4-byte Unicode) like 😀. Always use `utf8mb4` with `utf8mb4_unicode_ci` (for sorting/comparison) or `utf8mb4_0900_ai_ci` (MySQL 8.0 default, faster).
 
-The MySQL configuration file (`my.cnf` on Linux/macOS, `my.ini` on Windows) controls
-server behavior. Locations (checked in order):
+```sql
+-- Check current charset of a database
+SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME
+FROM information_schema.SCHEMATA
+WHERE SCHEMA_NAME = 'myapp';
+```
+:::
 
-- `/etc/my.cnf`
-- `/etc/mysql/my.cnf`
-- `~/.my.cnf`
-- `--defaults-file=path` (explicit)
+### Exploring Schema
+
+```sql
+-- List all tables in current database
+SHOW TABLES;
+SHOW TABLES FROM myapp;
+SHOW FULL TABLES;                   -- includes table type (BASE TABLE / VIEW)
+
+-- Show table structure
+DESCRIBE orders;
+DESC orders;
+SHOW COLUMNS FROM orders;
+SHOW FULL COLUMNS FROM orders;      -- includes collation, privileges, comment
+
+-- Show CREATE TABLE statement
+SHOW CREATE TABLE orders\G
+
+-- Show indexes on a table
+SHOW INDEX FROM orders\G
+SHOW INDEX FROM orders FROM myapp\G
+
+-- Show table status (engine, rows, size, etc.)
+SHOW TABLE STATUS LIKE 'orders'\G
+SHOW TABLE STATUS FROM myapp\G
+```
+
+## MySQL Configuration
+
+The MySQL configuration file is `my.cnf` on Linux/macOS and `my.ini` on Windows.
+
+**Common locations:**
+- Linux: `/etc/mysql/my.cnf` or `/etc/my.cnf` or `/etc/mysql/conf.d/*.cnf`
+- macOS (Homebrew): `/usr/local/etc/my.cnf` or `/opt/homebrew/etc/my.cnf`
+- Windows: `C:\ProgramData\MySQL\MySQL Server 8.0\my.ini`
 
 ```ini
-# /etc/mysql/mysql.conf.d/mysqld.cnf (Ubuntu)
 [mysqld]
-
-# ── General ──────────────────────────────────────────────────
-port                    = 3306
-bind-address            = 127.0.0.1    # Change to 0.0.0.0 for remote access
-max_connections         = 500          # Default 151 — increase for high traffic
+# ── Connection ──────────────────────────────────────────────
+max_connections         = 200        # max simultaneous connections
 connect_timeout         = 10
-wait_timeout            = 600          # Close idle connections after 10 min
-max_allowed_packet      = 64M          # Max packet size for queries/results
+wait_timeout            = 28800      # idle connection timeout (seconds)
+interactive_timeout     = 28800
 
-# ── Character Set ─────────────────────────────────────────────
+# ── Memory ──────────────────────────────────────────────────
+innodb_buffer_pool_size = 2G         # 50-75% of RAM for dedicated DB servers
+innodb_buffer_pool_instances = 4     # one per GB of buffer pool (up to 8)
+innodb_log_file_size    = 256M       # redo log size — larger = better write perf
+innodb_flush_log_at_trx_commit = 1  # 1=fully durable, 2=faster, 0=fastest/risky
+sort_buffer_size        = 4M
+join_buffer_size        = 4M
+tmp_table_size          = 64M
+max_heap_table_size     = 64M
+
+# ── Slow Query Log ───────────────────────────────────────────
+slow_query_log          = ON
+slow_query_log_file     = /var/log/mysql/slow.log
+long_query_time         = 1          # seconds; queries longer than this are logged
+log_queries_not_using_indexes = ON   # log full-table scans
+
+# ── Binary Logging (required for replication/PITR) ──────────
+log_bin                 = /var/log/mysql/mysql-bin
+binlog_format           = ROW        # ROW is safest; STATEMENT or MIXED also available
+binlog_expire_logs_seconds = 604800  # 7 days (MySQL 8.0+)
+server_id               = 1          # must be unique in replication topology
+
+# ── Character Set ────────────────────────────────────────────
 character-set-server    = utf8mb4
 collation-server        = utf8mb4_unicode_ci
 
-# ── InnoDB ────────────────────────────────────────────────────
-innodb_buffer_pool_size = 2G           # 70-80% of available RAM
-innodb_buffer_pool_instances = 4       # 1 per GB of buffer pool
-innodb_log_file_size    = 512M         # Larger = better write performance
-innodb_flush_log_at_trx_commit = 1     # 1=safe (fsync), 2=faster (risk of 1s data loss)
-innodb_flush_method     = O_DIRECT     # Bypass OS cache for InnoDB files
-
-# ── Slow Query Log ────────────────────────────────────────────
-slow_query_log          = 1
-slow_query_log_file     = /var/log/mysql/mysql-slow.log
-long_query_time         = 2            # Log queries taking > 2 seconds
-log_queries_not_using_indexes = 1      # Also log full table scans
-
-# ── Binary Log (required for replication and point-in-time recovery) ─
-log_bin                 = /var/log/mysql/mysql-bin
-binlog_format           = ROW          # ROW is safest and most common
-expire_logs_days        = 7            # Auto-delete binary logs after 7 days
-server_id               = 1            # Must be unique per server in replication
-
-# ── Query Cache (removed in MySQL 8.0) ───────────────────────
-# query_cache_type = 0                 # Disabled (deprecated, removed in 8.0)
-
-# ── Logging ───────────────────────────────────────────────────
-general_log             = 0            # Enable only for debugging (very verbose)
-general_log_file        = /var/log/mysql/mysql-general.log
-error_log               = /var/log/mysql/error.log
-
-[client]
-default-character-set   = utf8mb4
-
-[mysql]
-default-character-set   = utf8mb4
+# ── InnoDB ───────────────────────────────────────────────────
+innodb_file_per_table   = ON         # each table in its own .ibd file
+innodb_strict_mode      = ON
 ```
 
-```bash
-# Reload configuration (requires restart for most variables)
-sudo systemctl restart mysql
+### Viewing and Setting Variables at Runtime
 
-# Check a variable at runtime (no restart needed)
+```sql
+-- View a specific variable
 SHOW VARIABLES LIKE 'max_connections';
-SET GLOBAL max_connections = 300;  -- Some variables can be set at runtime
+SHOW VARIABLES LIKE 'innodb_buffer%';
+SHOW GLOBAL VARIABLES LIKE '%slow%';
+
+-- View system status
+SHOW STATUS LIKE 'Threads_connected';
+SHOW GLOBAL STATUS LIKE 'Innodb_buffer_pool%';
+
+-- Set a session variable
+SET SESSION sort_buffer_size = 8388608;  -- 8M
+
+-- Set a global variable (persists until restart)
+SET GLOBAL max_connections = 300;
+
+-- Persist a variable to my.cnf (MySQL 8.0+)
+SET PERSIST max_connections = 300;
+SET PERSIST_ONLY innodb_buffer_pool_size = 4294967296;   -- applies on restart only
 ```
 
 ## Backup and Restore
@@ -435,58 +450,48 @@ SET GLOBAL max_connections = 300;  -- Some variables can be set at runtime
 ### mysqldump
 
 ```bash
-# Backup a single database
+# Dump a single database
 mysqldump -u root -p myapp > myapp_backup.sql
 
-# Backup with common options for InnoDB
+# Dump with additional safety options (recommended for InnoDB)
 mysqldump -u root -p \
-  --single-transaction \      # Consistent snapshot without locking (InnoDB)
-  --routines \                # Include stored procedures and functions
-  --triggers \                # Include triggers
-  --events \                  # Include events
-  --hex-blob \                # Safely encode BLOB data
+  --single-transaction \      # consistent snapshot without locking
+  --routines \                 # include stored procedures and functions
+  --triggers \                 # include triggers
+  --events \                   # include events
+  --hex-blob \                 # binary data as hex
+  --master-data=2 \            # include binlog position as a comment
   myapp > myapp_full.sql
 
-# Backup multiple databases
-mysqldump -u root -p --databases db1 db2 db3 > multi_db.sql
+# Dump specific tables
+mysqldump -u root -p myapp orders order_items > orders_backup.sql
 
-# Backup ALL databases
-mysqldump -u root -p --all-databases > all_databases.sql
+# Dump all databases
+mysqldump -u root -p --all-databases --single-transaction > all_dbs.sql
 
-# Backup only structure (no data)
-mysqldump -u root -p --no-data myapp > schema_only.sql
-
-# Backup only data (no CREATE TABLE statements)
-mysqldump -u root -p --no-create-info myapp > data_only.sql
-
-# Compress backup
+# Compress the output
 mysqldump -u root -p myapp | gzip > myapp_$(date +%Y%m%d).sql.gz
-
-# Backup to remote server via SSH
-mysqldump -u root -p myapp | ssh user@backup-server "cat > /backups/myapp.sql"
 ```
 
-### Restoring
+### Restore
 
 ```bash
-# Restore from SQL file
+# Restore from a dump
 mysql -u root -p myapp < myapp_backup.sql
 
-# Restore compressed backup
-gunzip < myapp_20240101.sql.gz | mysql -u root -p myapp
+# Restore from compressed dump
+gunzip -c myapp_20240101.sql.gz | mysql -u root -p myapp
 
-# Create database first if it doesn't exist
-mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS myapp CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-mysql -u root -p myapp < myapp_backup.sql
+# Restore with verbose progress
+pv myapp_backup.sql | mysql -u root -p myapp   # pv shows progress bar
 ```
 
-:::tip[Binary Log (Point-in-Time Recovery)]
-Enable binary logging (`log_bin`) to allow point-in-time recovery. After restoring from a
-full dump, you can replay binary logs up to a specific timestamp to recover more recent
-changes:
+:::tip[Binary Log for Point-in-Time Recovery]
+With `log_bin` enabled, you can recover to any point in time:
 ```bash
-mysqlbinlog --start-datetime="2024-01-15 09:00:00" \
-            --stop-datetime="2024-01-15 12:00:00" \
-            /var/log/mysql/mysql-bin.000042 | mysql -u root -p
+# Apply binary logs after restoring a dump
+mysqlbinlog --start-datetime="2024-01-15 10:00:00" \
+            --stop-datetime="2024-01-15 14:30:00" \
+            /var/log/mysql/mysql-bin.000042 | mysql -u root -p myapp
 ```
 :::

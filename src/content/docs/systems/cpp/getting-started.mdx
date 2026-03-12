@@ -1,0 +1,459 @@
+---
+title: Getting Started with C++
+description: Compiler flags, CMake, package managers, namespaces, auto, references, nullptr, and your first C++ class.
+sidebar:
+  order: 2
+tags: [systems, cpp, c]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Getting Started with C++
+
+## Compiler Flags
+
+```bash
+# C++20 with all important warnings
+g++ -std=c++20 -Wall -Wextra -Wpedantic -Wshadow -Wconversion main.cpp -o program
+
+# Debug build with sanitizers
+g++ -std=c++20 -Wall -Wextra -g -O0 \
+    -fsanitize=address,undefined \
+    -fno-omit-frame-pointer \
+    main.cpp -o program_debug
+
+# Release build
+g++ -std=c++20 -O2 -DNDEBUG main.cpp -o program_release
+
+# Optimized release with link-time optimization
+g++ -std=c++20 -O3 -march=native -flto -DNDEBUG main.cpp -o program_fast
+
+# Clang equivalent
+clang++ -std=c++20 -Wall -Wextra -O2 main.cpp -o program
+
+# MSVC
+cl /std:c++20 /W4 /O2 /EHsc main.cpp
+```
+
+## CMake for C++
+
+```cmake
+# CMakeLists.txt — modern CMake (3.20+)
+cmake_minimum_required(VERSION 3.20)
+project(MyApp VERSION 1.0.0 LANGUAGES CXX)
+
+# Require C++20 globally
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)   # No GNU extensions
+
+# Generate compile_commands.json for IDE/linters
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Sources
+add_executable(my_app
+    src/main.cpp
+    src/app.cpp
+    src/utils.cpp
+)
+
+# Include directories (PRIVATE = only for this target)
+target_include_directories(my_app PRIVATE include/)
+
+# Compiler warnings as interface (propagates to consumers)
+add_library(project_warnings INTERFACE)
+target_compile_options(project_warnings INTERFACE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:
+        -Wall -Wextra -Wpedantic -Wshadow -Wconversion>
+    $<$<CXX_COMPILER_ID:MSVC>:
+        /W4 /permissive->
+)
+target_link_libraries(my_app PRIVATE project_warnings)
+
+# Sanitizers (debug only)
+option(ENABLE_SANITIZERS "Enable address and UB sanitizers" OFF)
+if(ENABLE_SANITIZERS)
+    target_compile_options(my_app PRIVATE -fsanitize=address,undefined)
+    target_link_options(my_app PRIVATE -fsanitize=address,undefined)
+endif()
+
+# Find and link external library (e.g., fmt)
+find_package(fmt REQUIRED)
+target_link_libraries(my_app PRIVATE fmt::fmt)
+
+# Testing
+enable_testing()
+add_subdirectory(tests)
+```
+
+```bash
+# Build workflow
+cmake -B build -DCMAKE_BUILD_TYPE=Debug -DENABLE_SANITIZERS=ON
+cmake --build build --parallel 8
+ctest --test-dir build --output-on-failure
+
+# Release
+cmake -B build-release -DCMAKE_BUILD_TYPE=Release
+cmake --build build-release
+```
+
+## Package Managers
+
+<Tabs>
+  <TabItem label="vcpkg">
+    Microsoft's C++ package manager. Integrates with CMake and Visual Studio.
+
+    ```bash
+    git clone https://github.com/microsoft/vcpkg
+    ./vcpkg/bootstrap-vcpkg.sh
+
+    # Install packages
+    ./vcpkg/vcpkg install fmt spdlog nlohmann-json
+
+    # CMake integration
+    cmake -B build -DCMAKE_TOOLCHAIN_FILE=./vcpkg/scripts/buildsystems/vcpkg.cmake
+    ```
+
+    ```cmake
+    # CMakeLists.txt — packages are found automatically
+    find_package(fmt CONFIG REQUIRED)
+    find_package(spdlog CONFIG REQUIRED)
+    target_link_libraries(my_app PRIVATE fmt::fmt spdlog::spdlog)
+    ```
+  </TabItem>
+  <TabItem label="Conan">
+    Decentralized C++ package manager with a recipe-based system.
+
+    ```bash
+    pip install conan
+    conan profile detect --force
+
+    # conanfile.txt
+    # [requires]
+    # fmt/10.1.1
+    # spdlog/1.12.0
+    # [generators]
+    # CMakeDeps
+    # CMakeToolchain
+
+    conan install . --build=missing -s build_type=Release
+    cmake -B build -DCMAKE_TOOLCHAIN_FILE=build/Release/generators/conan_toolchain.cmake
+    cmake --build build
+    ```
+  </TabItem>
+</Tabs>
+
+## Your First C++ Class
+
+```cpp
+#include <iostream>
+#include <string>
+#include <format>   // C++20
+
+class Person {
+public:
+    // Constructor — initializer list (preferred over assignment in body)
+    Person(std::string name, int age)
+        : name_(std::move(name)), age_(age)
+    {
+        if (age_ < 0 || age_ > 150) {
+            throw std::invalid_argument("Invalid age: " + std::to_string(age_));
+        }
+    }
+
+    // Const member functions — don't modify the object
+    [[nodiscard]] const std::string& name() const { return name_; }
+    [[nodiscard]] int age() const { return age_; }
+
+    // Mutating member function
+    void birthday() { ++age_; }
+
+    // Overload stream insertion
+    friend std::ostream& operator<<(std::ostream& os, const Person& p)
+    {
+        return os << std::format("Person({}, {})", p.name_, p.age_);
+    }
+
+    // Spaceship operator — generates all comparisons (C++20)
+    auto operator<=>(const Person&) const = default;
+
+private:
+    std::string name_;
+    int         age_;
+};
+
+int main()
+{
+    Person alice{"Alice", 30};
+    Person bob{"Bob", 25};
+
+    std::cout << alice << '\n';  // Person(Alice, 30)
+    alice.birthday();
+    std::cout << "After birthday: " << alice.age() << '\n';  // 31
+
+    // Comparison via spaceship operator
+    if (alice > bob) {
+        std::cout << alice.name() << " is older\n";
+    }
+
+    // Vector of objects
+    std::vector<Person> team = {
+        {"Charlie", 28},
+        {"Diana", 32},
+        {"Eve", 27},
+    };
+
+    // Range-based sort by age
+    std::ranges::sort(team, {}, &Person::age);  // sort by member via projection
+    for (const auto& p : team) {
+        std::cout << p << '\n';
+    }
+
+    return 0;
+}
+```
+
+## Namespaces
+
+```cpp
+#include <iostream>
+
+// Basic namespace
+namespace math {
+    const double PI = 3.14159265358979323846;
+    double sqrt(double x);  // separate from std::sqrt
+}
+
+// Nested namespace (C++17 shorthand: namespace math::trig)
+namespace math {
+    namespace trig {
+        double sin(double x);
+        double cos(double x);
+    }
+}
+// C++17 equivalent:
+namespace math::trig {
+    double tan(double x);
+}
+
+// Anonymous namespace — internal linkage (replaces `static` at file scope)
+namespace {
+    int internal_helper(int x) { return x * 2; }
+    const int MAX_SIZE = 100;
+}
+
+// Inline namespace — members visible in enclosing namespace (for ABI versioning)
+namespace mylib {
+    inline namespace v2 {  // v2 is the default
+        struct Widget { int version = 2; };
+    }
+    namespace v1 {         // explicitly request v1
+        struct Widget { int version = 1; };
+    }
+}
+
+void namespace_demo()
+{
+    // Qualify with ::
+    double pi = math::PI;
+    double s  = math::trig::sin(pi / 2.0);
+    (void)s;
+
+    // using declaration — brings one name into scope
+    using math::PI;
+    std::cout << PI << '\n';
+
+    // using directive — brings all names into scope (avoid in headers!)
+    using namespace math::trig;
+    // sin, cos, tan now accessible without math::trig::
+    // Caution: can cause name conflicts
+
+    // ADL (Argument-Dependent Lookup) — automatic namespace lookup
+    mylib::v2::Widget w;
+    mylib::Widget w2;   // same as v2::Widget due to inline namespace
+    (void)w; (void)w2;
+}
+```
+
+## auto Type Deduction
+
+```cpp
+#include <vector>
+#include <map>
+#include <string>
+
+void auto_demo()
+{
+    // auto deduces the type from the initializer
+    auto i    = 42;          // int
+    auto d    = 3.14;        // double
+    auto f    = 3.14f;       // float
+    auto s    = std::string{"hello"};  // std::string (not const char*)
+    auto *p   = &i;          // int*
+
+    // auto with STL — avoid writing long type names
+    std::map<std::string, std::vector<int>> data;
+    auto it = data.begin();  // vs: std::map<std::string,std::vector<int>>::iterator
+
+    // auto in range-based for
+    std::vector<std::string> names = {"Alice", "Bob", "Charlie"};
+    for (const auto& name : names) {  // const auto& = const std::string&
+        std::cout << name << '\n';
+    }
+
+    // auto& for modifying
+    for (auto& name : names) {
+        name += "!";
+    }
+
+    // auto for structured bindings (C++17)
+    std::map<std::string, int> scores{{"Alice", 95}, {"Bob", 87}};
+    for (const auto& [name, score] : scores) {  // structured binding
+        std::cout << name << ": " << score << '\n';
+    }
+
+    // decltype — deduce type without initializing
+    decltype(i) j = 10;     // int
+    decltype(auto) k = i;   // int (not int& — different from auto)
+
+    // Trailing return type
+    auto add = [](int a, int b) -> int { return a + b; };
+    (void)add;
+}
+```
+
+## References
+
+```cpp
+#include <iostream>
+
+// Lvalue reference — alias for an existing object
+void increment(int& x) { ++x; }
+
+// Const lvalue reference — read-only alias; extends temporary lifetime
+void print(const std::string& s) { std::cout << s << '\n'; }
+
+// Rvalue reference (C++11) — binds to temporaries; enables move semantics
+void process(std::string&& s) {
+    std::string local = std::move(s);  // "steal" the string
+    std::cout << "processing: " << local << '\n';
+}
+
+// Reference vs pointer comparison
+void ref_vs_ptr()
+{
+    int x = 10;
+
+    // Reference: always valid, can't be null, can't be reseated
+    int& ref = x;
+    ref = 20;          // modifies x (no dereference needed)
+    // int& bad;       // ERROR: references must be initialized
+
+    // Pointer: can be null, can be reseated, explicit dereference
+    int* ptr = &x;
+    *ptr = 30;         // must dereference
+    ptr = nullptr;     // can point to nothing
+    ptr = &x;          // can be reseated to another object
+
+    std::cout << "x = " << x << '\n';  // 30
+
+    // Pass large object: prefer const ref over value (avoids copy)
+    // Modify caller's variable: use ref or pointer
+    // Optional or nullable: use pointer (ref can't be null)
+}
+
+int main()
+{
+    int n = 5;
+    increment(n);
+    std::cout << n << '\n';   // 6
+
+    print("hello");            // const ref binds to temporary std::string
+    print(std::string{"world"});
+
+    process(std::string{"temporary"});  // rvalue ref from temporary
+    // process(n);  // ERROR: n is an lvalue
+
+    ref_vs_ptr();
+    return 0;
+}
+```
+
+## nullptr, override, final, default, delete, explicit
+
+```cpp
+#include <iostream>
+#include <memory>
+
+// nullptr — type-safe null pointer (not 0, not NULL)
+void* get_ptr(bool condition) {
+    if (condition) return new int(42);
+    return nullptr;   // not 0 — avoids overload ambiguity
+}
+
+// Override / final — prevent silent virtual function hiding bugs
+struct Base {
+    virtual void draw() const { std::cout << "Base::draw\n"; }
+    virtual void update() = 0;  // pure virtual
+    virtual ~Base() = default;  // virtual destructor required for polymorphism
+};
+
+struct Derived : Base {
+    void draw() const override { std::cout << "Derived::draw\n"; }  // override
+    void update() override {}
+};
+
+struct Leaf final : Derived {   // final — cannot be further derived
+    void draw() const override final {}  // also final — no further override
+};
+
+// default and delete
+struct MyClass {
+    MyClass() = default;                         // generate default constructor
+    MyClass(const MyClass&) = default;           // generate copy constructor
+    MyClass& operator=(const MyClass&) = default;
+    MyClass(MyClass&&) = default;                // generate move constructor
+    MyClass& operator=(MyClass&&) = default;
+    ~MyClass() = default;
+
+    // Explicitly disable
+    // (prevents copying — useful for RAII handles, mutexes, etc.)
+};
+
+struct NonCopyable {
+    NonCopyable() = default;
+    NonCopyable(const NonCopyable&) = delete;             // no copy
+    NonCopyable& operator=(const NonCopyable&) = delete;  // no copy-assign
+    NonCopyable(NonCopyable&&) = default;                 // move OK
+    NonCopyable& operator=(NonCopyable&&) = default;
+};
+
+// explicit — prevents implicit single-argument constructor conversions
+struct Wrapper {
+    explicit Wrapper(int value) : val(value) {}
+    int val;
+};
+
+void take_wrapper(Wrapper w) { (void)w; }
+
+int main()
+{
+    void* p = get_ptr(true);
+    if (p != nullptr) { delete static_cast<int*>(p); }
+
+    Base* b = new Derived{};
+    b->draw();   // Derived::draw (virtual dispatch)
+    b->update();
+    delete b;
+
+    // Wrapper explicit: must be explicit
+    take_wrapper(Wrapper{42});  // OK
+    // take_wrapper(42);        // ERROR: no implicit conversion (explicit!)
+
+    NonCopyable nc;
+    NonCopyable nc2 = std::move(nc);  // move OK
+    // NonCopyable nc3 = nc2;         // ERROR: copy deleted
+
+    return 0;
+}
+```

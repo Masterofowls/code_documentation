@@ -1,6 +1,6 @@
 ---
 title: Pointers in C
-description: Comprehensive guide to C pointers — declaration, arithmetic, void pointers, function pointers, const variants, and common pitfalls.
+description: Pointer declaration, arithmetic, void pointers, function pointers, const variants, aliasing, and common pitfalls with complete examples.
 sidebar:
   order: 3
 tags: [systems, cpp, c]
@@ -10,295 +10,313 @@ import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/
 
 # Pointers in C
 
-Pointers are the most powerful — and most dangerous — feature of C. A pointer is a variable that stores a memory address. Mastering pointers is essential for understanding memory management, data structures, system calls, and C idioms.
+A pointer is a variable that stores the **memory address** of another variable. Pointers are the mechanism through which C provides dynamic memory, arrays, strings, callbacks, and data structure composition. Mastering pointers is mastering C.
 
-## Declaration and Initialization
+## Pointer Fundamentals
 
 ```c
 #include <stdio.h>
-#include <stdlib.h>
 
-int main(void) {
-    int  value = 42;
-    int *ptr;           // Declare a pointer to int (uninitialized — dangerous!)
-    ptr = &value;       // Initialize: point ptr at the address of 'value'
+int main(void)
+{
+    int x = 42;
 
-    // Or declare and initialize in one step
-    int *p = &value;
+    // Declaration: int *p means "p is a pointer to int"
+    int *p;              // uninitialized — DANGEROUS (wild pointer)
+    p = &x;             // & = address-of operator: p now holds address of x
 
-    // Dereference: read the value at the address
-    int v = *p;         // v = 42
-    printf("v = %d\n", v);
+    // Dereference: *p means "the value at the address stored in p"
+    printf("x      = %d\n",  x);     // 42
+    printf("&x     = %p\n",  (void*)&x); // e.g., 0x7ffd1234 (stack address)
+    printf("p      = %p\n",  (void*)p);  // same address as &x
+    printf("*p     = %d\n",  *p);    // 42 — same as x
 
-    // Dereference to write
-    *p = 100;           // Modifies 'value' through the pointer
-    printf("value = %d\n", value); // value = 100
+    // Modifying through pointer
+    *p = 100;           // writes to x through the pointer
+    printf("x after *p=100: %d\n", x); // 100
 
-    // Pointer to pointer
-    int **pp = &ptr;    // pp holds the address of ptr
-    **pp = 200;         // Modifies 'value' through two levels of indirection
-    printf("value = %d\n", value); // value = 200
+    // Multiple declarations — * binds to name, not type
+    int *a, b, *c;  // a and c are pointers; b is a plain int
+    // Prefer: int *a; int b; int *c;  (one per line)
 
     return 0;
 }
 ```
 
-## The Address-Of (&) and Dereference (*) Operators
+## The NULL Pointer
+
+`NULL` is a guaranteed null pointer constant (typically `(void*)0` on most platforms). Always initialize pointers to `NULL` when they don't yet point at valid memory.
 
 ```c
-int x = 10;
+#include <stdio.h>
+#include <stdlib.h>
 
-// & (address-of): returns the memory address of a variable
-int *p = &x;
-printf("Address of x: %p\n", (void*)p);   // e.g., 0x7ffd4b8e1234
-printf("Value of x via ptr: %d\n", *p);   // 10
+int main(void)
+{
+    int *p = NULL;   // safe initialization
 
-// * (dereference): follows the pointer to access the value at that address
-*p = 20;
-printf("x is now: %d\n", x);  // 20
+    // Check before dereferencing
+    if (p != NULL) {
+        printf("%d\n", *p);
+    } else {
+        printf("p is null — not dereferencing\n");
+    }
 
-// The meaning of * in a declaration vs expression
-int *q;    // Declaration: q is a pointer to int (the * is part of the type)
-*q = 5;   // Expression: dereference q (DANGER: q is uninitialized here!)
-```
+    // Dereferencing NULL is undefined behavior (usually a segfault)
+    // *p = 5;  // CRASH
 
-## NULL Pointer
+    // After free(), set to NULL to avoid use-after-free
+    p = malloc(sizeof(int));
+    if (p == NULL) {
+        fprintf(stderr, "malloc failed\n");
+        return 1;
+    }
+    *p = 99;
+    free(p);
+    p = NULL;  // good practice
 
-```c
-#include <stddef.h>  // NULL is defined here (and in stdio.h, stdlib.h, etc.)
-
-int *p = NULL;  // p points to nothing — address 0 (conceptually)
-
-// Always check before dereferencing
-if (p != NULL) {
-    printf("%d\n", *p);
-} else {
-    printf("Pointer is null\n");
+    return 0;
 }
-
-// Dereferencing NULL is undefined behavior (typically a segmentation fault)
-// *p = 5; // CRASH
-
-// In C11, _Null_unspecified, _Nullable, _Nonnull are Clang nullability annotations
-// In C23, use the new 'nullptr' constant (type nullptr_t, implicitly converts to any pointer)
-int *p2 = nullptr; // C23 only
 ```
 
 ## Pointer Arithmetic
 
-Pointer arithmetic operates in units of the pointed-to type, not in bytes.
+When you add an integer to a pointer, C advances the pointer by **that many elements** of the pointed-to type — not by that many bytes.
 
 ```c
 #include <stdio.h>
 
-int arr[] = {10, 20, 30, 40, 50};
-int *p = arr;  // Points to arr[0]
+int main(void)
+{
+    int arr[5] = { 10, 20, 30, 40, 50 };
+    int *p = arr;    // p points to arr[0]; arrays decay to pointer to first element
 
-// Adding an integer to a pointer
-printf("%d\n", *(p + 0));  // 10 — arr[0]
-printf("%d\n", *(p + 1));  // 20 — arr[1]  (advances by sizeof(int) bytes)
-printf("%d\n", *(p + 2));  // 30 — arr[2]
+    printf("*p       = %d\n", *p);         // 10
+    printf("*(p+1)   = %d\n", *(p + 1));  // 20 — p+1 advances by sizeof(int) bytes
+    printf("*(p+2)   = %d\n", *(p + 2));  // 30
 
-// Incrementing/decrementing
-p++;               // Now points to arr[1]
-printf("%d\n", *p); // 20
+    // Increment pointer
+    p++;              // p now points to arr[1]
+    printf("after ++: *p = %d\n", *p);   // 20
 
-// Pointer subtraction: yields the number of elements between two pointers
-int *start = arr;
-int *end   = arr + 5;  // One past the last element (valid to compute, not dereference)
-ptrdiff_t dist = end - start;  // 5 — type is ptrdiff_t from <stddef.h>
+    // Pointer subtraction — yields ptrdiff_t (number of elements between)
+    int *start = arr;
+    int *end   = arr + 5;               // one-past-end (valid, but don't dereference)
+    ptrdiff_t count = end - start;      // 5
+    printf("elements between: %td\n", count);
 
-// Array subscript equivalence
-// arr[i] is EXACTLY equivalent to *(arr + i)
-// p[2]   is EXACTLY equivalent to *(p + 2)
-printf("arr[3] = %d\n",  arr[3]);        // 40
-printf("*(arr+3) = %d\n", *(arr + 3));   // 40
-printf("3[arr] = %d\n",  3[arr]);        // 40 (legal but confusing!)
+    // Array indexing and pointer arithmetic are equivalent
+    // arr[i]  ≡  *(arr + i)  ≡  *(p + i)  ≡  p[i]
+    for (int i = 0; i < 5; i++) {
+        printf("arr[%d]=%d  *(arr+%d)=%d\n", i, arr[i], i, *(arr + i));
+    }
 
-// Iteration through an array using pointer arithmetic
-for (int *it = arr; it < arr + 5; it++) {
-    printf("%d ", *it);
+    // Pointer comparison (only within same array/object)
+    int *q = arr + 3;
+    printf("p < q: %d\n", p < q);       // 1 (true) — p=arr+1, q=arr+3
+
+    return 0;
 }
-printf("\n");
 ```
 
-:::tip[Pointer Arithmetic Bounds]
-Pointer arithmetic is only valid within an array (or one past the end). Pointing outside the array bounds is undefined behavior. You may compute the address one past the end (`arr + N`) for comparison in loops, but you must not dereference it.
+:::caution[Pointer Arithmetic Bounds]
+Pointer arithmetic is only valid **within** an array (including the one-past-end position). Arithmetic on pointers into different objects produces **undefined behavior**. Never dereference the one-past-end pointer.
 :::
-
-## void Pointer (Generic Pointer)
-
-`void*` is a generic pointer type. It can point to any type but cannot be dereferenced without a cast.
-
-```c
-#include <stdlib.h>
-#include <string.h>
-
-void *generic;
-int  x = 42;
-char ch = 'Z';
-
-generic = &x;     // Any pointer type can be assigned to void* without cast
-generic = &ch;    // (In C, not C++ — C++ requires explicit cast)
-
-// malloc returns void* — no cast needed in C
-int *arr = malloc(10 * sizeof(int));  // void* implicitly converts to int*
-if (!arr) { /* handle error */ }
-
-// Must cast back to a concrete type before dereferencing
-int *ip = (int*)generic;  // Cast void* to int* (generic currently points to ch, this would be wrong!)
-
-// Implementing a generic swap function using void*
-void swap(void *a, void *b, size_t size) {
-    unsigned char tmp[256]; // Assumes size <= 256 for simplicity
-    memcpy(tmp, a, size);
-    memcpy(a, b, size);
-    memcpy(b, tmp, size);
-}
-
-int p = 10, q = 20;
-swap(&p, &q, sizeof(int));
-printf("p=%d q=%d\n", p, q);  // p=20 q=10
-
-double dx = 1.5, dy = 2.5;
-swap(&dx, &dy, sizeof(double));
-printf("dx=%g dy=%g\n", dx, dy);  // dx=2.5 dy=1.5
-
-free(arr);
-```
-
-## const Pointer Variants
-
-There are four combinations of `const` with pointers. Understanding the distinction is critical.
-
-```c
-int value = 42;
-int other = 100;
-
-// 1. Pointer to const int: cannot modify the value through the pointer
-//    but can change what the pointer points to
-const int *p1 = &value;
-p1 = &other;      // OK — pointing elsewhere is fine
-// *p1 = 99;      // ERROR: cannot modify through a const pointer
-
-// 2. Const pointer to int: cannot change what the pointer points to
-//    but can modify the value through it
-int * const p2 = &value;
-*p2 = 99;         // OK — modifying value through pointer is fine
-// p2 = &other;   // ERROR: cannot reassign a const pointer
-
-// 3. Const pointer to const int: cannot modify value OR reassign pointer
-const int * const p3 = &value;
-// *p3 = 99;      // ERROR
-// p3 = &other;   // ERROR
-
-// 4. Non-const pointer to non-const int (regular pointer)
-int *p4 = &value;
-*p4 = 99;         // OK
-p4 = &other;      // OK
-
-// Reading the declaration: right-to-left
-// const int *p  → p is a pointer to (const int)
-// int * const p → p is a (const pointer) to int
-// const int * const p → p is a (const pointer) to (const int)
-
-// Common use: function parameters that won't modify the argument
-void print_string(const char *s) {
-    while (*s) putchar(*s++);
-}
-```
 
 ## Pointer to Pointer
 
 ```c
 #include <stdio.h>
 
-// Modifying a pointer through another pointer
-void allocate_int(int **out, int value) {
-    *out = malloc(sizeof(int));  // Dereference out to store into the caller's pointer
-    **out = value;
-}
+int main(void)
+{
+    int   x  = 5;
+    int  *p  = &x;    // pointer to int
+    int **pp = &p;    // pointer to pointer to int
 
-// Example: simulating 2D array with double pointer
-int rows = 3, cols = 4;
-int **matrix = malloc(rows * sizeof(int*));
-for (int i = 0; i < rows; i++) {
-    matrix[i] = malloc(cols * sizeof(int));
-    for (int j = 0; j < cols; j++) {
-        matrix[i][j] = i * cols + j;
+    printf("x   = %d\n",  x);
+    printf("*p  = %d\n",  *p);    // 5
+    printf("**pp= %d\n", **pp);   // 5
+
+    **pp = 99;        // modifies x through two levels of indirection
+    printf("x after **pp=99: %d\n", x); // 99
+
+    // Common use: modify a pointer from a function
+    // (pass-by-pointer-to-pointer)
+    // Also used for 2D dynamic arrays:
+    int rows = 3, cols = 4;
+    int **matrix = malloc(rows * sizeof(int *));
+    for (int i = 0; i < rows; i++) {
+        matrix[i] = malloc(cols * sizeof(int));
     }
+    matrix[1][2] = 42;
+    printf("matrix[1][2] = %d\n", matrix[1][2]);
+
+    for (int i = 0; i < rows; i++) free(matrix[i]);
+    free(matrix);
+
+    return 0;
+}
+```
+
+## void Pointer — Generic Pointer
+
+A `void *` can hold any pointer type without casting (in C; not in C++). It enables generic functions like `malloc`, `memcpy`, `qsort`.
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// Generic swap using void*
+void swap(void *a, void *b, size_t size)
+{
+    unsigned char tmp[256];  // max element size (use VLA or malloc for large)
+    memcpy(tmp, a,   size);
+    memcpy(a,   b,   size);
+    memcpy(b,   tmp, size);
 }
 
-// Access
-printf("matrix[1][2] = %d\n", matrix[1][2]); // 6
+int main(void)
+{
+    // malloc returns void* — assign to any pointer type without cast in C
+    int    *ip = malloc(sizeof(int));        // implicit cast from void*
+    double *dp = malloc(sizeof(double));
+    char   *cp = malloc(10 * sizeof(char));
 
-// Free
-for (int i = 0; i < rows; i++) free(matrix[i]);
-free(matrix);
+    // void* cannot be dereferenced directly
+    void *vp = ip;
+    // *vp = 5;     // ERROR: cannot dereference void*
+    *(int *)vp = 5; // must cast first
+
+    // Generic swap
+    int x = 10, y = 20;
+    swap(&x, &y, sizeof(int));
+    printf("x=%d y=%d\n", x, y);  // x=20 y=10
+
+    double a = 1.5, b = 2.5;
+    swap(&a, &b, sizeof(double));
+    printf("a=%.1f b=%.1f\n", a, b); // a=2.5 b=1.5
+
+    free(ip); free(dp); free(cp);
+    return 0;
+}
 ```
+
+## const Pointer Variants
+
+There are four meaningful combinations of `const` with pointers:
+
+```c
+int value = 10;
+int other = 20;
+
+// 1. Pointer to const int — cannot modify the value pointed to
+//    (read-only data; pointer itself can change)
+const int *p1 = &value;
+// *p1 = 99;  // ERROR: read-only location
+p1 = &other; // OK: pointer can change
+
+// 2. const pointer to int — pointer cannot be reassigned
+//    (the value can still be modified through the pointer)
+int *const p2 = &value;
+*p2 = 99;    // OK: value can be modified
+// p2 = &other; // ERROR: pointer is const
+
+// 3. const pointer to const int — neither pointer nor value can change
+const int *const p3 = &value;
+// *p3 = 99;    // ERROR
+// p3 = &other; // ERROR
+
+// 4. Plain pointer to int — no restrictions
+int *p4 = &value;
+*p4 = 50;    // OK
+p4 = &other; // OK
+
+// Function parameters — use const to express intent
+void print_array(const int *arr, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        printf("%d ", arr[i]);
+        // arr[i] = 0;  // ERROR: arr is pointer to const int
+    }
+    printf("\n");
+}
+```
+
+:::tip[Reading const Declarations]
+Read pointer declarations **right-to-left**: `const int *p` → "p is a pointer to const int". `int *const p` → "p is a const pointer to int". `const int *const p` → "p is a const pointer to const int".
+:::
 
 ## Function Pointers
 
-Function pointers allow storing and calling functions through variables — the foundation of callbacks, dispatch tables, and plugins.
+Function pointers store the address of a function. They enable callbacks, dispatch tables, and plugin architectures.
 
 ```c
 #include <stdio.h>
 #include <stdlib.h>
 
-// Declaring a function pointer
-// Return type (*name)(parameter types)
-int (*operation)(int, int);
+// Function pointer type: points to a function taking two ints, returning int
+typedef int (*BinaryOp)(int, int);
 
-// Functions that match the signature
 int add(int a, int b) { return a + b; }
 int sub(int a, int b) { return a - b; }
 int mul(int a, int b) { return a * b; }
 
-// Assigning and calling
-operation = add;               // Assign (no & required for function names)
-int result = operation(3, 4);  // Call: 7
-result = (*operation)(3, 4);   // Equivalent explicit dereference syntax
-
-// Using typedef for readability
-typedef int (*BinaryOp)(int, int);
-
-BinaryOp ops[] = { add, sub, mul };
-char *names[]  = { "add", "sub", "mul" };
-
-for (int i = 0; i < 3; i++) {
-    printf("%s(10, 3) = %d\n", names[i], ops[i](10, 3));
+// Apply function pointer
+int apply(BinaryOp op, int x, int y)
+{
+    return op(x, y);   // call through pointer — same as (*op)(x, y)
 }
 
-// Callbacks — passing a function pointer to another function
-void apply_to_array(int *arr, int n, void (*transform)(int*, int)) {
-    transform(arr, n);
+// Array of function pointers (dispatch table)
+int dispatch(int op_code, int a, int b)
+{
+    BinaryOp ops[] = { add, sub, mul };
+    if (op_code < 0 || op_code > 2) return 0;
+    return ops[op_code](a, b);
 }
 
-void double_elements(int *arr, int n) {
-    for (int i = 0; i < n; i++) arr[i] *= 2;
+// qsort comparison callback
+int compare_int(const void *a, const void *b)
+{
+    int ia = *(const int *)a;
+    int ib = *(const int *)b;
+    return (ia > ib) - (ia < ib);   // branchless compare
 }
 
-int data[] = {1, 2, 3, 4, 5};
-apply_to_array(data, 5, double_elements);
+int main(void)
+{
+    // Declare and assign
+    int (*fp)(int, int) = add;    // without typedef
+    BinaryOp fp2 = mul;           // with typedef (cleaner)
 
-// qsort with comparison function pointer
-int compare_ints(const void *a, const void *b) {
-    // Cast void* to int* and dereference to compare
-    int ia = *(const int*)a;
-    int ib = *(const int*)b;
-    return (ia > ib) - (ia < ib); // Returns -1, 0, or 1
+    printf("add(3,4) = %d\n",  apply(add, 3, 4));  // 7
+    printf("mul(3,4) = %d\n",  apply(mul, 3, 4));  // 12
+    printf("dispatch(1,10,3) = %d\n", dispatch(1, 10, 3)); // 7 (sub)
+
+    // qsort with callback
+    int arr[] = { 5, 2, 8, 1, 9, 3 };
+    qsort(arr, 6, sizeof(int), compare_int);
+    for (int i = 0; i < 6; i++) printf("%d ", arr[i]);
+    printf("\n");  // 1 2 3 5 8 9
+
+    // Function pointer to NULL
+    BinaryOp maybe_op = NULL;
+    if (maybe_op) {
+        maybe_op(1, 2);
+    }
+
+    return 0;
 }
-
-int nums[] = {5, 1, 4, 2, 3};
-qsort(nums, 5, sizeof(int), compare_ints);
-for (int i = 0; i < 5; i++) printf("%d ", nums[i]); // 1 2 3 4 5
 ```
 
-## Pointers to Structs
+## Pointers to Structs and the Arrow Operator
 
 ```c
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef struct {
     char name[64];
@@ -306,155 +324,220 @@ typedef struct {
     float score;
 } Student;
 
-// Accessing struct members through a pointer
-Student s = { "Alice", 20, 95.5f };
-Student *sp = &s;
+void print_student(const Student *s)
+{
+    // Arrow operator -> dereferences AND accesses member
+    // s->name  is equivalent to  (*s).name
+    printf("Name: %s, Age: %d, Score: %.1f\n",
+           s->name, s->age, s->score);
+}
 
-// Arrow operator: sp->name is equivalent to (*sp).name
-printf("Name: %s, Age: %d, Score: %.1f\n", sp->name, sp->age, sp->score);
+// Linked list node
+typedef struct Node {
+    int data;
+    struct Node *next;   // self-referential (must use struct tag, not typedef)
+} Node;
 
-// Modifying through pointer
-sp->age = 21;
-(*sp).score = 97.0f;
+Node *create_node(int data)
+{
+    Node *n = malloc(sizeof(Node));
+    if (n) {
+        n->data = data;
+        n->next = NULL;
+    }
+    return n;
+}
 
-// Pointer in dynamically allocated struct
-Student *student = malloc(sizeof(Student));
-snprintf(student->name, sizeof(student->name), "Bob");
-student->age = 22;
-student->score = 88.0f;
-printf("Student: %s\n", student->name);
-free(student);
+int main(void)
+{
+    // Stack-allocated struct accessed via pointer
+    Student alice = { "Alice", 20, 95.5f };
+    Student *sp = &alice;
+    print_student(sp);
+
+    // Dynamically allocated struct
+    Student *bob = malloc(sizeof(Student));
+    strncpy(bob->name, "Bob", sizeof(bob->name) - 1);
+    bob->age   = 22;
+    bob->score = 88.0f;
+    print_student(bob);
+    free(bob);
+
+    // Build a simple linked list
+    Node *head = create_node(1);
+    head->next = create_node(2);
+    head->next->next = create_node(3);
+
+    // Traverse
+    for (Node *cur = head; cur != NULL; cur = cur->next) {
+        printf("%d -> ", cur->data);
+    }
+    printf("NULL\n");
+
+    // Free
+    Node *cur = head;
+    while (cur) {
+        Node *next = cur->next;
+        free(cur);
+        cur = next;
+    }
+
+    return 0;
+}
 ```
 
 ## Pointer Aliasing and restrict
 
-```c
-// Pointer aliasing: two pointers that refer to the same memory
-// This can prevent compiler optimizations (the compiler must assume aliasing)
+The `restrict` keyword (C99) tells the compiler that a pointer is the **only** way to access the object it points to — no other pointer aliases it. This enables optimizations the compiler couldn't safely make otherwise.
 
-// 'restrict' (C99): a promise that no other pointer in scope aliases this pointer
-// Allows the compiler to cache the pointed-to value in a register
-void add_vectors(float * restrict dst,
-                 const float * restrict a,
-                 const float * restrict b,
-                 int n) {
-    // Compiler can now auto-vectorize: knows dst, a, b don't overlap
-    for (int i = 0; i < n; i++) {
-        dst[i] = a[i] + b[i];
-    }
+```c
+// Without restrict — compiler must assume a and b might alias;
+// c may point to same memory as a or b
+void add_arrays(float *a, const float *b, const float *c, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        a[i] = b[i] + c[i];
+    // Compiler must reload b[i] each iteration in case a aliases b
 }
 
-// memcpy vs memmove: memcpy assumes no aliasing, memmove handles overlap
-// Use memmove when source and destination may overlap
+// With restrict — compiler knows no aliasing, can vectorize freely
+void add_arrays_restricted(
+    float *restrict a,
+    const float *restrict b,
+    const float *restrict c,
+    size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        a[i] = b[i] + c[i];
+    // Compiler can use SIMD — no aliasing possible
+}
+
+// memcpy uses restrict (from <string.h>):
+// void *memcpy(void *restrict dst, const void *restrict src, size_t n);
+// vs memmove (no restrict — handles overlapping regions):
+// void *memmove(void *dst, const void *src, size_t n);
 ```
 
-## Common Pointer Pitfalls
+## Pointer Pitfalls
+
+<CardGrid>
+  <Card title="Dangling Pointer" icon="warning">
+    A pointer that points to memory that has been freed or has gone out of scope.
+  </Card>
+  <Card title="Wild Pointer" icon="warning">
+    An uninitialized pointer containing a garbage address.
+  </Card>
+  <Card title="Buffer Overflow" icon="warning">
+    Writing past the end of an array via pointer arithmetic.
+  </Card>
+  <Card title="Double Free" icon="warning">
+    Calling `free()` on the same pointer twice — corrupts the heap.
+  </Card>
+</CardGrid>
 
 ```c
-// 1. Dangling pointer: pointer to memory that has been freed or gone out of scope
-int *dangling_example(void) {
+#include <stdlib.h>
+
+// 1. DANGLING POINTER
+int *dangling_example(void)
+{
     int local = 42;
-    return &local;  // DANGER: local goes out of scope when function returns
+    return &local;  // WRONG: local lives on the stack; stack frame gone on return
 }
-// int *p = dangling_example(); *p = 5; // UB: stack memory reused
 
-// 2. Use-after-free
-int *p = malloc(sizeof(int));
-*p = 10;
-free(p);
-// *p = 20;  // UB: memory has been returned to the heap
-// p = NULL; // Good practice: null the pointer after freeing
-
-// 3. Buffer overflow (classic vulnerability)
-char buf[8];
-// strcpy(buf, "Hello, World!"); // OVERFLOW: writes 14 bytes into 8-byte buffer
-strncpy(buf, "Hello, World!", sizeof(buf) - 1);
-buf[sizeof(buf) - 1] = '\0';  // Always null-terminate
-
-// 4. Wild pointer (uninitialized pointer)
-int *wild;
-// *wild = 5; // UB: wild holds garbage address
-
-// 5. Double-free
-int *dp = malloc(sizeof(int));
-free(dp);
-// free(dp); // UB: freeing already-freed memory (heap corruption)
-dp = NULL;   // Freeing NULL is always safe (no-op per the standard)
-
-// 6. Missing NULL check after malloc
-int *mp = malloc(1024 * 1024 * sizeof(int)); // Could return NULL if OOM
-if (mp == NULL) {
-    perror("malloc");
-    exit(EXIT_FAILURE);
+void use_after_free(void)
+{
+    int *p = malloc(sizeof(int));
+    *p = 5;
+    free(p);
+    *p = 10;  // USE-AFTER-FREE: undefined behavior
+    // Fix: p = NULL; after free
 }
-free(mp);
+
+// 2. WILD POINTER
+void wild_pointer(void)
+{
+    int *p;           // uninitialized — contains garbage address
+    *p = 42;          // UNDEFINED BEHAVIOR — writing to unknown location
+    // Fix: int *p = NULL; or int *p = malloc(...);
+}
+
+// 3. BUFFER OVERFLOW
+void buffer_overflow(void)
+{
+    int arr[5];
+    for (int i = 0; i <= 5; i++) {  // BUG: should be i < 5
+        arr[i] = i;                  // arr[5] is out of bounds!
+    }
+    // Overwrites adjacent memory — could corrupt stack frame
+}
+
+// 4. DOUBLE FREE
+void double_free(void)
+{
+    int *p = malloc(sizeof(int));
+    free(p);
+    free(p);  // DOUBLE FREE: heap corruption, possible crash or security issue
+    // Fix: free(p); p = NULL;  — freeing NULL is always safe (no-op)
+}
 ```
 
-:::caution[Always NULL After free]
-After calling `free(p)`, immediately set `p = NULL`. This prevents use-after-free and double-free bugs. Calling `free(NULL)` is always safe — it is a no-op. Use AddressSanitizer (`-fsanitize=address`) to detect these issues automatically.
+:::caution[AddressSanitizer]
+Use `-fsanitize=address` during development. AddressSanitizer (ASan) catches use-after-free, buffer overflows, use-after-scope, and double-free at runtime with minimal overhead. Enable it always for debug and test builds.
 :::
 
 ## Common Pointer Patterns
 
 ```c
-// Pattern 1: Linked list node
-typedef struct Node {
-    int          data;
-    struct Node *next;  // Must use 'struct Node' — typedef not in scope yet
-} Node;
+#include <stdio.h>
+#include <stdlib.h>
 
-Node *create_node(int val) {
-    Node *n = malloc(sizeof(Node));
-    if (!n) return NULL;
-    n->data = val;
-    n->next = NULL;
-    return n;
-}
-
-// Pattern 2: Swap two integers via pointers
-void swap_int(int *a, int *b) {
-    int temp = *a;
+// Pattern 1: Swap two values via pointers
+void swap_int(int *a, int *b)
+{
+    int tmp = *a;
     *a = *b;
-    *b = temp;
+    *b = tmp;
 }
 
-int x = 10, y = 20;
-swap_int(&x, &y);  // x=20, y=10
-
-// Pattern 3: Return multiple values via output parameters
-void min_max(const int *arr, int n, int *out_min, int *out_max) {
+// Pattern 2: Return multiple values via pointer parameters
+void min_max(const int *arr, size_t n, int *out_min, int *out_max)
+{
     *out_min = *out_max = arr[0];
-    for (int i = 1; i < n; i++) {
+    for (size_t i = 1; i < n; i++) {
         if (arr[i] < *out_min) *out_min = arr[i];
         if (arr[i] > *out_max) *out_max = arr[i];
     }
 }
 
-int data[] = {3, 1, 4, 1, 5, 9, 2, 6};
-int mn, mx;
-min_max(data, 8, &mn, &mx);
-printf("min=%d max=%d\n", mn, mx);  // min=1 max=9
+// Pattern 3: Iterator pattern — return pointer to next element (or NULL)
+const int *find_first(const int *arr, size_t n, int value)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (arr[i] == value) return &arr[i];
+    }
+    return NULL;
+}
 
-// Pattern 4: Iterator through a string
-const char *str = "Hello";
-for (const char *it = str; *it != '\0'; it++) {
-    printf("'%c' = %d\n", *it, *it);
+int main(void)
+{
+    // Swap
+    int x = 3, y = 7;
+    swap_int(&x, &y);
+    printf("x=%d y=%d\n", x, y);  // x=7 y=3
+
+    // Multiple return values
+    int data[] = { 3, 1, 4, 1, 5, 9, 2, 6 };
+    int mn, mx;
+    min_max(data, 8, &mn, &mx);
+    printf("min=%d max=%d\n", mn, mx);  // min=1 max=9
+
+    // Find
+    const int *found = find_first(data, 8, 5);
+    if (found) {
+        printf("Found 5 at index %td\n", found - data);  // index 4
+    }
+
+    return 0;
 }
 ```
-
-## Pointer Summary Reference
-
-| Expression | Meaning |
-|-----------|---------|
-| `int *p` | `p` is a pointer to `int` |
-| `&x` | Address of variable `x` |
-| `*p` | Value at address stored in `p` |
-| `p + n` | Address `n` elements forward |
-| `p - q` | Number of elements between pointers |
-| `p[n]` | Same as `*(p + n)` |
-| `p->m` | Same as `(*p).m` for struct/union member |
-| `const int *p` | Cannot modify `*p` |
-| `int * const p` | Cannot reassign `p` |
-| `void *p` | Generic pointer, needs cast to dereference |
-| `NULL` | Null pointer constant (value 0) |
-| `(T*)p` | Cast pointer to type `T*` |

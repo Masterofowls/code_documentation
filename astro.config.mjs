@@ -7,7 +7,6 @@ import starlightImageZoom from 'starlight-image-zoom';
 import starlightHeadingBadges from 'starlight-heading-badges';
 import starlightGithubAlerts from 'starlight-github-alerts';
 import starlightCodeblockFullscreen from 'starlight-codeblock-fullscreen';
-import starlightScrollToTop from 'starlight-scroll-to-top';
 import starlightLlmsTxt from 'starlight-llms-txt';
 import { starlightIconsPlugin } from 'starlight-plugin-icons';
 import starlightKbd from 'starlight-kbd';
@@ -48,7 +47,6 @@ export default defineConfig({
         starlightHeadingBadges(),
         starlightGithubAlerts(),
         starlightCodeblockFullscreen(),
-        starlightScrollToTop(),
         starlightLlmsTxt(),
         starlightIconsPlugin(),
         starlightKbd({

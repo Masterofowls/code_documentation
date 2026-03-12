@@ -1,0 +1,368 @@
+---
+title: Concurrency in C++
+description: std::thread, mutex types, lock guards, condition variables, atomics, std::async/future, thread pools, C++20 coroutines, jthread, semaphores, latches, barriers, and race conditions.
+sidebar:
+  order: 7
+tags: [systems, cpp, c]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Concurrency in C++
+
+## std::thread
+
+```cpp
+#include <thread>
+#include <iostream>
+
+// Create a thread with a callable
+std::thread t1([]() {
+    std::cout << "Thread running\n";
+});
+
+// Thread with function and arguments
+void worker(int id, const std::string& task) {
+    std::cout << "Worker " << id << " doing: " << task << "\n";
+}
+std::thread t2(worker, 1, "computation");
+
+// Thread with member function
+class Processor {
+public:
+    void run(int iterations) { /* ... */ }
+};
+Processor proc;
+std::thread t3(&Processor::run, &proc, 100);  // &proc = this pointer
+
+// Thread management
+t1.join();     // wait for thread to finish (blocking)
+// OR
+t1.detach();   // let thread run independently (daemon thread)
+// join or detach MUST be called before thread object is destroyed!
+
+// std::thread::hardware_concurrency() — number of logical CPU cores
+unsigned cores = std::thread::hardware_concurrency();
+std::cout << "Logical cores: " << cores << "\n";  // e.g., 16
+
+// Thread-local storage
+thread_local int thread_id = 0;  // each thread has its own copy
+void set_id(int id) { thread_id = id; }
+```
+
+## Mutex Types
+
+```cpp
+#include <mutex>
+#include <shared_mutex>
+
+std::mutex              m1;  // standard mutex — non-recursive
+std::recursive_mutex    m2;  // can be locked multiple times by same thread
+std::timed_mutex        m3;  // supports try_lock_for / try_lock_until
+std::shared_mutex       m4;  // C++17: reader-writer lock (multiple readers OR one writer)
+
+// Manual lock/unlock (error-prone — prefer lock guards!)
+m1.lock();
+// ... critical section ...
+m1.unlock();  // must call even on exceptions!
+
+// try_lock — non-blocking: returns false if already locked
+if (m1.try_lock()) {
+    // ... got the lock ...
+    m1.unlock();
+} else {
+    // ... couldn't acquire lock ...
+}
+
+// Timed locking
+if (m3.try_lock_for(std::chrono::milliseconds{100})) {
+    // acquired within 100ms
+    m3.unlock();
+}
+```
+
+## Lock Guards
+
+```cpp
+#include <mutex>
+
+std::mutex mtx;
+std::shared_mutex shared_mtx;
+
+// lock_guard — simplest RAII lock, no manual unlock needed, not movable
+{
+    std::lock_guard<std::mutex> lock{mtx};
+    // ... critical section ...
+}  // lock released automatically (even on exception)
+
+// unique_lock — flexible: movable, can be unlocked/relocked manually
+{
+    std::unique_lock<std::mutex> lock{mtx};
+    lock.unlock();                  // early unlock
+    // ... non-critical section ...
+    lock.lock();                    // reacquire
+    // ... critical section ...
+}
+
+std::unique_lock<std::mutex> deferred{mtx, std::defer_lock};  // don't lock yet
+deferred.lock();  // lock when ready
+
+// scoped_lock (C++17) — lock multiple mutexes simultaneously (deadlock-free)
+std::mutex mtx_a, mtx_b;
+{
+    std::scoped_lock lock{mtx_a, mtx_b};  // acquires both in deadlock-safe order
+    // ... access both resources ...
+}
+
+// shared_lock — for shared_mutex, allows multiple concurrent readers
+{
+    std::shared_lock reader{shared_mtx};  // multiple readers can hold this simultaneously
+    // ... read-only access ...
+}
+{
+    std::unique_lock writer{shared_mtx};  // exclusive write access
+    // ... write access ...
+}
+```
+
+## Deadlock Prevention
+
+```cpp
+// Deadlock: thread A holds mutex1, waits for mutex2
+//           thread B holds mutex2, waits for mutex1 → deadlock!
+
+// Rule 1: Always acquire multiple mutexes in the same order
+// Rule 2: Use scoped_lock for multiple mutexes
+// Rule 3: Minimize time holding locks
+
+// std::lock + std::adopt_lock (pre-C++17 alternative)
+std::mutex m1, m2;
+std::lock(m1, m2);  // acquire both atomically (deadlock-free algorithm)
+std::lock_guard<std::mutex> lg1{m1, std::adopt_lock};  // take ownership
+std::lock_guard<std::mutex> lg2{m2, std::adopt_lock};  // take ownership
+// Both released at end of scope
+
+// C++17 scoped_lock is simpler:
+std::scoped_lock lock{m1, m2};
+```
+
+## Condition Variables
+
+```cpp
+#include <condition_variable>
+#include <mutex>
+#include <queue>
+#include <thread>
+
+// Classic producer-consumer with condition variable
+template <typename T>
+class ThreadSafeQueue {
+public:
+    void push(T value) {
+        {
+            std::unique_lock<std::mutex> lock{mutex_};
+            queue_.push(std::move(value));
+        }
+        cond_.notify_one();  // wake one waiting consumer
+    }
+
+    T pop() {
+        std::unique_lock<std::mutex> lock{mutex_};
+        // wait() atomically:
+        //   1. Releases the lock
+        //   2. Blocks the thread until notified
+        //   3. Re-acquires the lock when unblocked
+        // The lambda is a PREDICATE — prevents spurious wakeups
+        cond_.wait(lock, [this]{ return !queue_.empty(); });
+        T value = std::move(queue_.front());
+        queue_.pop();
+        return value;
+    }
+
+    bool try_pop(T& out) {
+        std::unique_lock<std::mutex> lock{mutex_};
+        if (queue_.empty()) return false;
+        out = std::move(queue_.front());
+        queue_.pop();
+        return true;
+    }
+
+private:
+    std::mutex              mutex_;
+    std::condition_variable cond_;
+    std::queue<T>           queue_;
+};
+
+// Wait with timeout
+std::unique_lock<std::mutex> lock{mutex_};
+if (cond_.wait_for(lock, std::chrono::seconds{5}, [&]{ return ready; })) {
+    // condition satisfied within 5 seconds
+} else {
+    // timed out
+}
+
+// notify_one vs notify_all
+// notify_one: wake exactly one waiter (efficient, but may starve others)
+// notify_all: wake all waiters (all re-check predicate, only one proceeds)
+// Use notify_all when: multiple consumers need to re-check (e.g., shutdown signal)
+```
+
+## std::async and std::future
+
+```cpp
+#include <future>
+#include <chrono>
+
+// std::async — run a function asynchronously, returns std::future
+auto future = std::async(std::launch::async, []() -> int {
+    // runs on a new thread
+    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    return 42;
+});
+
+// ... do other work ...
+
+int result = future.get();  // blocks until result is available
+// get() can only be called ONCE — subsequent calls throw std::future_error
+
+// launch policies:
+// std::launch::async    — always create a new thread (eager)
+// std::launch::deferred — call function lazily (in future.get() on caller's thread)
+// std::launch::async | std::launch::deferred — implementation's choice (default)
+
+// std::promise — manually set a future's value from any thread
+std::promise<int> promise;
+std::future<int>  future2 = promise.get_future();
+
+std::thread t([&promise]() {
+    // ... compute ...
+    promise.set_value(100);              // provide the result
+    // or: promise.set_exception(std::make_exception_ptr(std::runtime_error{"err"}));
+});
+t.join();
+int val = future2.get();  // 100
+
+// std::shared_future — can be copied, get() can be called multiple times
+std::shared_future<int> shared = future.share();
+auto copy = shared;  // both can call get()
+
+// std::packaged_task — wraps a callable, associates it with a future
+std::packaged_task<int(int, int)> task([](int a, int b){ return a + b; });
+std::future<int> sum_future = task.get_future();
+std::thread task_thread(std::move(task), 3, 4);
+task_thread.join();
+std::cout << sum_future.get() << "\n";  // 7
+```
+
+## C++20 Concurrency Primitives
+
+### jthread — Joinable Thread with Stop Token
+
+```cpp
+#include <stop_token>
+#include <thread>
+
+// jthread (C++20) — auto-joins on destruction, supports cooperative cancellation
+std::jthread worker([](std::stop_token stoken) {
+    while (!stoken.stop_requested()) {
+        // ... do work ...
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    std::cout << "Worker stopping gracefully\n";
+});
+
+std::this_thread::sleep_for(std::chrono::seconds{1});
+worker.request_stop();  // sets stop token
+// worker.join() called automatically in ~jthread
+```
+
+### Semaphores
+
+```cpp
+#include <semaphore>
+
+// counting_semaphore — can be acquired up to N times simultaneously
+std::counting_semaphore<10> sem{3};  // initial count = 3, max = 10
+sem.acquire();     // decrement count (blocks if 0)
+sem.release();     // increment count (wakes blocked threads)
+bool got = sem.try_acquire();          // non-blocking
+bool timed = sem.try_acquire_for(std::chrono::milliseconds{100});
+
+// binary_semaphore — special case: counting_semaphore<1>
+std::binary_semaphore signal{0};  // initially "not signaled"
+
+// Thread A:
+signal.release();  // signal thread B
+
+// Thread B:
+signal.acquire();  // wait for signal from thread A
+```
+
+### Latch and Barrier
+
+```cpp
+#include <latch>
+#include <barrier>
+
+// std::latch (C++20) — single-use countdown: wait until N threads have reached a point
+std::latch ready{4};  // wait for 4 threads
+
+// Each thread:
+ready.count_down();      // decrement counter
+ready.wait();            // block until counter reaches 0
+// Or atomic: ready.arrive_and_wait();  // decrement + wait in one call
+
+// std::barrier (C++20) — reusable synchronization point
+std::barrier sync_point{4, []() noexcept {
+    // Completion function runs once when all threads arrive
+    std::cout << "All threads reached barrier\n";
+}};
+
+// Each thread (can pass multiple times):
+sync_point.arrive_and_wait();  // synchronize
+// All threads guaranteed to have reached this point
+```
+
+## Race Conditions and False Sharing
+
+```cpp
+// Race condition: two threads access shared data, at least one writes, without synchronization
+int counter = 0;
+// Thread A: counter++;  // NOT atomic — read, increment, write: 3 operations!
+// Thread B: counter++;  // may interleave → lost update
+
+// Fix: use std::atomic<int> or a mutex
+
+// False sharing: two different variables on the SAME cache line (64 bytes on x86)
+// Modifying one invalidates the other thread's cached copy → cache thrashing
+
+// BAD: both in same cache line
+struct BadCounters {
+    std::atomic<int> counter_a;  // offset 0
+    std::atomic<int> counter_b;  // offset 4 — SAME cache line as counter_a!
+};
+// Thread A writes counter_a, Thread B writes counter_b → cache ping-pong
+
+// GOOD: pad to separate cache lines
+struct alignas(64) GoodCounters {
+    std::atomic<int> counter_a;
+    char padding_[64 - sizeof(std::atomic<int>)];  // fill rest of cache line
+};
+struct alignas(64) OtherCounter {
+    std::atomic<int> counter_b;
+};
+// Now modifying counter_a doesn't invalidate counter_b's cache line
+```
+
+:::caution[Deadlock Detection]
+Use ThreadSanitizer (`-fsanitize=thread`) to detect data races and deadlocks at runtime. It adds ~10× overhead but catches subtle race conditions that are nearly impossible to find by inspection.
+:::
+
+<CardGrid>
+  <Card title="Concurrency Guidelines" icon="warning">
+    Prefer immutable data shared between threads. Use message passing (queues) over shared state. When you must share state, use the finest-grained locking possible. Always prefer higher-level primitives (async, futures) over raw threads.
+</Card>
+  <Card title="Performance Notes" icon="rocket">
+    Mutex lock/unlock: ~20-100ns. Atomic fetch_add (seq_cst): ~10ns. Cache line transfer between cores: ~50-200ns. Context switch: ~1-10μs. Contended mutex: ~1-10μs. Design to minimize contention, not just protect access.
+</Card>
+</CardGrid>

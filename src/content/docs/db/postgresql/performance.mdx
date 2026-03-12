@@ -1,0 +1,336 @@
+---
+title: PostgreSQL Performance
+description: Reading EXPLAIN output, pg_stat_statements, autovacuum tuning, PgBouncer connection pooling, query optimization patterns, parallel queries, and table statistics.
+sidebar:
+  order: 6
+tags: [database, sql]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+## Reading EXPLAIN Output
+
+`EXPLAIN` reveals how PostgreSQL plans to execute a query. Always `EXPLAIN (ANALYZE, BUFFERS)` on real data for accurate results:
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
+SELECT o.id, c.name, o.total
+FROM orders o
+JOIN customers c ON c.id = o.customer_id
+WHERE o.total > 500
+ORDER BY o.placed_at DESC
+LIMIT 20;
+```
+
+Sample output:
+
+```
+Limit  (cost=1234.56..1234.61 rows=20 width=48) (actual time=8.234..8.240 rows=20 loops=1)
+  ->  Sort  (cost=1234.56..1259.56 rows=10000 width=48) (actual time=8.232..8.235 rows=20 loops=1)
+        Sort Key: o.placed_at DESC
+        Sort Method: top-N heapsort  Memory: 28kB
+        ->  Hash Join  (cost=450.00..900.00 rows=10000 width=48) (actual time=3.123..7.891 rows=8754 loops=1)
+              Hash Cond: (o.customer_id = c.id)
+              Buffers: shared hit=320 read=45
+              ->  Seq Scan on orders o  (cost=0.00..350.00 rows=10000 width=32) (actual time=0.012..4.234 rows=8754 loops=1)
+                    Filter: (total > '500'::numeric)
+                    Rows Removed by Filter: 91246
+                    Buffers: shared hit=250 read=45
+              ->  Hash  (cost=150.00..150.00 rows=5000 width=24) (actual time=1.234..1.234 rows=5000 loops=1)
+                    Buckets: 8192  Batches: 1  Memory Usage: 342kB
+                    Buffers: shared hit=70
+                    ->  Seq Scan on customers c  (cost=0.00..150.00 rows=5000 width=24) (actual time=0.010..0.890 rows=5000 loops=1)
+Planning Time: 2.345 ms
+Execution Time: 8.567 ms
+```
+
+### Key Metrics to Read
+
+| Field | Meaning | Red flag |
+|---|---|---|
+| `cost=X..Y` | Estimated startup..total planner cost | Very high numbers vs other nodes |
+| `rows=N` | Estimated row count | Far from `actual rows=N` → stale statistics |
+| `actual time=X..Y ms` | Real execution time per loop | High time in leaf nodes |
+| `loops=N` | How many times this node ran | `loops=10000` with per-loop cost = nested loop problem |
+| `shared hit=N` | Pages from buffer cache | High `read=N` = I/O bound |
+| `Rows Removed by Filter=N` | Rows scanned but discarded | Very high = missing index |
+
+### Scan Types
+
+| Scan | Meaning | Performance |
+|---|---|---|
+| `Seq Scan` | Reads entire table | OK for small tables; bad for large |
+| `Index Scan` | Uses index; fetches heap for each match | Good for &lt;5-10% of table |
+| `Index Only Scan` | Reads only the index (covering index) | Excellent — no heap I/O |
+| `Bitmap Heap Scan` | Collects qualifying pages; fetches in batches | Good for 5-20% of table |
+
+### Join Types
+
+| Join | When Used | Notes |
+|---|---|---|
+| `Nested Loop` | Small inner table or index available | O(n×m) worst case |
+| `Hash Join` | Large tables, no sort order | Builds hash table from smaller side |
+| `Merge Join` | Both inputs sorted on join key | Efficient with pre-sorted data |
+
+## pg_stat_statements
+
+The most useful extension for identifying slow queries:
+
+```sql
+-- Enable (add to postgresql.conf and restart)
+-- shared_preload_libraries = 'pg_stat_statements'
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+
+-- Top 10 slowest queries by total time
+SELECT
+  round(total_exec_time::numeric, 2) AS total_ms,
+  round(mean_exec_time::numeric, 2)  AS mean_ms,
+  calls,
+  round(stddev_exec_time::numeric, 2) AS stddev_ms,
+  rows,
+  round(100 * total_exec_time / sum(total_exec_time) OVER (), 2) AS pct_total,
+  query
+FROM pg_stat_statements
+ORDER BY total_exec_time DESC
+LIMIT 10;
+
+-- Queries with high variation (inconsistent performance)
+SELECT
+  query,
+  calls,
+  round(mean_exec_time::numeric, 2) AS mean_ms,
+  round(stddev_exec_time::numeric, 2) AS stddev_ms,
+  round(stddev_exec_time / mean_exec_time * 100, 1) AS cv_pct
+FROM pg_stat_statements
+WHERE calls > 100 AND mean_exec_time > 10
+ORDER BY cv_pct DESC
+LIMIT 10;
+
+-- Reset statistics
+SELECT pg_stat_statements_reset();
+```
+
+## Autovacuum Tuning
+
+Autovacuum reclaims dead row versions and updates table statistics. Default settings are conservative:
+
+```sql
+-- Check tables that need vacuuming
+SELECT
+  schemaname,
+  tablename,
+  n_dead_tup,
+  n_live_tup,
+  round(n_dead_tup::numeric / nullif(n_live_tup + n_dead_tup, 0) * 100, 1) AS dead_pct,
+  last_autovacuum,
+  last_autoanalyze
+FROM pg_stat_user_tables
+WHERE n_dead_tup > 10000
+ORDER BY n_dead_tup DESC;
+
+-- Per-table autovacuum tuning (override global settings)
+ALTER TABLE high_churn_table SET (
+  autovacuum_vacuum_scale_factor = 0.01,   -- trigger at 1% dead rows (default 20%)
+  autovacuum_analyze_scale_factor = 0.005, -- analyze at 0.5% changes
+  autovacuum_vacuum_cost_delay = 2         -- less throttling (default 2ms)
+);
+
+-- Manually trigger vacuum (doesn't block reads/writes)
+VACUUM ANALYZE orders;
+
+-- More aggressive cleanup (rewrites table, blocks reads and writes briefly)
+VACUUM FULL ANALYZE orders;
+```
+
+Global autovacuum settings in `postgresql.conf`:
+
+```ini
+autovacuum = on
+autovacuum_max_workers = 5
+autovacuum_naptime = 30s              # check interval
+autovacuum_vacuum_scale_factor = 0.1  # 10% dead rows triggers vacuum
+autovacuum_analyze_scale_factor = 0.05
+autovacuum_vacuum_cost_delay = 2ms    # I/O throttle delay
+autovacuum_vacuum_cost_limit = 400    # I/O cost budget per round
+```
+
+## Connection Pooling with PgBouncer
+
+PostgreSQL creates a new process per connection — expensive at scale. PgBouncer pools connections:
+
+```ini
+# pgbouncer.ini
+[databases]
+mydb = host=127.0.0.1 port=5432 dbname=mydb
+
+[pgbouncer]
+listen_port = 6432
+listen_addr = *
+auth_type = scram-sha-256
+auth_file = /etc/pgbouncer/userlist.txt
+
+pool_mode = transaction          # recommended for most apps
+max_client_conn = 1000           # max connections from apps
+default_pool_size = 25           # max actual PG connections per db/user
+min_pool_size = 5
+reserve_pool_size = 5
+
+server_idle_timeout = 600        # close idle server connections after 10 min
+client_idle_timeout = 0          # no client timeout
+log_connections = 0
+log_disconnections = 0
+```
+
+| Pool Mode | Description | Compatibility |
+|---|---|---|
+| `session` | One server connection per client session | Full SQL support (prepared statements, advisory locks) |
+| `transaction` | Server connection per transaction | No session-level features (SET, advisory locks, prepared statements) |
+| `statement` | Server connection per statement | Rarely used; breaks multi-statement transactions |
+
+:::caution[Transaction mode limitations]
+In `transaction` pool mode, `SET search_path`, `SET LOCAL`, temporary tables, advisory session locks, and `LISTEN`/`NOTIFY` won't work as expected. Use `pgbouncer_params` or application-level workarounds.
+:::
+
+## Query Optimization Patterns
+
+### Avoid `SELECT *`
+
+```sql
+-- ❌ Fetches all columns — prevents index-only scans
+SELECT * FROM orders WHERE customer_id = 42;
+
+-- ✅ Only fetch what you need
+SELECT id, total, status, placed_at FROM orders WHERE customer_id = 42;
+```
+
+### Avoid Functions on Indexed Columns in WHERE
+
+```sql
+-- ❌ Index on email cannot be used
+SELECT * FROM users WHERE LOWER(email) = 'alice@example.com';
+SELECT * FROM orders WHERE DATE(placed_at) = '2024-01-15';
+
+-- ✅ Create expression index, or rewrite the predicate
+CREATE INDEX ON users (LOWER(email));
+-- or:
+SELECT * FROM orders
+WHERE placed_at >= '2024-01-15' AND placed_at < '2024-01-16';
+```
+
+### Avoid Implicit Type Casts
+
+```sql
+-- ❌ id is INTEGER; string literal causes implicit cast — index not used
+SELECT * FROM users WHERE id = '42';
+SELECT * FROM orders WHERE customer_id = '100';
+
+-- ✅ Match the column type
+SELECT * FROM users WHERE id = 42;
+```
+
+### Use Cursor/Keyset Pagination Instead of OFFSET
+
+```sql
+-- ❌ OFFSET scans and discards N rows every time
+SELECT * FROM events ORDER BY id DESC LIMIT 20 OFFSET 10000;
+
+-- ✅ Keyset pagination: WHERE clause instead of OFFSET
+SELECT * FROM events
+WHERE id < :last_seen_id
+ORDER BY id DESC
+LIMIT 20;
+```
+
+## `work_mem` and Memory Settings
+
+```sql
+-- Check current settings
+SHOW work_mem;          -- default: 4MB
+SHOW maintenance_work_mem;
+
+-- Set for a specific session (complex sorts/hash joins)
+SET work_mem = '64MB';
+
+-- Set per-transaction
+SET LOCAL work_mem = '256MB';
+
+-- Identify queries spilling to disk
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT ...;
+-- Look for: "Sort Method: external merge  Disk: 2048kB"
+-- → increase work_mem or add an index
+```
+
+:::caution[work_mem multiplier]
+`work_mem` applies **per sort/hash operation per connection**. If 100 connections each run a query with 3 hash joins, memory usage = 100 × 3 × work_mem. Don't set this globally too high; use `SET LOCAL` for specific queries.
+:::
+
+## Parallel Query
+
+```sql
+-- Check parallel settings
+SHOW max_parallel_workers;          -- default: 8
+SHOW max_parallel_workers_per_gather; -- default: 2
+
+-- Enable more parallelism for a session
+SET max_parallel_workers_per_gather = 4;
+
+-- Force parallel plan for testing
+SET force_parallel_mode = on;
+
+-- Disable parallel for a specific query
+SET max_parallel_workers_per_gather = 0;
+
+-- Table-level setting
+ALTER TABLE large_table SET (parallel_workers = 4);
+```
+
+## Table Statistics
+
+```sql
+-- Force statistics update
+ANALYZE orders;
+
+-- View statistics for a table
+SELECT
+  attname AS column,
+  n_distinct,
+  most_common_vals,
+  most_common_freqs,
+  histogram_bounds
+FROM pg_stats
+WHERE tablename = 'orders'
+ORDER BY attname;
+
+-- Increase statistics target for skewed columns
+ALTER TABLE orders ALTER COLUMN status SET STATISTICS 500;  -- default: 100
+ANALYZE orders;
+
+-- Check when stats were last updated
+SELECT tablename, last_analyze, last_autoanalyze
+FROM pg_stat_user_tables
+WHERE tablename = 'orders';
+```
+
+## Streaming Replication Overview
+
+```sql
+-- On primary: create a replication role
+CREATE ROLE replicator REPLICATION LOGIN PASSWORD 'repl-password';
+
+-- pg_hba.conf on primary
+-- host replication replicator 10.0.0.2/32 scram-sha-256
+
+-- On replica: initialize
+pg_basebackup -h primary-host -U replicator -D /var/lib/postgresql/data --wal-method=stream -P
+
+-- postgresql.conf on primary
+-- wal_level = replica
+-- max_wal_senders = 5
+-- synchronous_standby_names = ''  (or 'replica1' for synchronous)
+
+-- Check replication status (on primary)
+SELECT client_addr, state, sent_lsn, write_lsn, flush_lsn, replay_lsn,
+       pg_size_pretty(sent_lsn - replay_lsn) AS replication_lag
+FROM pg_stat_replication;
+```

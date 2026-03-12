@@ -1,6 +1,6 @@
 ---
 title: Jest Configuration Reference
-description: Deep dive into every jest.config.ts option — environments, transforms, module mappers, setup files, projects for monorepos, reporters, and advanced performance settings.
+description: Deep dive into jest.config.ts — testEnvironment, transforms, moduleNameMapper, setupFiles, globalSetup, monorepo projects, reporters, and advanced options for complex TypeScript setups.
 sidebar:
   order: 8
 tags: [testing, javascript]
@@ -8,443 +8,454 @@ tags: [testing, javascript]
 
 import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-Jest's configuration lives in `jest.config.ts` (or `jest.config.js`, or the `jest` key in `package.json`). This reference covers every commonly-used option with practical examples.
+`jest.config.ts` is the central configuration file for Jest. Understanding each option allows you to tailor Jest precisely to your project's needs — from simple TypeScript projects to complex monorepos.
 
-## Full Configuration Template
+## Complete Configuration Example
 
 ```typescript
 import type { Config } from 'jest';
 
 const config: Config = {
-  // --- Test Discovery ---
+  // ── Environment ──────────────────────────────────────────────
+  testEnvironment: 'node',
+
+  // ── Discovery ─────────────────────────────────────────────────
   roots: ['<rootDir>/src'],
-  testMatch: ['**/__tests__/**/*.{ts,tsx}', '**/*.{spec,test}.{ts,tsx}'],
-  testPathIgnorePatterns: ['/node_modules/', '/dist/', '/build/'],
+  testMatch: [
+    '**/__tests__/**/*.{ts,tsx}',
+    '**/*.{spec,test}.{ts,tsx}',
+  ],
+  testPathIgnorePatterns: [
+    '/node_modules/',
+    '/dist/',
+    '/.next/',
+  ],
 
-  // --- Environment ---
-  testEnvironment: 'jsdom',
-  testEnvironmentOptions: {
-    url: 'http://localhost',
-  },
-
-  // --- Transform ---
+  // ── Transform ─────────────────────────────────────────────────
   preset: 'ts-jest',
   transform: {
-    '^.+\\.tsx?$': ['ts-jest', { tsconfig: 'tsconfig.test.json' }],
+    '^.+\\.tsx?$': ['ts-jest', { tsconfig: './tsconfig.test.json' }],
   },
 
-  // --- Module Resolution ---
+  // ── Module Resolution ─────────────────────────────────────────
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',
-    '\\.css$': '<rootDir>/__mocks__/styleMock.ts',
-    '\\.svg$': '<rootDir>/__mocks__/svgMock.ts',
-    '\\.(jpg|jpeg|png|gif|webp)$': '<rootDir>/__mocks__/fileMock.ts',
+    '^@shared/(.*)$': '<rootDir>/packages/shared/src/$1',
+    '\\.css$': '<rootDir>/src/__mocks__/styleMock.ts',
+    '\\.(jpg|png|svg|gif|webp)$': '<rootDir>/src/__mocks__/fileMock.ts',
   },
-  moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
+  moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
   modulePaths: ['<rootDir>/src'],
 
-  // --- Setup ---
-  globalSetup: '<rootDir>/jest.globalSetup.ts',
-  globalTeardown: '<rootDir>/jest.globalTeardown.ts',
-  setupFilesAfterFramework: ['<rootDir>/jest.setup.ts'],
+  // ── Setup ─────────────────────────────────────────────────────
+  setupFiles: ['<rootDir>/src/test-polyfills.ts'],
+  setupFilesAfterFramework: ['<rootDir>/src/test-setup.ts'],
+  globalSetup: '<rootDir>/src/global-setup.ts',
+  globalTeardown: '<rootDir>/src/global-teardown.ts',
 
-  // --- Coverage ---
-  collectCoverageFrom: ['src/**/*.{ts,tsx}', '!src/**/*.d.ts'],
+  // ── Coverage ──────────────────────────────────────────────────
+  collectCoverage: false,
+  collectCoverageFrom: [
+    'src/**/*.{ts,tsx}',
+    '!src/**/*.d.ts',
+    '!src/**/*.test.{ts,tsx}',
+    '!src/**/*.stories.{ts,tsx}',
+    '!src/test-utils/**',
+  ],
+  coverageDirectory: 'coverage',
   coverageReporters: ['text', 'lcov', 'html'],
-  coverageProvider: 'v8',
+  coverageProvider: 'babel',
   coverageThreshold: {
-    global: { branches: 80, functions: 85, lines: 85, statements: 85 },
+    global: { branches: 75, functions: 85, lines: 80, statements: 80 },
   },
 
-  // --- Performance ---
+  // ── Performance ───────────────────────────────────────────────
   maxWorkers: '50%',
   testTimeout: 10000,
-  cacheDirectory: '<rootDir>/.jest-cache',
-  cache: true,
 
-  // --- Output ---
+  // ── Output ────────────────────────────────────────────────────
   verbose: false,
+  silent: false,
   reporters: ['default'],
 
-  // --- Behaviour ---
+  // ── Behavior ──────────────────────────────────────────────────
   clearMocks: true,
-  restoreMocks: true,
-  detectOpenHandles: true,
+  restoreMocks: false,
+  resetMocks: false,
+  detectOpenHandles: false,
   forceExit: false,
-  bail: 1,
+
+  // ── Snapshots ─────────────────────────────────────────────────
+  snapshotSerializers: ['@emotion/jest/serializer'],
+  updateSnapshot: 'new',
 };
 
 export default config;
 ```
 
----
+## testEnvironment
 
-## `testEnvironment`
+The environment that tests run in:
 
-Controls the global environment in which tests run.
+```typescript
+// 'node' — default, no DOM APIs
+testEnvironment: 'node'
+
+// 'jsdom' — simulated browser environment
+testEnvironment: 'jest-environment-jsdom'
+
+// Per-file override using docblock
+// @jest-environment jsdom
+```
+
+| Environment | Use Case | DOM APIs |
+|---|---|---|
+| `node` | Backend services, utilities, CLI tools | ❌ Not available |
+| `jest-environment-jsdom` | React components, DOM manipulation | ✅ Available |
+| `@jest-environment-node` (explicit) | When you need to be explicit | ❌ |
+
+For projects with mixed environments (e.g., API tests use `node`, component tests use `jsdom`), use the `projects` config or per-file docblock comments.
+
+## transform
+
+`transform` maps file extensions to transformer packages. Jest must transform non-JavaScript files before executing them.
 
 <Tabs>
-  <TabItem label="node">
-
-    The default environment. Uses Node.js globals — suitable for backend APIs, CLI tools, and pure utility functions.
-
+  <TabItem label="ts-jest">
     ```typescript
-    testEnvironment: 'node',
+    transform: {
+      '^.+\\.tsx?$': ['ts-jest', {
+        tsconfig: {
+          jsx: 'react-jsx',
+          strict: true,
+        },
+        diagnostics: {
+          warnOnly: false,    // fail tests on TypeScript errors
+          ignoreCodes: [],
+        },
+      }],
+    }
     ```
-
-    Available globals: `Buffer`, `process`, `__dirname`, `require`  
-    Not available: `window`, `document`, `localStorage`
-
   </TabItem>
-  <TabItem label="jsdom">
-
-    Simulates a browser environment using jsdom. Required for React components and any code that uses DOM APIs.
-
+  <TabItem label="babel-jest">
     ```typescript
-    testEnvironment: 'jsdom',
-    testEnvironmentOptions: {
-      url: 'http://localhost:3000',
-      customExportConditions: [''],
-    },
+    transform: {
+      '^.+\\.tsx?$': ['babel-jest', {
+        presets: [
+          ['@babel/preset-env', { targets: { node: 'current' } }],
+          '@babel/preset-typescript',
+          ['@babel/preset-react', { runtime: 'automatic' }],
+        ],
+      }],
+    }
     ```
-
-    Available globals: `window`, `document`, `navigator`, `localStorage`, `fetch` (via polyfill)
-
   </TabItem>
-  <TabItem label="Per-file override">
-
-    Override the environment for a single file using a docblock comment:
-
+  <TabItem label="SWC (fastest)">
     ```typescript
-    /**
-     * @jest-environment jsdom
-     */
-    import { render } from '@testing-library/react';
-    // ...
+    // npm install --save-dev @swc/jest @swc/core
+    transform: {
+      '^.+\\.(t|j)sx?$': ['@swc/jest', {
+        jsc: {
+          parser: { syntax: 'typescript', tsx: true },
+          transform: { react: { runtime: 'automatic' } },
+        },
+      }],
+    }
     ```
-
   </TabItem>
 </Tabs>
 
----
+:::tip[SWC for Large Projects]
+`@swc/jest` (Rust-based transform) can be 10-20x faster than `ts-jest` for large codebases. It strips types without checking them — run `tsc --noEmit` separately in CI for type safety.
+:::
 
-## `transform`
+## moduleNameMapper
 
-Tells Jest how to transform files before running them. Each key is a regex matching file paths.
-
-### ts-jest (TypeScript with type-checking)
-
-```typescript
-transform: {
-  '^.+\\.tsx?$': ['ts-jest', {
-    tsconfig: 'tsconfig.json',
-    diagnostics: {
-      warnOnly: false,       // fail tests on TypeScript errors
-      ignoreCodes: [2322],   // ignore specific TS error codes
-    },
-    isolatedModules: true,   // faster: skip full type-checking
-  }],
-},
-```
-
-### babel-jest (fast TypeScript without type-checking)
+Maps import paths to alternative paths or mock files. Essential for TypeScript path aliases and asset mocking.
 
 ```typescript
-transform: {
-  '^.+\\.tsx?$': ['babel-jest', {
-    presets: [
-      ['@babel/preset-env', { targets: { node: 'current' } }],
-      ['@babel/preset-react', { runtime: 'automatic' }],
-      '@babel/preset-typescript',
-    ],
-  }],
-},
-```
-
-### Combining multiple transforms
-
-```typescript
-transform: {
-  '^.+\\.tsx?$': ['ts-jest', {}],              // TypeScript
-  '^.+\\.jsx?$': 'babel-jest',                  // JavaScript (node_modules)
-  '^.+\\.graphql$': 'jest-transform-graphql',    // GraphQL
-  '^.+\\.mdx?$': '@mdx-js/jest',               // MDX
-},
-transformIgnorePatterns: [
-  '/node_modules/(?!(some-esm-package|another-esm-package))',
-],
-```
-
----
-
-## `moduleNameMapper`
-
-Maps module identifiers to mock files or alternative paths. Essential for TypeScript path aliases, CSS modules, and static assets.
-
-### Path Aliases
-
-```typescript
-// tsconfig.json
-{
-  "compilerOptions": {
-    "paths": {
-      "@/*": ["./src/*"],
-      "@components/*": ["./src/components/*"],
-      "@hooks/*": ["./src/hooks/*"]
-    }
-  }
-}
-```
-
-```typescript
-// jest.config.ts — mirror the tsconfig paths
 moduleNameMapper: {
+  // TypeScript path aliases (match tsconfig.json paths)
   '^@/(.*)$': '<rootDir>/src/$1',
   '^@components/(.*)$': '<rootDir>/src/components/$1',
   '^@hooks/(.*)$': '<rootDir>/src/hooks/$1',
+  '^@utils/(.*)$': '<rootDir>/src/utils/$1',
+
+  // CSS Modules — return a proxy that returns the class name
+  '\\.module\\.(css|scss|sass)$': 'identity-obj-proxy',
+
+  // Global CSS — return empty object
+  '\\.(css|scss|sass|less)$': '<rootDir>/src/__mocks__/styleMock.ts',
+
+  // Image/media files — return the filename as a string
+  '\\.(jpg|jpeg|png|gif|webp|svg|ico)$': '<rootDir>/src/__mocks__/fileMock.ts',
+
+  // Font files
+  '\\.(woff|woff2|eot|ttf|otf)$': '<rootDir>/src/__mocks__/fileMock.ts',
 },
 ```
 
-### CSS Modules and Static Assets
-
 ```typescript
-// __mocks__/styleMock.ts
-module.exports = new Proxy({}, { get: (_, prop) => prop });
-// usage: styles.myClass → 'myClass'
+// src/__mocks__/styleMock.ts
+export default {};
 
-// __mocks__/fileMock.ts
-module.exports = 'test-file-stub';
+// src/__mocks__/fileMock.ts
+export default 'test-file-stub';
 
-// __mocks__/svgMock.tsx
-const SvgMock = ({ title }: { title?: string }) => <svg>{title}</svg>;
-export default SvgMock;
-export const ReactComponent = SvgMock;
+// For CSS Modules — returns the class name as the value
+// npm install --save-dev identity-obj-proxy
 ```
 
-```typescript
-moduleNameMapper: {
-  '\\.module\\.(css|scss|sass)$': 'identity-obj-proxy',  // npm install --save-dev identity-obj-proxy
-  '\\.css$': '<rootDir>/__mocks__/styleMock.ts',
-  '\\.svg$': '<rootDir>/__mocks__/svgMock.tsx',
-  '\\.(jpg|jpeg|png|gif|webp|avif|ico|bmp|tiff)$': '<rootDir>/__mocks__/fileMock.ts',
-},
-```
+## setupFiles and setupFilesAfterFramework
 
----
+Two separate setup hooks with different timing:
 
-## `setupFilesAfterFramework`
-
-An array of module paths that run **after** the test framework is installed in the environment. Use this to configure global matchers and test utilities.
+| Option | When it Runs | Use For |
+|---|---|---|
+| `setupFiles` | Before Jest installs in the environment | Polyfills, global variable setup |
+| `setupFilesAfterFramework` | After Jest is installed, before each test file | Custom matchers, mock globals, environment config |
 
 ```typescript
-setupFilesAfterFramework: [
-  '<rootDir>/jest.setup.ts',
-],
-```
+// src/test-polyfills.ts (setupFiles)
+// Runs before the test framework is installed
+import 'whatwg-fetch';  // fetch polyfill for Node.js < 18
+global.TextEncoder = require('util').TextEncoder;
+global.TextDecoder = require('util').TextDecoder;
 
-```typescript
-// jest.setup.ts
-import '@testing-library/jest-dom';    // DOM matchers
-import 'jest-extended';                // Extra matchers
-import { server } from './src/mocks/server'; // MSW server
+// src/test-setup.ts (setupFilesAfterFramework)
+// Runs after Jest is available — can use jest.fn(), expect, etc.
+import '@testing-library/jest-dom';
+import { server } from './mocks/server';
 
-// Start mock service worker before all tests
+// Set up MSW mock service worker
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 
-// Global mock for IntersectionObserver (not in jsdom)
-global.IntersectionObserver = jest.fn().mockImplementation(() => ({
-  observe: jest.fn(),
-  unobserve: jest.fn(),
-  disconnect: jest.fn(),
-}));
-
-// Global mock for ResizeObserver
-global.ResizeObserver = jest.fn().mockImplementation(() => ({
-  observe: jest.fn(),
-  unobserve: jest.fn(),
-  disconnect: jest.fn(),
-}));
+// Mock window.matchMedia (jsdom doesn't implement it)
+Object.defineProperty(window, 'matchMedia', {
+  writable: true,
+  value: jest.fn().mockImplementation(query => ({
+    matches: false,
+    media: query,
+    addEventListener: jest.fn(),
+    removeEventListener: jest.fn(),
+  })),
+});
 ```
 
-:::tip[setupFiles vs setupFilesAfterFramework]
-`setupFiles` runs before the test framework is installed — use it for polyfills. `setupFilesAfterFramework` runs after — use it for custom matchers and framework configuration.
-:::
+## globalSetup and globalTeardown
 
----
-
-## `globalSetup` and `globalTeardown`
-
-Run once before/after all test suites, in a separate Node.js context (no access to the jsdom environment). Perfect for starting/stopping databases, servers, or other external services.
+Run once per test run (not per file) in a separate Node.js process. Use for spinning up test databases, servers, or other expensive resources.
 
 ```typescript
-// jest.globalSetup.ts
-import { GenericContainer } from 'testcontainers';
-
-let postgresContainer: StartedTestContainer;
+// src/global-setup.ts
+import { startTestDatabase } from './test-utils/database';
 
 export default async function globalSetup() {
-  postgresContainer = await new GenericContainer('postgres:16')
-    .withEnvironment({ POSTGRES_PASSWORD: 'test' })
-    .withExposedPorts(5432)
-    .start();
+  console.log('Starting test database...');
+  const db = await startTestDatabase();
+  process.env.TEST_DATABASE_URL = db.connectionString;
 
-  process.env.DATABASE_URL =
-    `postgresql://postgres:test@localhost:${postgresContainer.getMappedPort(5432)}/testdb`;
+  // Store cleanup reference — can't use closures across processes
+  // so write to a temp file or environment variable
+  process.env.TEST_DB_PID = String(db.pid);
 }
 ```
 
 ```typescript
-// jest.globalTeardown.ts
+// src/global-teardown.ts
+import { stopTestDatabase } from './test-utils/database';
+
 export default async function globalTeardown() {
-  await postgresContainer?.stop();
+  const pid = Number(process.env.TEST_DB_PID);
+  await stopTestDatabase(pid);
+  console.log('Test database stopped.');
 }
 ```
 
-```typescript
-// jest.config.ts
-const config: Config = {
-  globalSetup: '<rootDir>/jest.globalSetup.ts',
-  globalTeardown: '<rootDir>/jest.globalTeardown.ts',
-};
-```
-
-:::caution[No Shared State Between globalSetup and Tests]
-`globalSetup` runs in a separate Node.js process. Variables set there are NOT automatically available in tests — use `process.env` to pass values, or write to a temp file.
+:::caution[globalSetup Runs in a Separate Process]
+`globalSetup` and `globalTeardown` run in a separate Node.js context from your tests. Values set on `global` or module-level variables are **not** accessible in tests. Use `process.env` to share data.
 :::
 
----
+## projects — Monorepo Multi-Project
 
-## `projects` — Monorepo and Multi-Environment Setup
-
-Run multiple Jest configurations in one command — ideal for monorepos or projects that need both jsdom and node environments:
+Run multiple Jest configurations in a single invocation. Ideal for monorepos or projects with both frontend and backend test suites.
 
 ```typescript
-// jest.config.ts (root)
+import type { Config } from 'jest';
+
 const config: Config = {
   projects: [
-    // Test frontend components with jsdom
     {
-      displayName: 'frontend',
-      testEnvironment: 'jsdom',
-      testMatch: ['<rootDir>/packages/ui/**/*.test.tsx'],
-      setupFilesAfterFramework: ['<rootDir>/jest.setup.ts'],
-      moduleNameMapper: {
-        '\\.css$': '<rootDir>/__mocks__/styleMock.ts',
-      },
-    },
-    // Test backend API with node
-    {
-      displayName: 'backend',
+      displayName: 'api',
       testEnvironment: 'node',
-      testMatch: ['<rootDir>/packages/api/**/*.test.ts'],
+      testMatch: ['<rootDir>/src/api/**/*.test.ts'],
+      preset: 'ts-jest',
     },
-    // Test shared utilities
+    {
+      displayName: 'ui',
+      testEnvironment: 'jest-environment-jsdom',
+      testMatch: ['<rootDir>/src/ui/**/*.test.tsx'],
+      preset: 'ts-jest',
+      setupFilesAfterFramework: ['<rootDir>/src/test-setup.ts'],
+    },
     {
       displayName: 'shared',
       testEnvironment: 'node',
       testMatch: ['<rootDir>/packages/shared/**/*.test.ts'],
+      preset: 'ts-jest',
     },
   ],
 };
+
+export default config;
 ```
 
----
+Run a specific project:
 
-## Performance Options
+```bash
+npx jest --selectProjects api
+npx jest --selectProjects ui shared
+```
+
+## maxWorkers and testTimeout
 
 ```typescript
-const config: Config = {
-  // Limit workers to avoid exhausting CI resources
-  maxWorkers: 2,         // fixed number
-  maxWorkers: '50%',     // percentage of available CPUs
+// maxWorkers — how many worker processes to use
+maxWorkers: 4,          // absolute number
+maxWorkers: '50%',      // 50% of available CPUs (default)
+maxWorkers: '100%',     // all CPUs (may overwhelm the system)
 
-  // Bail after N test suite failures (0 = run all)
-  bail: 1,
-
-  // Increase timeout for slow integration tests (ms)
-  testTimeout: 30_000,
-
-  // Cache transformed modules between runs
-  cache: true,
-  cacheDirectory: '<rootDir>/.jest-cache',
-
-  // Run failed tests first in watch mode
-  // (enabled by default)
-};
+// testTimeout — default timeout per test in milliseconds
+testTimeout: 5000,      // 5 seconds (default)
+testTimeout: 30000,     // 30 seconds (for integration tests)
 ```
 
----
+Override timeout for individual tests:
+
+```typescript
+it('waits for the server to start', async () => {
+  await waitForServer();
+}, 30000); // 30-second timeout for this test only
+```
 
 ## Reporters
 
 ```typescript
-const config: Config = {
-  reporters: [
-    // Default reporter (console output)
-    'default',
+reporters: [
+  'default',                          // built-in terminal reporter
 
-    // JUnit XML (for CI systems: GitHub Actions, Jenkins, GitLab)
-    ['jest-junit', {
-      outputDirectory: './test-results',
-      outputName: 'junit.xml',
-      classNameTemplate: '{classname}',
-      titleTemplate: '{title}',
-    }],
+  // JUnit XML for CI systems (Jenkins, GitHub Actions test annotations)
+  ['jest-junit', {
+    outputDirectory: 'reports',
+    outputName: 'junit.xml',
+    classNameTemplate: '{classname}',
+    titleTemplate: '{title}',
+    ancestorSeparator: ' > ',
+  }],
 
-    // HTML report
-    ['jest-html-reporter', {
-      pageTitle: 'Test Report',
-      outputPath: './test-results/report.html',
-      includeFailureMsg: true,
-    }],
-  ],
-};
+  // HTML report
+  ['jest-html-reporter', {
+    pageTitle: 'Test Report',
+    outputPath: 'reports/test-report.html',
+    includeFailureMsg: true,
+    includeConsoleLog: false,
+  }],
+],
 ```
 
----
+Install reporters:
 
-## Snapshot Serializers
+```bash
+npm install --save-dev jest-junit jest-html-reporter
+```
+
+## detectOpenHandles and forceExit
 
 ```typescript
-const config: Config = {
-  snapshotSerializers: [
-    // Prettier-formatted snapshots (more readable diffs)
-    'jest-snapshot-serializer-raw',
+// detectOpenHandles — warn about handles preventing Jest from exiting
+// Useful for debugging "Jest did not exit" issues
+detectOpenHandles: true,
 
-    // React component snapshots
-    '@emotion/jest/serializer',
-
-    // Styled-components snapshots
-    'jest-styled-components',
-  ],
-};
+// forceExit — forcefully exit after tests complete
+// Use only as a last resort — fix the actual open handles instead
+forceExit: false,
 ```
 
----
+Common causes of open handles:
+- Unclosed database connections
+- Running HTTP servers not shut down in `afterAll`
+- Pending `setInterval` calls
+- Open WebSocket connections
 
-## Debugging and Safety Options
+## snapshotSerializers
+
+Custom serializers control how values are displayed in `.snap` files:
 
 ```typescript
-const config: Config = {
-  // Print individual test names (slower for large suites)
-  verbose: false,
+snapshotSerializers: [
+  // @emotion/jest — prettier snapshots for Emotion CSS-in-JS
+  '@emotion/jest/serializer',
 
-  // Warn about tests leaving handles open (database connections, timers)
-  detectOpenHandles: true,
+  // jest-serializer-html — format HTML strings in snapshots
+  'jest-serializer-html',
 
-  // Force exit after all tests complete (use with caution — hides open handles)
-  forceExit: false,
-
-  // Randomise test order within each file
-  randomize: false,
-
-  // Show full diff for large objects (default: truncates at ~50 lines)
-  expand: false,
-};
+  // enzyme-to-json — if still using Enzyme
+  'enzyme-to-json/serializer',
+],
 ```
 
-:::tip[detectOpenHandles]
-Enable `detectOpenHandles: true` during development to find tests that leave database connections, HTTP servers, or timers open after completing. These cause Jest to hang at the end of the test run. Fix the root cause rather than using `forceExit`.
-:::
+## verbose, silent, and bail
+
+```typescript
+// verbose — show each test name as it runs (default: false)
+verbose: true,
+
+// silent — suppress all console output from tests (default: false)
+silent: false,
+
+// bail — stop after N test failures (default: 0 = run all)
+bail: 1,   // stop after the first failure
+bail: 5,   // stop after 5 failures
+```
+
+## Complete Production-Ready Configuration
+
+```typescript
+import type { Config } from 'jest';
+import { pathsToModuleNameMapper } from 'ts-jest';
+import { compilerOptions } from './tsconfig.json';
+
+const config: Config = {
+  preset: 'ts-jest',
+  testEnvironment: 'jest-environment-jsdom',
+  roots: ['<rootDir>/src'],
+
+  moduleNameMapper: {
+    ...pathsToModuleNameMapper(compilerOptions.paths ?? {}, { prefix: '<rootDir>/' }),
+    '\\.module\\.css$': 'identity-obj-proxy',
+    '\\.(css|svg|png|jpg)$': '<rootDir>/src/__mocks__/fileMock.ts',
+  },
+
+  setupFilesAfterFramework: ['<rootDir>/src/test-setup.ts'],
+
+  collectCoverageFrom: [
+    'src/**/*.{ts,tsx}',
+    '!src/**/*.d.ts',
+    '!src/**/*.test.{ts,tsx}',
+    '!src/**/*.stories.tsx',
+  ],
+
+  coverageThreshold: {
+    global: { branches: 75, functions: 85, lines: 80, statements: 80 },
+  },
+
+  clearMocks: true,
+  maxWorkers: '50%',
+  testTimeout: 10000,
+  bail: 0,
+};
+
+export default config;
+```

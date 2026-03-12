@@ -1,0 +1,468 @@
+---
+title: C++ Templates
+description: Function and class templates, specialization, variadic templates, concepts (C++20), constexpr/consteval, if constexpr, and template metaprogramming.
+sidebar:
+  order: 4
+tags: [systems, cpp, c]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# C++ Templates
+
+Templates are C++'s mechanism for generic programming. They allow writing code that works with any type satisfying certain requirements, generating specialized implementations at compile time with zero runtime overhead.
+
+## Function Templates
+
+```cpp
+#include <iostream>
+#include <string>
+#include <algorithm>
+
+// Basic function template
+template<typename T>
+T max_val(T a, T b) {
+    return a > b ? a : b;
+}
+
+// Multiple type parameters
+template<typename T, typename U>
+auto add(T a, U b) -> decltype(a + b) {   // trailing return type
+    return a + b;
+}
+// C++14+: auto add(T a, U b) { return a + b; }  // return type deduced
+
+// Non-type template parameter
+template<typename T, int N>
+T dot_product(const T (&a)[N], const T (&b)[N]) {
+    T result{};
+    for (int i = 0; i < N; i++) result += a[i] * b[i];
+    return result;
+}
+
+// Template with default argument
+template<typename T, typename Comparator = std::less<T>>
+T find_min(const T* arr, size_t n, Comparator cmp = {}) {
+    T min_val = arr[0];
+    for (size_t i = 1; i < n; i++) {
+        if (cmp(arr[i], min_val)) min_val = arr[i];
+    }
+    return min_val;
+}
+
+int main()
+{
+    std::cout << max_val(3, 7) << '\n';       // 7 (int, deduced)
+    std::cout << max_val(3.14, 2.71) << '\n'; // 3.14 (double, deduced)
+    std::cout << max_val<std::string>("apple", "banana") << '\n'; // banana (explicit)
+
+    std::cout << add(1, 2.5) << '\n';  // 3.5 (int + double → double)
+
+    int a[] = {1, 2, 3};
+    int b[] = {4, 5, 6};
+    std::cout << dot_product(a, b) << '\n';  // 32 (1*4 + 2*5 + 3*6)
+
+    double vals[] = {3.1, 1.4, 2.7, 0.5};
+    std::cout << find_min(vals, 4) << '\n';  // 0.5
+
+    return 0;
+}
+```
+
+## Class Templates
+
+```cpp
+#include <stdexcept>
+#include <initializer_list>
+
+// Fixed-size stack (class template with non-type parameter)
+template<typename T, size_t Capacity>
+class Stack {
+public:
+    Stack() : top_(0) {}
+
+    Stack(std::initializer_list<T> init) : top_(0) {
+        for (const T& val : init) push(val);
+    }
+
+    void push(const T& val) {
+        if (top_ == Capacity) throw std::overflow_error("Stack full");
+        data_[top_++] = val;
+    }
+
+    void push(T&& val) {
+        if (top_ == Capacity) throw std::overflow_error("Stack full");
+        data_[top_++] = std::move(val);
+    }
+
+    T pop() {
+        if (empty()) throw std::underflow_error("Stack empty");
+        return std::move(data_[--top_]);
+    }
+
+    [[nodiscard]] const T& top() const {
+        if (empty()) throw std::underflow_error("Stack empty");
+        return data_[top_ - 1];
+    }
+
+    [[nodiscard]] bool empty() const { return top_ == 0; }
+    [[nodiscard]] size_t size() const { return top_; }
+    [[nodiscard]] static constexpr size_t capacity() { return Capacity; }
+
+private:
+    T      data_[Capacity];
+    size_t top_;
+};
+
+// Member function defined outside class (needs template parameter list)
+template<typename T, size_t Capacity>
+std::ostream& operator<<(std::ostream& os, const Stack<T, Capacity>& s) {
+    // ...
+    return os;
+}
+```
+
+## Template Specialization
+
+```cpp
+#include <cstring>
+#include <type_traits>
+
+// Primary template
+template<typename T>
+struct Serializer {
+    static size_t size_of(const T&) { return sizeof(T); }
+    static void   serialize(void* buf, const T& val) {
+        memcpy(buf, &val, sizeof(T));
+    }
+};
+
+// Full specialization for std::string
+template<>
+struct Serializer<std::string> {
+    static size_t size_of(const std::string& s) {
+        return sizeof(uint32_t) + s.size();  // length prefix + data
+    }
+    static void serialize(void* buf, const std::string& s) {
+        uint32_t len = static_cast<uint32_t>(s.size());
+        memcpy(buf, &len, sizeof(uint32_t));
+        memcpy(static_cast<char*>(buf) + sizeof(uint32_t), s.data(), s.size());
+    }
+};
+
+// Partial specialization for pointers
+template<typename T>
+struct Serializer<T*> {
+    static size_t size_of(const T*) { return sizeof(uintptr_t); }
+    static void serialize(void* buf, const T* ptr) {
+        uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+        memcpy(buf, &addr, sizeof(addr));
+    }
+};
+
+// Partial specialization for arrays
+template<typename T, size_t N>
+struct Serializer<T[N]> {
+    static size_t size_of(const T (&arr)[N]) {
+        size_t total = 0;
+        for (const auto& el : arr) total += Serializer<T>::size_of(el);
+        return total;
+    }
+};
+```
+
+## CTAD — Class Template Argument Deduction (C++17)
+
+```cpp
+#include <vector>
+#include <pair>
+#include <array>
+
+// Before C++17: had to specify template arguments
+std::pair<int, double> p1(42, 3.14);
+std::vector<int> v1{1, 2, 3};
+
+// C++17 CTAD: compiler deduces template arguments
+auto p2 = std::pair(42, 3.14);       // std::pair<int, double>
+auto v2 = std::vector{1, 2, 3};      // std::vector<int>
+auto a  = std::array{1, 2, 3, 4};    // std::array<int, 4>
+
+// Custom deduction guides
+template<typename T>
+class MyVec {
+public:
+    MyVec(std::initializer_list<T> init);
+    template<typename InputIt>
+    MyVec(InputIt first, InputIt last);
+};
+
+// Deduction guide for iterator pair
+template<typename InputIt>
+MyVec(InputIt, InputIt) -> MyVec<typename std::iterator_traits<InputIt>::value_type>;
+
+// Usage:
+// std::vector<int> src{1,2,3};
+// MyVec v(src.begin(), src.end());   // MyVec<int> via deduction guide
+```
+
+## Variadic Templates
+
+```cpp
+#include <iostream>
+#include <tuple>
+
+// Recursive variadic template
+template<typename T>
+void print_all(T&& last) {
+    std::cout << last << '\n';
+}
+
+template<typename First, typename... Rest>
+void print_all(First&& first, Rest&&... rest) {
+    std::cout << first << ' ';
+    print_all(std::forward<Rest>(rest)...);  // recursive call
+}
+
+// sizeof... — number of elements in parameter pack
+template<typename... Args>
+constexpr size_t count_args(Args&&...) {
+    return sizeof...(Args);
+}
+
+// Fold expressions (C++17) — much cleaner than recursion
+template<typename... Ts>
+auto sum_all(Ts&&... args) {
+    return (... + args);        // unary left fold: ((a + b) + c) + d
+}
+
+template<typename... Ts>
+auto product_all(Ts&&... args) {
+    return (args * ...);        // unary right fold: a * (b * (c * d))
+}
+
+template<typename... Ts>
+void print_fold(Ts&&... args) {
+    ((std::cout << args << ' '), ...);  // comma fold — prints all
+    std::cout << '\n';
+}
+
+// Apply function to each element via fold
+template<typename F, typename... Args>
+void for_each_arg(F&& f, Args&&... args) {
+    (f(std::forward<Args>(args)), ...);
+}
+
+// Make tuple from args
+template<typename... Ts>
+auto make_record(Ts&&... args) {
+    return std::make_tuple(std::forward<Ts>(args)...);
+}
+
+int main()
+{
+    print_all(1, "hello", 3.14, true);
+    std::cout << count_args(1, 2, "three") << '\n';  // 3
+    std::cout << sum_all(1, 2, 3, 4, 5) << '\n';     // 15
+    std::cout << product_all(1, 2, 3, 4) << '\n';    // 24
+    print_fold(10, 20, 30, "end");
+
+    for_each_arg([](auto&& x){ std::cout << x << '\n'; }, 1, "two", 3.0);
+    return 0;
+}
+```
+
+## Concepts (C++20)
+
+```cpp
+#include <concepts>
+#include <type_traits>
+#include <ranges>
+#include <string>
+#include <vector>
+
+// Using predefined concepts
+template<std::integral T>
+T gcd(T a, T b) {
+    while (b) { a %= b; std::swap(a, b); }
+    return a;
+}
+
+template<std::floating_point T>
+T clamp(T val, T lo, T hi) {
+    return val < lo ? lo : (val > hi ? hi : val);
+}
+
+template<std::same_as<int> T>
+void only_int(T val) { (void)val; }
+
+// Custom concept — requires expression
+template<typename T>
+concept Printable = requires(T t) {
+    { std::cout << t };          // expression must be valid
+};
+
+template<typename T>
+concept Container = requires(T c) {
+    typename T::value_type;      // associated type must exist
+    { c.begin() } -> std::input_or_output_iterator;
+    { c.end()   } -> std::input_or_output_iterator;
+    { c.size()  } -> std::convertible_to<size_t>;
+};
+
+template<typename T>
+concept Hashable = requires(T t) {
+    { std::hash<T>{}(t) } -> std::convertible_to<size_t>;
+};
+
+template<typename T>
+concept Arithmetic = std::integral<T> || std::floating_point<T>;
+
+// Concept in requires clause
+template<typename T>
+    requires Container<T> && Printable<typename T::value_type>
+void print_container(const T& c) {
+    for (const auto& el : c) std::cout << el << ' ';
+    std::cout << '\n';
+}
+
+// Abbreviated function template syntax (C++20)
+void print_if_printable(Printable auto val) {
+    std::cout << val << '\n';
+}
+
+int main()
+{
+    std::cout << gcd(48, 18) << '\n';         // 6
+    std::cout << clamp(1.5, 0.0, 1.0) << '\n'; // 1.0
+
+    std::vector<int> v{1, 2, 3, 4};
+    print_container(v);
+
+    print_if_printable(42);
+    print_if_printable(std::string{"hello"});
+    // print_if_printable(std::vector<int>{});  // ERROR: vector not Printable
+
+    return 0;
+}
+```
+
+## constexpr, consteval, constinit (C++20)
+
+```cpp
+#include <array>
+
+// constexpr — can be evaluated at compile time OR runtime
+constexpr int factorial(int n) {
+    return n <= 1 ? 1 : n * factorial(n - 1);
+}
+
+constexpr double pi = 3.14159265358979323846;
+constexpr int LOOKUP_SIZE = factorial(6);   // 720, computed at compile time
+
+// Compile-time array
+constexpr auto make_squares() {
+    std::array<int, 10> arr{};
+    for (int i = 0; i < 10; i++) arr[i] = i * i;
+    return arr;
+}
+constexpr auto SQUARES = make_squares();   // all at compile time
+
+// consteval (C++20) — MUST be evaluated at compile time; error if called at runtime
+consteval int must_be_compile_time(int n) {
+    return n * n;
+}
+// consteval int x = must_be_compile_time(5);  // OK: 25 at compile time
+// int y = 5; int z = must_be_compile_time(y); // ERROR: y not constant
+
+// constinit (C++20) — variable must be constant-initialized (but can be mutated)
+constinit int global = factorial(5);   // initialized at compile time (120)
+// global can still be modified at runtime unlike constexpr
+
+// if constexpr (C++17) — compile-time branch selection
+template<typename T>
+auto to_string_impl(T val) {
+    if constexpr (std::is_same_v<T, bool>) {
+        return val ? "true" : "false";
+    } else if constexpr (std::is_integral_v<T>) {
+        return std::to_string(val);
+    } else if constexpr (std::is_floating_point_v<T>) {
+        return std::to_string(val);
+    } else {
+        return std::string(val);  // assume string-constructible
+    }
+    // Only the matching branch is compiled!
+}
+
+int main()
+{
+    static_assert(factorial(5) == 120, "factorial failed");
+    static_assert(SQUARES[4] == 16, "squares failed");
+
+    std::cout << LOOKUP_SIZE << '\n';    // 720
+    std::cout << SQUARES[9] << '\n';    // 81
+
+    std::cout << to_string_impl(true)  << '\n';  // true
+    std::cout << to_string_impl(42)    << '\n';  // 42
+    std::cout << to_string_impl(3.14)  << '\n';  // 3.140000
+
+    return 0;
+}
+```
+
+## Template Metaprogramming and Type Traits
+
+```cpp
+#include <type_traits>
+
+// Type traits (from <type_traits>)
+static_assert(std::is_integral_v<int>);
+static_assert(std::is_floating_point_v<double>);
+static_assert(!std::is_pointer_v<int>);
+static_assert(std::is_same_v<int, int>);
+static_assert(!std::is_same_v<int, long>);
+
+// Type transformations
+using T1 = std::remove_reference_t<int&>;      // int
+using T2 = std::remove_const_t<const int>;     // int
+using T3 = std::remove_cv_t<const volatile int>; // int
+using T4 = std::decay_t<int[5]>;               // int*
+using T5 = std::add_pointer_t<int>;            // int*
+using T6 = std::conditional_t<true, int, double>; // int
+
+// std::enable_if — SFINAE (Substitution Failure Is Not An Error)
+// Only enabled when T is integral
+template<typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
+T double_if_int(T val) { return val * 2; }
+
+// C++20 equivalent with concepts (much cleaner)
+template<std::integral T>
+T double_if_int_c20(T val) { return val * 2; }
+
+// std::void_t — detect presence of member types/functions
+template<typename T, typename = void>
+struct has_begin : std::false_type {};
+
+template<typename T>
+struct has_begin<T, std::void_t<decltype(std::declval<T>().begin())>>
+    : std::true_type {};
+
+static_assert( has_begin<std::vector<int>>::value);
+static_assert(!has_begin<int>::value);
+
+// Custom type trait
+template<typename T>
+struct is_std_vector : std::false_type {};
+
+template<typename T, typename Alloc>
+struct is_std_vector<std::vector<T, Alloc>> : std::true_type {};
+
+template<typename T>
+inline constexpr bool is_std_vector_v = is_std_vector<T>::value;
+
+static_assert( is_std_vector_v<std::vector<int>>);
+static_assert(!is_std_vector_v<std::list<int>>);
+```
+
+:::tip[Prefer Concepts over SFINAE]
+In C++20, use **concepts** instead of `std::enable_if` and `std::void_t` wherever possible. Concepts produce vastly clearer error messages and are easier to read and compose.
+:::

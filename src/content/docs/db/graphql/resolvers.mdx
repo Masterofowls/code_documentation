@@ -1,0 +1,525 @@
+---
+title: GraphQL Resolvers
+description: Resolver signature, resolver chains, context, N+1 problem, DataLoader, error handling, custom scalars, abstract types, and subscription resolvers.
+sidebar:
+  order: 4
+tags: [database, api]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# GraphQL Resolvers
+
+Resolvers are the functions that fulfill GraphQL queries. Every field in a GraphQL schema has a resolver — either one you write or a default one.
+
+## Resolver Signature
+
+Every resolver function receives four arguments:
+
+```javascript
+const resolvers = {
+  Query: {
+    // (parent, args, context, info)
+    user: async (parent, args, context, info) => {
+      // parent  — result from the parent resolver (null for root Query fields)
+      // args    — arguments provided to this field in the query
+      // context — shared object across all resolvers in a request (user, db, etc.)
+      // info    — AST and schema information about the current query
+
+      const { id } = args;
+      const { dataSources, currentUser } = context;
+
+      if (!currentUser) throw new Error('Not authenticated');
+
+      return dataSources.usersAPI.getUserById(id);
+    },
+  },
+};
+```
+
+### The `info` Object
+
+```javascript
+const resolver = (parent, args, context, info) => {
+  // info contains:
+  // info.fieldName         — name of the current field
+  // info.returnType        — GraphQL type this resolver returns
+  // info.parentType        — type containing this field
+  // info.schema            — entire schema object
+  // info.fieldNodes        — AST nodes for this field
+  // info.fragments         — fragment definitions in the query
+  // info.rootValue         — value passed as rootValue to execute()
+  // info.operation         — the full operation AST
+  // info.variableValues    — variables passed to the operation
+  // info.path              — path from root to this resolver (for error tracking)
+
+  console.log(info.fieldName);        // e.g., "user"
+  console.log(info.path.key);         // e.g., "user"
+  console.log(String(info.returnType)); // e.g., "User"
+};
+```
+
+## Resolver Chain
+
+Resolvers form a chain — each resolver's return value becomes the `parent` for child resolvers.
+
+```javascript
+const typeDefs = `#graphql
+  type Query {
+    post(id: ID!): Post
+  }
+
+  type Post {
+    id: ID!
+    title: String!
+    author: User!      # This field needs a resolver
+    comments: [Comment!]!
+  }
+
+  type User {
+    id: ID!
+    name: String!
+    email: String!
+    postsCount: Int!   # Computed field
+  }
+`;
+
+const resolvers = {
+  Query: {
+    // parent = null (root query field)
+    post: async (_, { id }, { db }) => {
+      return db.posts.findById(id);
+      // Returns: { id: '1', title: 'Hello', authorId: '42', ... }
+    },
+  },
+
+  Post: {
+    // parent = { id: '1', title: 'Hello', authorId: '42', ... }
+    author: async (post, _, { db }) => {
+      // post.authorId is available because the parent resolver returned it
+      return db.users.findById(post.authorId);
+    },
+
+    comments: async (post, _, { db }) => {
+      return db.comments.findByPostId(post.id);
+    },
+  },
+
+  User: {
+    // Computed field — parent is the user object
+    postsCount: async (user, _, { db }) => {
+      return db.posts.countByAuthorId(user.id);
+    },
+  },
+};
+```
+
+## Default Resolvers
+
+If you don't define a resolver for a field, GraphQL uses a default resolver that:
+1. Looks for a property with the same name as the field on the parent object
+2. Returns `undefined` (treated as `null`) if not found
+
+```javascript
+// If your User object has { id, name, email } matching the schema fields,
+// you don't need to define resolvers for those fields:
+
+const resolvers = {
+  User: {
+    // These are NOT needed if the user object has matching property names:
+    // id: (user) => user.id,
+    // name: (user) => user.name,
+    // email: (user) => user.email,
+
+    // These ARE needed (computed or differently-named):
+    postsCount: (user, _, { db }) => db.posts.countByAuthorId(user.id),
+    displayName: (user) => `${user.firstName} ${user.lastName}`,
+  },
+};
+
+// Resolver aliasing — when database column names differ from schema field names
+const resolvers = {
+  User: {
+    // Schema has 'name', but DB returns 'full_name'
+    name: (user) => user.full_name,
+    // Schema has 'createdAt', DB returns 'created_at'
+    createdAt: (user) => user.created_at,
+  },
+};
+```
+
+## The Context Object
+
+Context is created once per request and passed to every resolver. Use it to share auth state, database connections, and data sources.
+
+```javascript
+import { ApolloServer } from '@apollo/server';
+import { startStandaloneServer } from '@apollo/server/standalone';
+import { verifyToken } from './auth.js';
+import { UserAPI, PostAPI } from './datasources/index.js';
+import { db } from './database.js';
+
+const server = new ApolloServer({ typeDefs, resolvers });
+
+const { url } = await startStandaloneServer(server, {
+  context: async ({ req }) => {
+    // Extract auth token from header
+    const token = req.headers.authorization?.replace('Bearer ', '') ?? '';
+
+    let currentUser = null;
+    try {
+      currentUser = token ? await verifyToken(token) : null;
+    } catch {
+      // Token is invalid or expired — currentUser remains null
+    }
+
+    return {
+      // Authentication state
+      currentUser,
+      isAdmin: currentUser?.role === 'ADMIN',
+
+      // Data sources (per-request instances with built-in caching)
+      dataSources: {
+        users: new UserAPI({ db }),
+        posts: new PostAPI({ db }),
+      },
+
+      // Direct database access
+      db,
+
+      // Request info
+      requestId: req.headers['x-request-id'] ?? crypto.randomUUID(),
+      userAgent: req.headers['user-agent'],
+    };
+  },
+});
+```
+
+## The N+1 Problem
+
+The most common GraphQL performance issue. Fetching a list of items and then making one database query per item.
+
+```javascript
+// ❌ N+1 Problem
+const resolvers = {
+  Query: {
+    posts: async (_, __, { db }) => {
+      return db.posts.findAll();  // 1 query: SELECT * FROM posts
+    },
+  },
+  Post: {
+    author: async (post, _, { db }) => {
+      // Called once per post — 100 posts = 100 queries!
+      return db.users.findById(post.authorId);  // SELECT * FROM users WHERE id = ?
+    },
+  },
+};
+
+// If 100 posts are returned:
+// 1 query for posts + 100 queries for authors = 101 queries!
+```
+
+## DataLoader — Solving N+1
+
+DataLoader batches and caches calls within a single request tick.
+
+```bash
+npm install dataloader
+```
+
+```javascript
+import DataLoader from 'dataloader';
+
+// The batch function receives an array of keys and returns a Promise of values
+// Keys and values MUST be in the same order
+const createUserLoader = (db) => new DataLoader(
+  async (userIds) => {
+    // Single query for all users at once
+    const users = await db.users.findByIds(userIds);
+
+    // Must return values in same order as keys
+    const userMap = new Map(users.map(u => [String(u.id), u]));
+    return userIds.map(id => userMap.get(String(id)) ?? null);
+  },
+  {
+    // Options
+    maxBatchSize: 100,     // Max keys per batch
+    cache: true,           // Cache results within the request (default: true)
+    cacheKeyFn: String,    // Normalize keys for cache comparison
+  }
+);
+
+// Create loaders in context (new instance per request!)
+const context = async ({ req }) => ({
+  currentUser: await getCurrentUser(req),
+  db,
+  loaders: {
+    user: createUserLoader(db),
+    post: createPostLoader(db),
+    comment: createCommentLoader(db),
+  },
+});
+
+// Use loaders in resolvers
+const resolvers = {
+  Post: {
+    // ✅ With DataLoader: 100 posts → 1 query (batched)
+    author: async (post, _, { loaders }) => {
+      return loaders.user.load(post.authorId);  // Batched automatically!
+    },
+  },
+};
+
+// Advanced DataLoader patterns
+const createPostsByAuthorLoader = (db) => new DataLoader(
+  async (authorIds) => {
+    const posts = await db.posts.findByAuthorIds(authorIds);
+    // Group posts by authorId
+    const grouped = authorIds.map(id =>
+      posts.filter(p => String(p.authorId) === String(id))
+    );
+    return grouped;
+  }
+);
+```
+
+:::tip[DataLoader Must Be Created Per Request]
+Create a new DataLoader instance in the context function for each request. If you reuse the same instance across requests, the cache can return stale data from previous requests.
+:::
+
+## Error Handling
+
+```javascript
+import { GraphQLError } from 'graphql';
+import { ApolloServerErrorCode } from '@apollo/server/errors';
+
+const resolvers = {
+  Query: {
+    user: async (_, { id }, { currentUser, db }) => {
+      // Authentication error
+      if (!currentUser) {
+        throw new GraphQLError('You must be logged in', {
+          extensions: {
+            code: 'UNAUTHENTICATED',
+            http: { status: 401 },
+          },
+        });
+      }
+
+      // Authorization error
+      if (currentUser.id !== id && currentUser.role !== 'ADMIN') {
+        throw new GraphQLError('You can only view your own profile', {
+          extensions: {
+            code: 'FORBIDDEN',
+            http: { status: 403 },
+          },
+        });
+      }
+
+      const user = await db.users.findById(id);
+
+      // Not found
+      if (!user) {
+        throw new GraphQLError(`User with id ${id} not found`, {
+          extensions: {
+            code: 'NOT_FOUND',
+            http: { status: 404 },
+          },
+        });
+      }
+
+      return user;
+    },
+
+    users: async (_, { filter }, { db }) => {
+      // Validation error
+      if (filter?.limit && filter.limit > 100) {
+        throw new GraphQLError('Maximum limit is 100', {
+          extensions: {
+            code: ApolloServerErrorCode.BAD_USER_INPUT,
+            field: 'filter.limit',
+          },
+        });
+      }
+      return db.users.findAll(filter);
+    },
+  },
+
+  Mutation: {
+    createUser: async (_, { input }, { db }) => {
+      try {
+        return await db.users.create(input);
+      } catch (error) {
+        if (error.code === 'DUPLICATE_KEY') {
+          throw new GraphQLError('Email already registered', {
+            extensions: {
+              code: 'CONFLICT',
+              field: 'email',
+              http: { status: 409 },
+            },
+          });
+        }
+        // Unexpected error — don't expose internal details to clients
+        console.error('Unexpected error in createUser:', error);
+        throw new GraphQLError('An unexpected error occurred', {
+          extensions: { code: 'INTERNAL_SERVER_ERROR' },
+        });
+      }
+    },
+  },
+};
+```
+
+## Abstract Type Resolvers
+
+```javascript
+// __resolveType for unions and interfaces
+const resolvers = {
+  // Union resolver
+  SearchResult: {
+    __resolveType(obj) {
+      // Use discriminator fields to determine the type
+      if (obj.__typename) return obj.__typename;       // Explicit type
+      if (obj.isbn !== undefined) return 'Book';
+      if (obj.duration !== undefined) return 'Video';
+      if (obj.price !== undefined) return 'Product';
+      return null;
+    },
+  },
+
+  // Interface resolver
+  Node: {
+    __resolveType(obj) {
+      // By convention, store __typename in the DB object
+      return obj.__typename ?? null;
+    },
+  },
+
+  // isTypeOf alternative (define on the type itself)
+  Book: {
+    __isTypeOf(obj) {
+      return obj.isbn !== undefined;
+    },
+  },
+};
+```
+
+## Subscription Resolvers
+
+```javascript
+import { PubSub } from 'graphql-subscriptions';
+
+const pubsub = new PubSub();
+
+const resolvers = {
+  Mutation: {
+    sendMessage: async (_, { channelId, text }, { currentUser, db }) => {
+      const message = await db.messages.create({
+        channelId,
+        text,
+        userId: currentUser.id,
+        createdAt: new Date(),
+      });
+
+      // Publish to subscribers
+      await pubsub.publish(`CHANNEL_MESSAGE_${channelId}`, {
+        messageAdded: message,
+      });
+
+      return message;
+    },
+  },
+
+  Subscription: {
+    messageAdded: {
+      // subscribe: returns an async iterator
+      subscribe: async (_, { channelId }, { currentUser }) => {
+        if (!currentUser) throw new GraphQLError('Not authenticated', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+        return pubsub.asyncIterator([`CHANNEL_MESSAGE_${channelId}`]);
+      },
+
+      // resolve: optional — transform the published payload
+      resolve: (payload) => payload.messageAdded,
+    },
+
+    // Subscription with async generator
+    stockPrice: {
+      subscribe: async function* (_, { symbol }) {
+        while (true) {
+          const price = await fetchStockPrice(symbol);
+          yield { stockPrice: { symbol, price, timestamp: new Date() } };
+          await new Promise(resolve => setTimeout(resolve, 5000)); // Poll every 5s
+        }
+      },
+    },
+  },
+};
+```
+
+## Resolver Performance Patterns
+
+```javascript
+// Query complexity and depth limiting
+import depthLimit from 'graphql-depth-limit';
+import { createComplexityLimitRule } from 'graphql-validation-complexity';
+
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  validationRules: [
+    depthLimit(10),  // Max query depth of 10 levels
+    createComplexityLimitRule(1000, {
+      // Assign complexity scores to types
+      scalarCost: 1,
+      objectCost: 2,
+      listFactor: 10,
+    }),
+  ],
+});
+
+// Field-level authorization in resolvers
+const resolvers = {
+  User: {
+    email: (user, _, { currentUser }) => {
+      // Only return email if the viewer is the user or an admin
+      if (currentUser?.id === user.id || currentUser?.role === 'ADMIN') {
+        return user.email;
+      }
+      return null; // Or throw GraphQLError('Forbidden')
+    },
+
+    salary: (user, _, { currentUser }) => {
+      if (currentUser?.role !== 'ADMIN' && currentUser?.id !== user.managerId) {
+        throw new GraphQLError('Insufficient permissions to view salary', {
+          extensions: { code: 'FORBIDDEN' },
+        });
+      }
+      return user.salary;
+    },
+  },
+};
+
+// Resolver timing middleware
+const fieldTimingPlugin = {
+  requestDidStart() {
+    return {
+      executionDidStart() {
+        return {
+          willResolveField({ info }) {
+            const start = process.hrtime.bigint();
+            return () => {
+              const end = process.hrtime.bigint();
+              const duration = Number(end - start) / 1e6; // ms
+              if (duration > 100) {
+                console.warn(`Slow resolver: ${info.parentType}.${info.fieldName} (${duration.toFixed(2)}ms)`);
+              }
+            };
+          },
+        };
+      },
+    };
+  },
+};
+```

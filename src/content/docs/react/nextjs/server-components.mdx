@@ -1,0 +1,463 @@
+---
+title: Server Components
+description: Deep dive into React Server Components — understand the server/client boundary, when to use client components, composition patterns, accessing headers and cookies, and third-party library wrapping.
+sidebar:
+  order: 6
+tags: [react, javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+React Server Components (RSC) represent the most significant evolution in React since Hooks. Understanding how they work — and where the server/client boundary sits — is essential for building efficient Next.js applications.
+
+## What Are Server Components?
+
+Server Components render on the server and send HTML (or a serialized React tree) to the client. They have zero impact on the client JavaScript bundle.
+
+**Server Components can:**
+- Access the filesystem directly
+- Query databases without an API layer
+- Use server-only secrets (API keys, connection strings)
+- Import large libraries without affecting bundle size
+- Be async (top-level `await`)
+
+**Server Components cannot:**
+- Use `useState`, `useReducer`, `useEffect`, or other hooks
+- Use browser APIs (`window`, `document`, `localStorage`)
+- Use event handlers (`onClick`, `onChange`)
+- Use Context (as a provider — they can access server-only context)
+
+```tsx
+// Server Component — no 'use client' directive needed
+// This is the default in the App Router
+import { db } from '@/lib/db';
+import { readFileSync } from 'fs';
+
+export default async function ServerExample() {
+  // ✅ Direct database access
+  const users = await db.user.findMany({ take: 5 });
+
+  // ✅ File system access
+  const config = JSON.parse(readFileSync('./config.json', 'utf-8'));
+
+  // ✅ Large library — doesn't affect client bundle
+  const { marked } = await import('marked');
+  const html = marked('# Hello World');
+
+  return (
+    <div>
+      <div dangerouslySetInnerHTML={{ __html: html }} />
+      {users.map(u => <p key={u.id}>{u.name}</p>)}
+    </div>
+  );
+}
+```
+
+## The 'use client' Directive
+
+Adding `'use client'` at the top of a file declares it as a Client Component — everything in that file (and its imports) runs in the browser.
+
+```tsx
+// components/Counter.tsx
+'use client';
+
+import { useState } from 'react';
+
+export function Counter({ initialCount = 0 }: { initialCount?: number }) {
+  const [count, setCount] = useState(initialCount);
+
+  return (
+    <div>
+      <p>Count: {count}</p>
+      <button onClick={() => setCount(c => c + 1)}>+</button>
+      <button onClick={() => setCount(c => c - 1)}>-</button>
+    </div>
+  );
+}
+```
+
+:::tip[Client Boundary Propagation]
+The 'use client' boundary is a network boundary. Once a file is marked as a client component, all components imported by it are also treated as client components. Keep client components as leaf nodes in the tree to minimize client bundle size.
+:::
+
+## Server vs Client: Decision Guide
+
+| Situation | Use |
+|---|---|
+| Fetch data from DB/API | Server Component |
+| Access environment variables (secrets) | Server Component |
+| Large dependencies (charts, markdown parsers) | Server Component |
+| Static content / layouts | Server Component |
+| `useState` or `useReducer` | Client Component |
+| `useEffect` | Client Component |
+| Event handlers (`onClick`, `onChange`) | Client Component |
+| Browser APIs (`window`, `navigator`, `localStorage`) | Client Component |
+| Custom hooks using state | Client Component |
+| Real-time data (WebSockets) | Client Component |
+| Third-party UI components | Client Component (usually) |
+
+## Composition Patterns
+
+The key insight: **Server Components can pass Server Components as props/children to Client Components.** This allows you to keep data-fetching logic on the server while still using interactive Client Components.
+
+### Children Pattern (Most Common)
+
+```tsx
+// components/InteractiveShell.tsx — Client Component
+'use client';
+import { useState } from 'react';
+
+export function Accordion({ title, children }: {
+  title: string;
+  children: React.ReactNode; // children can be Server Components!
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  return (
+    <div>
+      <button onClick={() => setIsOpen(o => !o)}>{title}</button>
+      {isOpen && <div>{children}</div>}
+    </div>
+  );
+}
+```
+
+```tsx
+// app/faq/page.tsx — Server Component
+import { Accordion } from '@/components/InteractiveShell';
+import { db } from '@/lib/db';
+
+export default async function FaqPage() {
+  const faqs = await db.faq.findMany();
+  return (
+    <div>
+      {faqs.map(faq => (
+        <Accordion key={faq.id} title={faq.question}>
+          {/* This is rendered on the server and passed as children */}
+          <p>{faq.answer}</p>
+          <RelatedLinks faqId={faq.id} /> {/* Also a Server Component */}
+        </Accordion>
+      ))}
+    </div>
+  );
+}
+```
+
+### Props Pattern
+
+```tsx
+// components/Chart.tsx — Client Component (needs browser APIs)
+'use client';
+import { LineChart, Line, XAxis, YAxis } from 'recharts';
+
+interface ChartProps {
+  data: { date: string; value: number }[];
+}
+
+export function RevenueChart({ data }: ChartProps) {
+  return (
+    <LineChart width={600} height={300} data={data}>
+      <Line type="monotone" dataKey="value" stroke="#007AFF" />
+      <XAxis dataKey="date" />
+      <YAxis />
+    </LineChart>
+  );
+}
+```
+
+```tsx
+// app/dashboard/page.tsx — Server Component fetches data, passes to client
+import { RevenueChart } from '@/components/Chart';
+import { db } from '@/lib/db';
+
+export default async function DashboardPage() {
+  // Fetched on server — API key never exposed to client
+  const revenueData = await db.revenue.findMany({
+    orderBy: { date: 'asc' },
+    select: { date: true, value: true },
+  });
+
+  // Only the serialized data is sent to the client, not the DB logic
+  return <RevenueChart data={revenueData} />;
+}
+```
+
+:::caution[Non-Serializable Props]
+You cannot pass functions, class instances, or other non-serializable values as props from Server Components to Client Components. Only JSON-serializable data (strings, numbers, arrays, plain objects) can cross the boundary.
+:::
+
+## Async Server Components
+
+Server Components can be fully async. You can `await` at the top level:
+
+```tsx
+// app/profile/[username]/page.tsx
+import { notFound } from 'next/navigation';
+
+export default async function ProfilePage({
+  params,
+}: {
+  params: Promise<{ username: string }>;
+}) {
+  const { username } = await params;
+
+  // Multiple sequential awaits (use Promise.all for parallel)
+  const user = await db.user.findUnique({
+    where: { username },
+    include: { profile: true },
+  });
+
+  if (!user) notFound();
+
+  const [posts, followers] = await Promise.all([
+    db.post.findMany({ where: { authorId: user.id }, take: 10 }),
+    db.follow.count({ where: { followingId: user.id } }),
+  ]);
+
+  return (
+    <div>
+      <ProfileHeader user={user} followerCount={followers} />
+      <PostGrid posts={posts} />
+    </div>
+  );
+}
+```
+
+## Accessing Headers and Cookies
+
+Use `next/headers` in Server Components to read HTTP request data:
+
+```typescript
+// lib/auth.ts
+import { cookies, headers } from 'next/headers';
+import { jwtVerify } from 'jose';
+
+export async function getSession() {
+  const cookieStore = await cookies();
+  const headerStore = await headers();
+
+  // Read a cookie
+  const token = cookieStore.get('auth-token')?.value;
+
+  // Read a header
+  const userAgent = headerStore.get('user-agent');
+  const ip = headerStore.get('x-forwarded-for') ?? '127.0.0.1';
+
+  if (!token) return null;
+
+  try {
+    const { payload } = await jwtVerify(
+      token,
+      new TextEncoder().encode(process.env.JWT_SECRET)
+    );
+    return payload as { userId: string; email: string };
+  } catch {
+    return null;
+  }
+}
+```
+
+```tsx
+// app/dashboard/layout.tsx
+import { redirect } from 'next/navigation';
+import { getSession } from '@/lib/auth';
+
+export default async function DashboardLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  const session = await getSession();
+  if (!session) redirect('/login');
+
+  return (
+    <div className="flex h-screen">
+      <Sidebar userId={session.userId} />
+      <main className="flex-1 overflow-auto">{children}</main>
+    </div>
+  );
+}
+```
+
+### Setting Cookies in Server Actions
+
+```typescript
+'use server';
+import { cookies } from 'next/headers';
+
+export async function login(formData: FormData) {
+  const session = await authenticateUser(
+    formData.get('email') as string,
+    formData.get('password') as string
+  );
+
+  const cookieStore = await cookies();
+  cookieStore.set('auth-token', session.token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: 60 * 60 * 24 * 7, // 1 week
+    path: '/',
+  });
+}
+```
+
+## draftMode
+
+Draft mode bypasses static generation to show draft content from a CMS:
+
+```typescript
+// app/api/draft/route.ts
+import { draftMode } from 'next/headers';
+import { NextRequest, NextResponse } from 'next/server';
+
+export async function GET(request: NextRequest) {
+  const searchParams = request.nextUrl.searchParams;
+  const secret = searchParams.get('secret');
+  const slug = searchParams.get('slug');
+
+  if (secret !== process.env.DRAFT_SECRET || !slug) {
+    return NextResponse.json({ message: 'Invalid token' }, { status: 401 });
+  }
+
+  const draft = await draftMode();
+  draft.enable();
+
+  return NextResponse.redirect(new URL(`/blog/${slug}`, request.url));
+}
+```
+
+```tsx
+// app/blog/[slug]/page.tsx
+import { draftMode } from 'next/headers';
+
+export default async function BlogPost({ params }: Props) {
+  const { slug } = await params;
+  const { isEnabled } = await draftMode();
+
+  const post = await getPost(slug, { preview: isEnabled });
+
+  return (
+    <>
+      {isEnabled && (
+        <div className="bg-yellow-100 p-2 text-sm">
+          Preview Mode — <a href="/api/draft/disable">Disable</a>
+        </div>
+      )}
+      <Article post={post} />
+    </>
+  );
+}
+```
+
+## Context in App Router
+
+React Context providers must be Client Components, but they can wrap Server Components as children:
+
+```tsx
+// components/providers/ThemeProvider.tsx
+'use client';
+import { createContext, useContext, useState } from 'react';
+
+type Theme = 'light' | 'dark';
+
+const ThemeContext = createContext<{
+  theme: Theme;
+  toggle: () => void;
+}>({ theme: 'light', toggle: () => {} });
+
+export function ThemeProvider({ children }: { children: React.ReactNode }) {
+  const [theme, setTheme] = useState<Theme>('light');
+  return (
+    <ThemeContext.Provider value={{ theme, toggle: () => setTheme(t => t === 'light' ? 'dark' : 'light') }}>
+      <div data-theme={theme}>{children}</div>
+    </ThemeContext.Provider>
+  );
+}
+
+export const useTheme = () => useContext(ThemeContext);
+```
+
+```tsx
+// app/layout.tsx — Server Component wrapping a Client Provider
+import { ThemeProvider } from '@/components/providers/ThemeProvider';
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body>
+        <ThemeProvider>
+          {children} {/* children can be Server Components */}
+        </ThemeProvider>
+      </body>
+    </html>
+  );
+}
+```
+
+## Wrapping Third-Party Libraries
+
+Many third-party libraries aren't yet compatible with Server Components (they use `useState`, `useEffect`, etc. without `'use client'`). Wrap them:
+
+```tsx
+// components/wrappers/ToastProvider.tsx
+'use client';
+import { Toaster } from 'sonner'; // Uses browser APIs internally
+
+export function ToastProvider() {
+  return <Toaster position="top-right" richColors />;
+}
+```
+
+```tsx
+// components/wrappers/MotionDiv.tsx
+'use client';
+import { motion } from 'framer-motion';
+
+// Re-export with client boundary — now safe to use anywhere
+export const MotionDiv = motion.div;
+export const MotionSection = motion.section;
+```
+
+```tsx
+// app/layout.tsx — cleanly add third-party client providers
+import { ToastProvider } from '@/components/wrappers/ToastProvider';
+import { QueryProvider } from '@/components/providers/QueryProvider';
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html>
+      <body>
+        <QueryProvider>
+          {children}
+          <ToastProvider />
+        </QueryProvider>
+      </body>
+    </html>
+  );
+}
+```
+
+## Server-Only Utilities
+
+Prevent accidentally importing server-only code (database clients, secrets) into Client Components:
+
+```bash
+npm install server-only
+```
+
+```typescript
+// lib/db.ts
+import 'server-only'; // Throws at build time if imported in a client component
+
+import { PrismaClient } from '@prisma/client';
+
+const globalForPrisma = globalThis as unknown as { prisma: PrismaClient };
+
+export const db =
+  globalForPrisma.prisma ??
+  new PrismaClient({
+    log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
+  });
+
+if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = db;
+```

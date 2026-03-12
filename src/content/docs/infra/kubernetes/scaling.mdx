@@ -1,0 +1,559 @@
+---
+title: Scaling in Kubernetes
+description: Horizontal Pod Autoscaler, Vertical Pod Autoscaler, KEDA, Cluster Autoscaler, PodDisruptionBudgets, affinity, taints, TopologySpreadConstraints, and resource quotas.
+sidebar:
+  order: 7
+tags: [devops, kubernetes]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Scaling in Kubernetes
+
+Kubernetes provides multiple layers of scaling — from individual Pod replicas to entire node pools. Understanding when and how to use each mechanism is key to building resilient, cost-efficient systems.
+
+---
+
+## Manual Scaling
+
+```bash
+# Scale a Deployment
+kubectl scale deployment my-app --replicas=5
+
+# Scale a StatefulSet
+kubectl scale statefulset postgres --replicas=3
+
+# Scale using a manifest
+kubectl apply -f deployment.yaml  # Update replicas in spec
+
+# Verify scaling
+kubectl get deployment my-app
+kubectl rollout status deployment/my-app
+```
+
+---
+
+## Horizontal Pod Autoscaler (HPA)
+
+HPA automatically scales the number of Pod replicas based on observed CPU, memory, or custom metrics.
+
+### metrics-server Installation
+
+HPA requires `metrics-server` for CPU/memory metrics.
+
+```bash
+# Install metrics-server
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+
+# Verify
+kubectl top nodes
+kubectl top pods
+```
+
+### Basic HPA (CPU)
+
+```bash
+# Create HPA imperatively
+kubectl autoscale deployment my-app \
+  --min=2 \
+  --max=10 \
+  --cpu-percent=70
+```
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: my-app-hpa
+  namespace: production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: my-app
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70     # 70% of requested CPU
+
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+```
+
+### HPA with Custom Metrics
+
+```yaml
+spec:
+  metrics:
+    # Custom metric from Prometheus Adapter
+    - type: Pods
+      pods:
+        metric:
+          name: http_requests_per_second
+        target:
+          type: AverageValue
+          averageValue: "1k"         # 1000 req/s per pod
+
+    # External metric (e.g., SQS queue depth)
+    - type: External
+      external:
+        metric:
+          name: sqs_messages_visible
+          selector:
+            matchLabels:
+              queue: my-queue
+        target:
+          type: AverageValue
+          averageValue: "30"         # 30 messages per pod
+```
+
+### HPA Scaling Behavior
+
+```yaml
+spec:
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0   # Scale up immediately
+      policies:
+        - type: Percent
+          value: 100                  # Double replicas in one step if needed
+          periodSeconds: 15
+        - type: Pods
+          value: 4                    # Add at most 4 pods per 15 seconds
+          periodSeconds: 15
+      selectPolicy: Max               # Use the policy that allows the most scaling
+
+    scaleDown:
+      stabilizationWindowSeconds: 300  # Wait 5 minutes before scaling down
+      policies:
+        - type: Percent
+          value: 10                   # Remove at most 10% per minute
+          periodSeconds: 60
+      selectPolicy: Min               # Use the policy that allows the least scaling
+```
+
+```bash
+# Check HPA status
+kubectl get hpa
+kubectl describe hpa my-app-hpa
+```
+
+:::tip[HPA prerequisite]
+Pods must have `resources.requests.cpu` set for CPU-based HPA to work. HPA calculates utilization as current usage / requested CPU. Without requests, HPA can't calculate a percentage.
+:::
+
+---
+
+## Vertical Pod Autoscaler (VPA)
+
+VPA automatically adjusts the CPU and memory requests/limits for containers based on observed usage. Unlike HPA, it changes resource requests rather than replica count.
+
+```bash
+# Install VPA
+git clone https://github.com/kubernetes/autoscaler.git
+cd autoscaler/vertical-pod-autoscaler
+./hack/vpa-install.sh
+```
+
+```yaml
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: my-app-vpa
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: my-app
+  updatePolicy:
+    updateMode: "Auto"             # Off | Initial | Recreate | Auto
+  resourcePolicy:
+    containerPolicies:
+      - containerName: app
+        minAllowed:
+          cpu: 50m
+          memory: 64Mi
+        maxAllowed:
+          cpu: "2"
+          memory: 2Gi
+        controlledResources: ["cpu", "memory"]
+```
+
+| Mode | Behavior |
+|---|---|
+| `Off` | Only recommends; doesn't apply changes |
+| `Initial` | Applies recommendations only for new Pods |
+| `Recreate` | Recreates Pods with new recommendations when needed |
+| `Auto` | Uses `Recreate` currently; may use in-place updates in future |
+
+```bash
+# Check VPA recommendations
+kubectl describe vpa my-app-vpa
+kubectl get vpa my-app-vpa -o jsonpath='{.status.recommendation}'
+```
+
+:::caution[VPA and HPA together]
+Do NOT use VPA and HPA together on CPU/memory metrics — they conflict. Use VPA with HPA on custom metrics (e.g., HPA on request rate, VPA for right-sizing resources).
+:::
+
+---
+
+## KEDA (Kubernetes Event-Driven Autoscaling)
+
+KEDA extends HPA with event-driven scaling, including scaling to zero. It supports dozens of scalers: Kafka, SQS, Redis, HTTP, Prometheus, and more.
+
+```bash
+# Install KEDA
+helm repo add kedacore https://kedacore.github.io/charts
+helm install keda kedacore/keda --namespace keda --create-namespace
+```
+
+### ScaledObject
+
+```yaml
+# Scale based on AWS SQS queue depth
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-scaler
+  namespace: production
+spec:
+  scaleTargetRef:
+    name: queue-worker
+  minReplicaCount: 0             # Scale to zero when no messages!
+  maxReplicaCount: 100
+  pollingInterval: 30            # Check every 30 seconds
+  cooldownPeriod: 300            # Wait 5 min before scaling to zero
+  triggers:
+    - type: aws-sqs-queue
+      metadata:
+        queueURL: https://sqs.us-east-1.amazonaws.com/123456789/my-queue
+        queueLength: "10"        # 1 pod per 10 messages
+        awsRegion: us-east-1
+        identityOwner: operator
+```
+
+```yaml
+# Scale based on Kafka consumer group lag
+triggers:
+  - type: kafka
+    metadata:
+      bootstrapServers: kafka:9092
+      consumerGroup: my-group
+      topic: my-topic
+      lagThreshold: "100"        # 1 pod per 100 messages of lag
+```
+
+```yaml
+# Scale based on Redis list length
+triggers:
+  - type: redis
+    metadata:
+      address: redis:6379
+      listName: task-queue
+      listLength: "20"
+```
+
+```yaml
+# Scale based on HTTP request rate (requires keda-add-ons-http)
+triggers:
+  - type: http
+    metadata:
+      url: http://my-service.default.svc.cluster.local:80
+      targetPendingRequests: "100"
+```
+
+---
+
+## Cluster Autoscaler
+
+The Cluster Autoscaler automatically provisions or removes **nodes** based on pending Pods and underutilized nodes.
+
+```bash
+# Install (example: AWS EKS)
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/autoscaler/master/cluster-autoscaler/cloudprovider/aws/examples/cluster-autoscaler-autodiscover.yaml
+
+# Annotate the deployment with your cluster name
+kubectl -n kube-system annotate deployment.apps/cluster-autoscaler \
+  cluster-autoscaler.kubernetes.io/safe-to-evict="false"
+
+kubectl -n kube-system set image deployment.apps/cluster-autoscaler \
+  cluster-autoscaler=registry.k8s.io/autoscaling/cluster-autoscaler:v1.29.0
+```
+
+```yaml
+# Node group annotations for EKS (on Auto Scaling Group)
+k8s.io/cluster-autoscaler/my-cluster: "owned"
+k8s.io/cluster-autoscaler/enabled: "true"
+k8s.io/cluster-autoscaler/node-template/resources/memory: "15800Mi"
+```
+
+---
+
+## Pod Disruption Budgets
+
+PodDisruptionBudgets (PDB) limit how many Pods can be disrupted simultaneously during voluntary disruptions (node drains, cluster upgrades).
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: my-app-pdb
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      app: my-app
+
+  # At least N pods must always be available
+  minAvailable: 2
+
+  # OR: at most N pods can be unavailable
+  # maxUnavailable: 1
+
+  # OR: use percentages
+  # minAvailable: "80%"
+  # maxUnavailable: "20%"
+```
+
+```bash
+# View PDB status
+kubectl get pdb
+kubectl describe pdb my-app-pdb
+```
+
+---
+
+## Pod Affinity and Anti-Affinity
+
+### Anti-Affinity (Spread pods across nodes/zones)
+
+```yaml
+spec:
+  affinity:
+    podAntiAffinity:
+      # REQUIRED: never schedule on node already running this app
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app: my-app
+          topologyKey: kubernetes.io/hostname    # Node-level spread
+
+      # PREFERRED: try to spread across zones
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app: my-app
+            topologyKey: topology.kubernetes.io/zone
+```
+
+### Pod Affinity (Co-locate related services)
+
+```yaml
+spec:
+  affinity:
+    podAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 50
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app: redis-cache            # Schedule near Redis cache
+            topologyKey: kubernetes.io/hostname
+```
+
+---
+
+## Taints and Tolerations
+
+Taints repel Pods from nodes. Tolerations allow Pods to be scheduled on tainted nodes.
+
+```bash
+# Taint a node (add a taint)
+kubectl taint nodes node1 dedicated=gpu:NoSchedule
+kubectl taint nodes node1 type=spot:NoSchedule
+kubectl taint nodes node1 disktype=ssd:PreferNoSchedule
+
+# Remove a taint
+kubectl taint nodes node1 dedicated=gpu:NoSchedule-
+```
+
+```yaml
+# Pod toleration to schedule on tainted nodes
+spec:
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: gpu
+      effect: NoSchedule
+
+    - key: type
+      operator: Equal
+      value: spot
+      effect: NoSchedule
+      tolerationSeconds: 3600    # Only tolerate for 1 hour
+
+    # Tolerate any taint with this key
+    - key: dedicated
+      operator: Exists
+      effect: NoSchedule
+```
+
+| Effect | Behavior |
+|---|---|
+| `NoSchedule` | Pods without toleration won't be scheduled |
+| `PreferNoSchedule` | Pods without toleration are preferred not to schedule |
+| `NoExecute` | Pods without toleration are evicted from the node |
+
+---
+
+## Node Selectors and Node Affinity
+
+```yaml
+# Simple node selector (exact match)
+spec:
+  nodeSelector:
+    disktype: ssd
+    topology.kubernetes.io/zone: us-east-1a
+
+# Node affinity (more expressive)
+spec:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/arch
+                operator: In
+                values: [amd64, arm64]
+              - key: node.kubernetes.io/instance-type
+                operator: NotIn
+                values: [t3.micro, t3.small]
+
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 80
+          preference:
+            matchExpressions:
+              - key: disktype
+                operator: In
+                values: [ssd]
+        - weight: 20
+          preference:
+            matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: In
+                values: [us-east-1a]
+```
+
+---
+
+## TopologySpreadConstraints
+
+More powerful than anti-affinity for spreading Pods across topology domains.
+
+```yaml
+spec:
+  topologySpreadConstraints:
+    # Spread across zones (max 1 pod difference between zones)
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule    # DoNotSchedule | ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app: my-app
+
+    # Also spread across nodes within each zone
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app: my-app
+      matchLabelKeys:
+        - pod-template-hash          # K8s 1.27+: account for rolling updates
+```
+
+---
+
+## Resource Quotas and LimitRange
+
+### ResourceQuota (Namespace-level limits)
+
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: production-quota
+  namespace: production
+spec:
+  hard:
+    # Compute resources
+    requests.cpu: "20"
+    requests.memory: 40Gi
+    limits.cpu: "40"
+    limits.memory: 80Gi
+
+    # Object counts
+    pods: "50"
+    services: "20"
+    services.loadbalancers: "2"
+    persistentvolumeclaims: "10"
+    secrets: "30"
+    configmaps: "30"
+```
+
+### LimitRange (Per-container defaults and limits)
+
+```yaml
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: production-limits
+  namespace: production
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "500m"
+        memory: "256Mi"
+      defaultRequest:
+        cpu: "100m"
+        memory: "128Mi"
+      max:
+        cpu: "4"
+        memory: "4Gi"
+      min:
+        cpu: "50m"
+        memory: "64Mi"
+
+    - type: Pod
+      max:
+        cpu: "8"
+        memory: "8Gi"
+
+    - type: PersistentVolumeClaim
+      max:
+        storage: 100Gi
+      min:
+        storage: 1Gi
+```
+
+```bash
+# Check quota usage
+kubectl describe quota production-quota -n production
+kubectl get resourcequota -n production
+
+# Check limitrange
+kubectl describe limitrange production-limits -n production
+```

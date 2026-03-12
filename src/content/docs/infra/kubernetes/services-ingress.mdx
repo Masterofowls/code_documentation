@@ -1,6 +1,6 @@
 ---
 title: Services & Ingress
-description: Kubernetes Service types, DNS, Ingress rules, TLS termination, cert-manager, and the Gateway API.
+description: Kubernetes Service types, DNS resolution, Ingress rules, TLS termination, cert-manager, and the Gateway API.
 sidebar:
   order: 4
 tags: [devops, kubernetes]
@@ -10,17 +10,24 @@ import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/
 
 # Services & Ingress
 
-Services provide stable network endpoints for Pods, while Ingress routes external HTTP/HTTPS traffic into the cluster.
+Kubernetes Services provide stable networking for Pods. Ingress manages external HTTP/HTTPS access. Together they form the core of Kubernetes networking for applications.
 
 ---
 
-## Services
+## Why Services?
 
-A Service is a stable virtual IP (ClusterIP) and DNS name that routes traffic to a dynamic set of Pods based on label selectors.
+Pods are ephemeral — they get new IP addresses when they restart, scale, or roll out updates. A **Service** provides a stable virtual IP (ClusterIP) and DNS name that automatically load balances across all healthy matching Pods.
 
-### Why Services Are Needed
-
-Pods are ephemeral — they can be rescheduled, restarted, and replaced at any time, changing their IP addresses. Services provide a stable endpoint that always routes to the current healthy Pods.
+```
+Client Request
+      │
+      ▼
+  Service (stable IP + DNS)
+      │
+      ├──► Pod A (10.0.0.5)
+      ├──► Pod B (10.0.0.6)
+      └──► Pod C (10.0.0.7)  ← Pods come and go; Service IP stays
+```
 
 ---
 
@@ -28,77 +35,87 @@ Pods are ephemeral — they can be rescheduled, restarted, and replaced at any t
 
 ### ClusterIP (Default)
 
-Exposes the Service on an internal cluster IP. Only reachable from within the cluster.
+Exposes the Service on a cluster-internal IP. Only reachable from within the cluster.
 
 ```yaml
 apiVersion: v1
 kind: Service
 metadata:
-  name: api-service
+  name: my-api
   namespace: default
 spec:
-  type: ClusterIP             # Default — omit type to use ClusterIP
+  type: ClusterIP             # Default; can be omitted
   selector:
-    app: myapp                # Routes to Pods with this label
+    app: my-api               # Routes to pods with this label
   ports:
     - name: http
-      port: 80                # Port the Service listens on
-      targetPort: 3000        # Port on the Pod
       protocol: TCP
+      port: 80                # Service port (what clients connect to)
+      targetPort: 3000        # Pod port (where app listens)
 ```
 
 ### NodePort
 
-Exposes the Service on a static port on each node's IP. Accessible from outside the cluster at `NodeIP:NodePort`.
+Exposes the Service on each Node's IP at a static port (30000–32767).
 
 ```yaml
 spec:
   type: NodePort
   selector:
-    app: myapp
+    app: my-api
   ports:
     - port: 80
       targetPort: 3000
-      nodePort: 30080         # Must be 30000–32767 (or auto-assigned)
+      nodePort: 30080         # Omit to auto-assign a port in range
 ```
 
-:::caution[NodePort for production]
-NodePort exposes a port on every node. For production, prefer LoadBalancer type (cloud managed) or Ingress for HTTP/HTTPS traffic. NodePort is useful for development clusters and bare-metal setups without a cloud load balancer.
+```bash
+# Access via any node IP
+curl http://<node-ip>:30080
+```
+
+:::tip[NodePort and cloud environments]
+NodePort is rarely used directly in production cloud environments. Use LoadBalancer or Ingress instead. NodePort is useful for local clusters (minikube, kind) and bare-metal setups.
 :::
 
 ### LoadBalancer
 
-Provisions an external load balancer from the cloud provider (AWS NLB, GCP NLB, Azure Load Balancer).
+Provisions an external load balancer (from the cloud provider — AWS ELB, GCP CLB, Azure LB).
 
 ```yaml
 spec:
   type: LoadBalancer
   selector:
-    app: myapp
+    app: my-api
   ports:
     - port: 80
       targetPort: 3000
-  # Cloud-specific annotations
-  # AWS:
-  # annotations:
-  #   service.beta.kubernetes.io/aws-load-balancer-type: external
-  #   service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+  loadBalancerSourceRanges:
+    - 10.0.0.0/8              # Restrict to internal networks
 ```
+
+```bash
+# Watch for external IP assignment
+kubectl get service my-api --watch
+```
+
+:::caution[LoadBalancer costs]
+Each `LoadBalancer` Service typically provisions a separate cloud load balancer, which can be expensive. For HTTP/HTTPS traffic, use a single Ingress with one load balancer for all services.
+:::
 
 ### ExternalName
 
-Maps a Service to an external DNS name. Useful for referencing external services inside the cluster.
+Maps a Service to an external DNS name. Useful for accessing external services with the same DNS pattern as internal services.
 
 ```yaml
 spec:
   type: ExternalName
-  externalName: my-database.us-east-1.rds.amazonaws.com
-  # Now accessible inside cluster as: db-service.default.svc.cluster.local
+  externalName: my-database.example.com
 ```
 
 ### Headless Service
 
-A ClusterIP Service with `clusterIP: None`. Returns individual Pod IPs instead of a virtual IP. Used with StatefulSets for direct Pod addressing.
+A Service with `clusterIP: None`. Used with StatefulSets for direct Pod DNS addressing.
 
 ```yaml
 spec:
@@ -107,30 +124,36 @@ spec:
     app: postgres
   ports:
     - port: 5432
-# DNS: postgres-0.postgres-headless.default.svc.cluster.local
 ```
+
+DNS entries for individual pods: `postgres-0.postgres.default.svc.cluster.local`
 
 ---
 
 ## Service DNS
 
-Kubernetes provides DNS for Services automatically via CoreDNS.
+Kubernetes includes a DNS server (CoreDNS) that automatically creates DNS records for Services.
 
 ```
-# Full DNS name format
-<service>.<namespace>.svc.cluster.local
+Full DNS name:
+  <service-name>.<namespace>.svc.cluster.local
 
-# Examples
-api-service.default.svc.cluster.local
-db.production.svc.cluster.local
+Within the same namespace (short name works):
+  my-api → resolves to my-api ClusterIP
 
-# Short forms (within same namespace)
-api-service
-api-service.default
+Cross-namespace:
+  my-api.other-namespace → resolves to my-api in other-namespace
 
-# From inside a Pod — test DNS resolution
-kubectl exec -it my-pod -- nslookup api-service
-kubectl exec -it my-pod -- curl http://api-service:80/health
+StatefulSet pod DNS:
+  postgres-0.postgres.default.svc.cluster.local
+```
+
+```bash
+# Test DNS from within a pod
+kubectl run dns-test --image=busybox:1.35 --rm -it -- sh
+nslookup my-api
+nslookup my-api.default.svc.cluster.local
+nslookup postgres-0.postgres.default.svc.cluster.local
 ```
 
 ---
@@ -140,52 +163,62 @@ kubectl exec -it my-pod -- curl http://api-service:80/health
 ```yaml
 spec:
   selector:
-    app: myapp
+    app: my-app
   ports:
     - name: http
       port: 80
       targetPort: 3000
-    - name: grpc
+    - name: https
+      port: 443
+      targetPort: 3443
+    - name: metrics
       port: 9090
       targetPort: 9090
-    - name: metrics
-      port: 9091
-      targetPort: 9091
 ```
 
-:::tip[Name your ports]
-Always name Service ports. This allows Ingress rules and health checks to reference the port by name rather than number, making refactoring easier.
+:::tip[Named ports]
+When a Service has multiple ports, all ports must be named. Named ports can also be referenced by name in targetPort, Ingress rules, and probes — making configuration more readable and resilient to port number changes.
 :::
 
 ---
 
 ## Session Affinity
 
-Route requests from the same client to the same Pod.
-
 ```yaml
 spec:
-  sessionAffinity: ClientIP
+  sessionAffinity: ClientIP   # Route same client IP to same pod
   sessionAffinityConfig:
     clientIP:
-      timeoutSeconds: 10800   # 3 hours
+      timeoutSeconds: 3600    # Keep affinity for 1 hour
 ```
 
 ---
 
 ## Endpoints and EndpointSlices
 
-Kubernetes automatically creates `Endpoints` (or `EndpointSlices` in newer clusters) that track the IPs of ready Pods matching the Service selector.
+Services select Pods via label selectors. The selected Pod IPs are stored in **Endpoints** (or **EndpointSlices** for scalability).
 
 ```bash
-# View endpoints for a Service
-kubectl get endpoints api-service
+# View endpoints for a service
+kubectl get endpoints my-api
 
-# View EndpointSlices (K8s 1.21+)
-kubectl get endpointslices -l kubernetes.io/service-name=api-service
+# View EndpointSlices
+kubectl get endpointslices -l kubernetes.io/service-name=my-api
 
-# Manual endpoint (for external services without DNS)
-kubectl apply -f - <<EOF
+# Manual endpoint (Service without selector — external backend)
+```
+
+```yaml
+# Service without selector
+apiVersion: v1
+kind: Service
+metadata:
+  name: external-db
+spec:
+  ports:
+    - port: 5432
+---
+# Manual Endpoints
 apiVersion: v1
 kind: Endpoints
 metadata:
@@ -195,54 +228,23 @@ subsets:
       - ip: 192.168.1.100
     ports:
       - port: 5432
-EOF
 ```
 
 ---
 
 ## Ingress
 
-Ingress manages external HTTP/HTTPS access to Services based on rules. It requires an **Ingress controller** to be running in the cluster.
+An **Ingress** manages external access to Services, typically HTTP/HTTPS. It provides load balancing, SSL termination, and name-based virtual hosting in a single resource.
 
-### Installing an Ingress Controller
+:::caution[Ingress Controller required]
+An Ingress resource alone does nothing. You need an **Ingress Controller** installed in your cluster. Popular options:
+- **ingress-nginx** — most widely used
+- **Traefik** — dynamic routing, great defaults
+- **AWS ALB Ingress Controller** — provisions AWS Application Load Balancers
+- **HAProxy Ingress** — high performance
+:::
 
-<Tabs>
-  <TabItem label="nginx (most common)">
-    ```bash
-    # Install nginx ingress controller via Helm
-    helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-    helm repo update
-    helm install ingress-nginx ingress-nginx/ingress-nginx \
-      --namespace ingress-nginx \
-      --create-namespace
-
-    # Verify
-    kubectl get pods -n ingress-nginx
-    kubectl get svc -n ingress-nginx
-    ```
-  </TabItem>
-  <TabItem label="Traefik">
-    ```bash
-    helm repo add traefik https://traefik.github.io/charts
-    helm repo update
-    helm install traefik traefik/traefik \
-      --namespace traefik \
-      --create-namespace
-    ```
-  </TabItem>
-  <TabItem label="AWS ALB Controller">
-    ```bash
-    helm repo add eks https://aws.github.io/eks-charts
-    helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
-      -n kube-system \
-      --set clusterName=my-cluster \
-      --set serviceAccount.create=false \
-      --set serviceAccount.name=aws-load-balancer-controller
-    ```
-  </TabItem>
-</Tabs>
-
-### Ingress Resource
+### Basic Ingress
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -251,70 +253,70 @@ metadata:
   name: my-ingress
   namespace: default
   annotations:
-    # nginx annotations
     nginx.ingress.kubernetes.io/rewrite-target: /
-    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
-    nginx.ingress.kubernetes.io/proxy-connect-timeout: "10"
-    nginx.ingress.kubernetes.io/use-regex: "true"
-    nginx.ingress.kubernetes.io/limit-rps: "100"
 spec:
-  ingressClassName: nginx      # Which Ingress controller to use
-
-  # TLS termination
-  tls:
-    - hosts:
-        - api.example.com
-        - www.example.com
-      secretName: example-tls   # TLS cert/key stored in a Secret
-
+  ingressClassName: nginx          # Which IngressClass to use
   rules:
-    # Route by hostname and path
     - host: api.example.com
-      http:
-        paths:
-          - path: /v1
-            pathType: Prefix           # Prefix | Exact | ImplementationSpecific
-            backend:
-              service:
-                name: api-v1-service
-                port:
-                  name: http
-
-          - path: /v2
-            pathType: Prefix
-            backend:
-              service:
-                name: api-v2-service
-                port:
-                  name: http
-
-    - host: www.example.com
       http:
         paths:
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: frontend-service
+                name: my-api
+                port:
+                  name: http       # Use service port name
+
+    - host: admin.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Exact
+            backend:
+              service:
+                name: admin-ui
                 port:
                   number: 80
 
-  # Default backend if no rules match
+  # Default backend for unmatched requests
   defaultBackend:
     service:
-      name: default-http-backend
+      name: default-backend
       port:
         number: 80
 ```
 
 ### Path Types
 
-| Path Type | Behavior |
+| pathType | Behavior |
 |---|---|
-| `Exact` | Path must match exactly |
-| `Prefix` | Path must match prefix (split by `/`) |
-| `ImplementationSpecific` | Behavior defined by the Ingress controller |
+| `Exact` | Matches exactly the path |
+| `Prefix` | Matches paths with given prefix |
+| `ImplementationSpecific` | Behavior depends on IngressClass implementation |
+
+### TLS Termination
+
+```yaml
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - api.example.com
+        - admin.example.com
+      secretName: example-tls-secret   # TLS cert Secret
+  rules:
+    - host: api.example.com
+      # ...
+```
+
+```bash
+# Manually create TLS secret
+kubectl create secret tls example-tls-secret \
+  --cert=tls.crt \
+  --key=tls.key \
+  --namespace=default
+```
 
 ---
 
@@ -326,89 +328,115 @@ kind: IngressClass
 metadata:
   name: nginx
   annotations:
-    ingressclass.kubernetes.io/is-default-class: "true"  # Default for all Ingress
+    ingressclass.kubernetes.io/is-default-class: "true"  # Make default
 spec:
   controller: k8s.io/ingress-nginx
 ```
 
 ---
 
-## TLS with cert-manager
+## cert-manager and Let's Encrypt
 
-cert-manager automates TLS certificate provisioning from Let's Encrypt (or other ACME providers).
+[cert-manager](https://cert-manager.io) automates TLS certificate management.
 
-```bash
-# Install cert-manager
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.0/cert-manager.yaml
+<Steps>
+1. **Install cert-manager**
 
-# Wait for it to be ready
-kubectl wait --for=condition=Available deployment -l app.kubernetes.io/instance=cert-manager \
-  -n cert-manager --timeout=120s
-```
+   ```bash
+   kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+   ```
 
-Create a ClusterIssuer for Let's Encrypt:
+2. **Create a ClusterIssuer for Let's Encrypt**
+
+   ```yaml
+   apiVersion: cert-manager.io/v1
+   kind: ClusterIssuer
+   metadata:
+     name: letsencrypt-prod
+   spec:
+     acme:
+       server: https://acme-v02.api.letsencrypt.org/directory
+       email: admin@example.com
+       privateKeySecretRef:
+         name: letsencrypt-prod-key
+       solvers:
+         - http01:
+             ingress:
+               ingressClassName: nginx
+   ```
+
+3. **Annotate your Ingress**
+
+   ```yaml
+   metadata:
+     annotations:
+       cert-manager.io/cluster-issuer: letsencrypt-prod
+   spec:
+     tls:
+       - hosts:
+           - api.example.com
+         secretName: api-tls             # cert-manager creates this
+     rules:
+       - host: api.example.com
+         # ...
+   ```
+</Steps>
+
+---
+
+## nginx Ingress Annotations
 
 ```yaml
-apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
 metadata:
-  name: letsencrypt-prod
-spec:
-  acme:
-    server: https://acme-v02.api.letsencrypt.org/directory
-    email: admin@example.com
-    privateKeySecretRef:
-      name: letsencrypt-prod-account-key
-    solvers:
-      - http01:
-          ingress:
-            class: nginx
-```
-
-Annotate Ingress for automatic TLS:
-
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: my-ingress
   annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
-spec:
-  tls:
-    - hosts:
-        - api.example.com
-      secretName: api-example-com-tls    # cert-manager creates this Secret
-  rules:
-    - host: api.example.com
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: api-service
-                port:
-                  name: http
+    # Rewrite URL path
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+
+    # Rate limiting
+    nginx.ingress.kubernetes.io/limit-rps: "10"
+    nginx.ingress.kubernetes.io/limit-connections: "5"
+
+    # CORS
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "https://app.example.com"
+
+    # Body size limit (default: 1m)
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+
+    # WebSocket support
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+
+    # Auth
+    nginx.ingress.kubernetes.io/auth-url: "https://auth.example.com/verify"
+    nginx.ingress.kubernetes.io/auth-signin: "https://auth.example.com/login"
+
+    # Force HTTPS
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+
+    # Custom nginx config
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header X-Frame-Options DENY;
+      add_header X-Content-Type-Options nosniff;
 ```
 
 ---
 
-## Gateway API (Modern Replacement)
+## Gateway API (Modern Replacement for Ingress)
 
-The Gateway API is the next generation of Kubernetes ingress routing. It is more expressive, extensible, and role-oriented than Ingress.
+The **Gateway API** is the next generation of Kubernetes traffic routing, offering more expressiveness and role separation than Ingress.
 
 ```yaml
-# GatewayClass (cluster-wide — configured by platform team)
+# GatewayClass (cluster-admin sets up once)
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
 metadata:
   name: nginx
 spec:
-  controllerName: k8s.io/ingress-nginx
-
+  controllerName: k8s.nginx.org/nginx-gateway-controller
 ---
-# Gateway (namespace-level — configured by platform/ops team)
+# Gateway (cluster-admin or infra team)
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
@@ -418,20 +446,18 @@ spec:
   gatewayClassName: nginx
   listeners:
     - name: https
-      protocol: HTTPS
       port: 443
+      protocol: HTTPS
       tls:
-        mode: Terminate
         certificateRefs:
-          - name: example-tls
-
+          - name: wildcard-cert
 ---
-# HTTPRoute (application team configures their own routes)
+# HTTPRoute (application team — namespaced)
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: api-route
-  namespace: default
+  namespace: production
 spec:
   parentRefs:
     - name: main-gateway
@@ -442,30 +468,21 @@ spec:
     - matches:
         - path:
             type: PathPrefix
-            value: /api
+            value: /v1
       backendRefs:
-        - name: api-service
+        - name: my-api
           port: 80
           weight: 100
-    - matches:
-        - path:
-            type: PathPrefix
-            value: /
-      backendRefs:
-        - name: frontend-service
-          port: 80
 ```
 
 ---
 
 ## external-dns
 
-external-dns automatically creates DNS records in Route53, Cloudflare, etc. when Ingress or Services are created.
+[external-dns](https://github.com/kubernetes-sigs/external-dns) automatically creates DNS records for Services and Ingresses in external DNS providers (Route53, Cloud DNS, Cloudflare, etc.).
 
 ```yaml
-# Annotation to trigger external-dns record creation
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+# Annotation on Ingress or Service to manage DNS
 metadata:
   annotations:
     external-dns.alpha.kubernetes.io/hostname: api.example.com
@@ -474,28 +491,23 @@ metadata:
 
 ---
 
-## Troubleshooting Services and Ingress
+## Internal Load Balancing
 
-```bash
-# Check Service endpoints (are Pods ready?)
-kubectl get endpoints api-service
-kubectl describe service api-service
+```yaml
+# AWS — provision internal NLB (not public-facing)
+metadata:
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+spec:
+  type: LoadBalancer
+```
 
-# Test ClusterIP from inside the cluster
-kubectl run -it --rm debug --image=nicolaka/netshoot -- \
-  curl http://api-service.default.svc.cluster.local/health
-
-# Check Ingress status
-kubectl get ingress
-kubectl describe ingress my-ingress
-
-# Check Ingress controller logs
-kubectl logs -n ingress-nginx -l app.kubernetes.io/name=ingress-nginx
-
-# Check cert-manager certificate status
-kubectl get certificate -A
-kubectl describe certificate api-example-com-tls
-
-# Check TLS secret
-kubectl get secret api-example-com-tls -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -noout -dates
+```yaml
+# GKE — internal load balancer
+metadata:
+  annotations:
+    cloud.google.com/load-balancer-type: "Internal"
+spec:
+  type: LoadBalancer
 ```

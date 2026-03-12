@@ -1,0 +1,498 @@
+---
+title: File I/O in C
+description: FILE* streams, fopen/fclose, formatted and binary I/O, file positioning, buffering, POSIX file I/O, memory-mapped files, and file locking.
+sidebar:
+  order: 6
+tags: [systems, cpp, c]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# File I/O in C
+
+C provides two layers of file I/O: the **standard library** (`<stdio.h>`) with buffered `FILE*` streams, and the **POSIX** layer with raw file descriptors. Understanding both gives you the tools to handle any I/O scenario from simple text logs to high-performance binary protocols.
+
+## Standard Streams
+
+```c
+#include <stdio.h>
+
+// Three standard streams are always available
+// FILE *stdin  — standard input  (fd 0) — keyboard by default
+// FILE *stdout — standard output (fd 1) — terminal by default
+// FILE *stderr — standard error  (fd 2) — terminal by default
+
+int main(void)
+{
+    // Write to stdout
+    fprintf(stdout, "Hello from stdout\n");
+    // Equivalent to:
+    printf("Hello from stdout\n");
+
+    // Write to stderr (not buffered by default on most systems)
+    fprintf(stderr, "Error: something went wrong\n");
+
+    // Read from stdin
+    int n;
+    printf("Enter a number: ");
+    fflush(stdout);   // flush before reading (stdout may be line-buffered)
+    if (scanf("%d", &n) == 1) {
+        printf("You entered: %d\n", n);
+    }
+
+    return 0;
+}
+```
+
+## Opening and Closing Files
+
+```c
+#include <stdio.h>
+#include <errno.h>
+#include <string.h>
+
+int main(void)
+{
+    // fopen — returns FILE* on success, NULL on failure
+    // Mode strings:
+    //   "r"  — read text; file must exist
+    //   "w"  — write text; creates or truncates
+    //   "a"  — append text; creates if not exist; writes at end
+    //   "r+" — read+write text; file must exist; no truncation
+    //   "w+" — read+write text; creates or truncates
+    //   "a+" — read+append; creates if not exist
+    //   Add "b" for binary: "rb", "wb", "ab", "r+b", "w+b", "a+b"
+
+    FILE *fp = fopen("output.txt", "w");
+    if (fp == NULL) {
+        // errno is set — use perror or strerror for human-readable message
+        perror("fopen failed");
+        fprintf(stderr, "errno: %d — %s\n", errno, strerror(errno));
+        return 1;
+    }
+
+    fprintf(fp, "Line 1\n");
+    fprintf(fp, "Line 2: value=%d\n", 42);
+
+    // Always check fclose — it flushes the buffer!
+    if (fclose(fp) != 0) {
+        perror("fclose failed");
+        return 1;
+    }
+
+    // Read it back
+    fp = fopen("output.txt", "r");
+    if (!fp) { perror("fopen"); return 1; }
+
+    char buf[256];
+    while (fgets(buf, sizeof(buf), fp) != NULL) {
+        printf("Read: %s", buf);   // fgets includes the \n
+    }
+
+    // Check for errors vs EOF
+    if (ferror(fp)) {
+        perror("read error");
+    }
+    // feof(fp) is true if we hit EOF
+
+    fclose(fp);
+    return 0;
+}
+```
+
+:::caution[Never Use gets()]
+`gets()` was removed from C11 because it cannot prevent buffer overflows. Always use `fgets(buf, sizeof(buf), stdin)` which limits the number of characters read.
+:::
+
+## Formatted I/O
+
+```c
+#include <stdio.h>
+
+int main(void)
+{
+    // fprintf — write formatted to FILE*
+    FILE *fp = fopen("data.txt", "w");
+    fprintf(fp, "%d %.2f %s\n", 42, 3.14, "hello");
+    fclose(fp);
+
+    // fscanf — read formatted from FILE*
+    fp = fopen("data.txt", "r");
+    int i; float f; char s[64];
+    int n = fscanf(fp, "%d %f %63s", &i, &f, s);
+    printf("Read %d fields: %d %.2f %s\n", n, i, f, s);
+    fclose(fp);
+
+    // sprintf / snprintf — format into a char buffer
+    char result[128];
+    // sprintf is unsafe — may overflow; use snprintf
+    int len = snprintf(result, sizeof(result),
+                       "id=%d value=%.4f name=%s", 7, 2.71828, "exp");
+    printf("snprintf wrote %d chars: %s\n", len, result);
+
+    // sscanf — parse from a string
+    const char *line = "2024-07-15 14:30:00";
+    int year, month, day, hour, min, sec;
+    sscanf(line, "%d-%d-%d %d:%d:%d",
+           &year, &month, &day, &hour, &min, &sec);
+    printf("Date: %04d/%02d/%02d Time: %02d:%02d:%02d\n",
+           year, month, day, hour, min, sec);
+
+    return 0;
+}
+```
+
+## Character I/O
+
+```c
+#include <stdio.h>
+
+int main(void)
+{
+    FILE *fp = fopen("chars.txt", "w+");
+
+    // Write characters one by one
+    for (char c = 'A'; c <= 'Z'; c++) {
+        fputc(c, fp);     // write single char to FILE*
+        putchar(c);       // write to stdout (equivalent to fputc(c, stdout))
+    }
+    fputc('\n', fp);
+    putchar('\n');
+
+    // Rewind to start
+    rewind(fp);
+
+    // Read characters one by one
+    int ch;   // int, not char — EOF is -1, needs int to distinguish from valid chars
+    while ((ch = fgetc(fp)) != EOF) {
+        putchar(ch);
+    }
+    putchar('\n');
+
+    // ungetc — push ONE character back into the stream
+    rewind(fp);
+    ch = fgetc(fp);         // reads 'A'
+    ungetc(ch, fp);         // push 'A' back
+    ch = fgetc(fp);         // reads 'A' again
+    printf("re-read: %c\n", ch);  // A
+
+    fclose(fp);
+    return 0;
+}
+```
+
+## Line I/O
+
+```c
+#include <stdio.h>
+#include <string.h>
+
+void process_file_line_by_line(const char *filename)
+{
+    FILE *fp = fopen(filename, "r");
+    if (!fp) { perror("fopen"); return; }
+
+    char line[1024];
+    int line_num = 0;
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        line_num++;
+
+        // Remove trailing newline if present
+        size_t len = strlen(line);
+        if (len > 0 && line[len - 1] == '\n') {
+            line[--len] = '\0';
+        }
+        // On Windows, also handle \r\n
+        if (len > 0 && line[len - 1] == '\r') {
+            line[--len] = '\0';
+        }
+
+        // Check if line was truncated (didn't fit in buffer)
+        if (len == sizeof(line) - 2) {
+            fprintf(stderr, "Warning: line %d may be truncated\n", line_num);
+        }
+
+        printf("%4d: %s\n", line_num, line);
+    }
+
+    printf("Total lines: %d\n", line_num);
+    fclose(fp);
+}
+
+// fputs — write string to FILE* (no format, no automatic newline)
+void write_lines(const char *filename)
+{
+    FILE *fp = fopen(filename, "w");
+    fputs("First line\n", fp);
+    fputs("Second line\n", fp);
+    fclose(fp);
+}
+```
+
+## Binary I/O
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+typedef struct {
+    int   id;
+    float value;
+    char  label[16];
+} Record;
+
+void write_binary(const char *filename, const Record *records, size_t n)
+{
+    FILE *fp = fopen(filename, "wb");   // "wb" — write binary
+    if (!fp) { perror("fopen"); return; }
+
+    // Write array in one call
+    size_t written = fwrite(records, sizeof(Record), n, fp);
+    if (written != n) {
+        fprintf(stderr, "fwrite: wrote %zu of %zu records\n", written, n);
+    }
+
+    fclose(fp);
+}
+
+Record *read_binary(const char *filename, size_t *count_out)
+{
+    FILE *fp = fopen(filename, "rb");   // "rb" — read binary
+    if (!fp) { perror("fopen"); return NULL; }
+
+    // Determine file size
+    fseek(fp, 0, SEEK_END);
+    long file_size = ftell(fp);
+    rewind(fp);
+
+    size_t n = (size_t)file_size / sizeof(Record);
+    Record *records = malloc(n * sizeof(Record));
+    if (!records) { fclose(fp); return NULL; }
+
+    size_t read = fread(records, sizeof(Record), n, fp);
+    if (read != n) {
+        fprintf(stderr, "fread: read %zu of %zu records\n", read, n);
+    }
+
+    fclose(fp);
+    *count_out = read;
+    return records;
+}
+
+int main(void)
+{
+    Record data[] = {
+        { 1, 3.14f,  "pi"     },
+        { 2, 2.718f, "euler"  },
+        { 3, 1.618f, "golden" },
+    };
+
+    write_binary("records.bin", data, 3);
+
+    size_t count;
+    Record *loaded = read_binary("records.bin", &count);
+    for (size_t i = 0; i < count; i++) {
+        printf("id=%d val=%.3f label=%s\n",
+               loaded[i].id, loaded[i].value, loaded[i].label);
+    }
+
+    free(loaded);
+    return 0;
+}
+```
+
+## File Positioning
+
+```c
+#include <stdio.h>
+
+int main(void)
+{
+    FILE *fp = fopen("test.bin", "w+b");
+
+    // Write some data
+    int data[] = { 10, 20, 30, 40, 50 };
+    fwrite(data, sizeof(int), 5, fp);
+
+    // fseek(fp, offset, whence)
+    // SEEK_SET — from beginning of file
+    // SEEK_CUR — from current position
+    // SEEK_END — from end of file (may not work for all files)
+
+    fseek(fp, 2 * sizeof(int), SEEK_SET);   // position at element [2]
+    int val;
+    fread(&val, sizeof(int), 1, fp);
+    printf("element at offset 2: %d\n", val);  // 30
+
+    // ftell — current position in bytes from beginning
+    long pos = ftell(fp);
+    printf("after read, position: %ld\n", pos);   // 12 (3 * sizeof(int))
+
+    // fseek backward 2 elements from current
+    fseek(fp, -2 * (long)sizeof(int), SEEK_CUR);
+    pos = ftell(fp);
+    printf("after seek back, position: %ld\n", pos);  // 4
+
+    // rewind — go to beginning (clears error flag too)
+    rewind(fp);
+    printf("after rewind: %ld\n", ftell(fp));  // 0
+
+    // fgetpos / fsetpos — portable alternative to ftell/fseek
+    // (handles large files on 32-bit systems)
+    fpos_t saved_pos;
+    fgetpos(fp, &saved_pos);           // save current position
+    fseek(fp, 0, SEEK_END);            // go to end
+    printf("file size: %ld bytes\n", ftell(fp));  // 20
+    fsetpos(fp, &saved_pos);           // restore position
+
+    fclose(fp);
+    return 0;
+}
+```
+
+## Buffering
+
+```c
+#include <stdio.h>
+
+int main(void)
+{
+    // Three buffering modes:
+    // _IOFBF — fully buffered (default for files): flushes when buffer full
+    // _IOLBF — line buffered (default for stdout to terminal): flushes on \n
+    // _IONBF — unbuffered (default for stderr): writes immediately
+
+    FILE *fp = fopen("log.txt", "w");
+
+    // Set custom buffer (must stay valid while fp is open)
+    static char my_buf[8192];
+    setvbuf(fp, my_buf, _IOFBF, sizeof(my_buf));
+
+    // Or disable buffering entirely
+    // setvbuf(fp, NULL, _IONBF, 0);
+
+    // setbuf(fp, buf) is shorthand: buf != NULL → _IOFBF BUFSIZ, NULL → _IONBF
+    // setbuf(fp, NULL);  // unbuffered
+
+    fprintf(fp, "This is buffered\n");
+    fflush(fp);   // force flush buffer to OS (important before crash/fork!)
+
+    // stdout behavior
+    // When connected to terminal: line-buffered — \n triggers flush
+    printf("this appears immediately when terminal\n");
+    // In a pipe/redirect: fully buffered — fflush(stdout) or \n at end needed
+    printf("intermediate output");
+    fflush(stdout);   // ensure it appears before the next part
+
+    fclose(fp);  // fclose always flushes
+    return 0;
+}
+```
+
+## POSIX File I/O
+
+```c
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <stdio.h>
+#include <dirent.h>
+#include <string.h>
+
+void posix_io_demo(void)
+{
+    // open — returns file descriptor (int), or -1 on error
+    // Flags: O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_TRUNC, O_APPEND
+    // Mode (when O_CREAT): file permissions e.g., 0644
+    int fd = open("posix_test.txt",
+                  O_WRONLY | O_CREAT | O_TRUNC,
+                  S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);  // 0644
+    if (fd < 0) { perror("open"); return; }
+
+    // write — returns bytes written, or -1
+    const char *msg = "Hello POSIX\n";
+    ssize_t written = write(fd, msg, strlen(msg));
+    printf("Wrote %zd bytes\n", written);
+
+    close(fd);
+
+    // read — returns bytes read, 0 on EOF, -1 on error
+    fd = open("posix_test.txt", O_RDONLY);
+    char buf[256];
+    ssize_t nread = read(fd, buf, sizeof(buf) - 1);
+    buf[nread] = '\0';
+    printf("Read: %s", buf);
+    close(fd);
+
+    // lseek — like fseek but returns new position
+    fd = open("posix_test.txt", O_RDONLY);
+    off_t pos = lseek(fd, 6, SEEK_SET);   // seek to offset 6
+    printf("position after lseek: %lld\n", (long long)pos);
+    close(fd);
+
+    // stat — get file metadata
+    struct stat st;
+    if (stat("posix_test.txt", &st) == 0) {
+        printf("size: %lld bytes\n", (long long)st.st_size);
+        printf("mode: %o\n", st.st_mode & 0777);
+    }
+
+    // Directory traversal
+    DIR *dir = opendir(".");
+    if (dir) {
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            if (entry->d_name[0] != '.')  // skip hidden
+                printf("  %s\n", entry->d_name);
+        }
+        closedir(dir);
+    }
+}
+```
+
+## Memory-Mapped Files
+
+```c
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <string.h>
+
+void mmap_demo(const char *filename)
+{
+    int fd = open(filename, O_RDONLY);
+    if (fd < 0) { perror("open"); return; }
+
+    struct stat sb;
+    fstat(fd, &sb);
+    size_t size = (size_t)sb.st_size;
+
+    // mmap — map file into virtual address space
+    // PROT_READ — read-only
+    // MAP_PRIVATE — changes don't go to file; MAP_SHARED — changes do
+    char *data = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (data == MAP_FAILED) { perror("mmap"); close(fd); return; }
+
+    // Now access file contents like regular memory — no read() needed!
+    printf("First 10 chars: %.10s\n", data);
+    // Count newlines
+    size_t lines = 0;
+    for (size_t i = 0; i < size; i++) {
+        if (data[i] == '\n') lines++;
+    }
+    printf("Lines: %zu\n", lines);
+
+    // madvise — hint to kernel about access pattern
+    madvise(data, size, MADV_SEQUENTIAL);  // optimize for sequential read
+
+    munmap(data, size);  // unmap
+    close(fd);
+}
+```
+
+:::tip[mmap for Large Files]
+Memory-mapped files avoid copying data from kernel to userspace. For files larger than available RAM, the OS pages data in and out automatically. Excellent for reading large binary files, implementing file-backed databases, or shared memory between processes.
+:::

@@ -1,0 +1,659 @@
+---
+title: GraphQL Advanced
+description: Apollo Federation, schema stitching, TypeGraphQL, Strawberry, auth patterns, rate limiting, file uploads, subscriptions at scale, codegen, and testing.
+sidebar:
+  order: 6
+tags: [database, api]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# GraphQL Advanced
+
+## Apollo Federation
+
+Federation allows splitting a GraphQL API across multiple independent services (subgraphs) that are composed into a single schema by a Router.
+
+### Subgraph Setup
+
+```bash
+npm install @apollo/subgraph graphql
+```
+
+```javascript
+// users-service/index.js
+import { ApolloServer } from '@apollo/server';
+import { buildSubgraphSchema } from '@apollo/subgraph';
+import { startStandaloneServer } from '@apollo/server/standalone';
+import gql from 'graphql-tag';
+
+const typeDefs = gql`
+  extend schema @link(url: "https://specs.apollo.dev/federation/v2.3", import: ["@key"])
+
+  # @key marks the entity's primary key for federation
+  type User @key(fields: "id") {
+    id: ID!
+    name: String!
+    email: String!
+    role: UserRole!
+  }
+
+  enum UserRole { ADMIN USER MODERATOR }
+
+  type Query {
+    users: [User!]!
+    user(id: ID!): User
+    me: User
+  }
+
+  type Mutation {
+    createUser(input: CreateUserInput!): User!
+  }
+
+  input CreateUserInput {
+    name: String!
+    email: String!
+    password: String!
+  }
+`;
+
+const resolvers = {
+  User: {
+    // __resolveReference is called when another subgraph references this entity
+    __resolveReference: async ({ id }, { db }) => {
+      return db.users.findById(id);
+    },
+  },
+  Query: {
+    users: (_, __, { db }) => db.users.findAll(),
+    user: (_, { id }, { db }) => db.users.findById(id),
+    me: (_, __, { currentUser }) => currentUser,
+  },
+};
+
+const server = new ApolloServer({
+  schema: buildSubgraphSchema({ typeDefs, resolvers }),
+});
+
+await startStandaloneServer(server, { listen: { port: 4001 } });
+```
+
+### Posts Subgraph (Extending the User Entity)
+
+```javascript
+// posts-service/index.js
+const typeDefs = gql`
+  extend schema @link(url: "https://specs.apollo.dev/federation/v2.3",
+    import: ["@key", "@external", "@requires"])
+
+  # Reference the User entity from users-service
+  type User @key(fields: "id") {
+    id: ID! @external          # Exists in another subgraph
+    name: String! @external    # Exists in another subgraph
+    # Add a field to User from this subgraph
+    posts: [Post!]!
+    postsCount: Int!
+  }
+
+  type Post @key(fields: "id") {
+    id: ID!
+    title: String!
+    content: String!
+    authorId: ID!
+    # author requires the User entity from users-service
+    author: User! @requires(fields: "id")
+    publishedAt: String
+    tags: [String!]!
+  }
+
+  type Query {
+    posts(limit: Int = 20): [Post!]!
+    post(id: ID!): Post
+  }
+`;
+
+const resolvers = {
+  User: {
+    __resolveReference: async ({ id }) => ({ id }), // Just pass the id
+    posts: async ({ id }, _, { db }) => db.posts.findByAuthorId(id),
+    postsCount: async ({ id }, _, { db }) => db.posts.countByAuthorId(id),
+  },
+  Post: {
+    __resolveReference: async ({ id }, { db }) => db.posts.findById(id),
+    author: async (post) => ({ __typename: 'User', id: post.authorId }),
+  },
+};
+```
+
+### Apollo Router Setup
+
+```yaml
+# router.yaml
+supergraph:
+  listen: 0.0.0.0:4000
+
+subgraphs:
+  users:
+    routing_url: http://users-service:4001/graphql
+  posts:
+    routing_url: http://posts-service:4002/graphql
+  products:
+    routing_url: http://products-service:4003/graphql
+```
+
+```bash
+# Install and run Apollo Router
+curl -sSL https://router.apollo.dev/download/nix/latest | sh
+./router --config router.yaml --supergraph supergraph.graphql
+```
+
+## Code-First with TypeGraphQL
+
+TypeGraphQL builds the schema from TypeScript classes and decorators.
+
+```bash
+npm install type-graphql graphql reflect-metadata class-validator
+```
+
+```typescript
+// entities/User.ts
+import { ObjectType, Field, ID, Int } from 'type-graphql';
+
+@ObjectType({ description: 'A user account' })
+export class User {
+  @Field(() => ID)
+  id: string;
+
+  @Field()
+  name: string;
+
+  @Field()
+  email: string;
+
+  @Field(() => Int)
+  postsCount: number;
+
+  @Field(() => [Post], { nullable: true })
+  posts?: Post[];
+
+  // Don't expose password hash via GraphQL
+  password: string;
+}
+
+// inputs/CreateUserInput.ts
+import { InputType, Field } from 'type-graphql';
+import { IsEmail, MinLength, MaxLength } from 'class-validator';
+
+@InputType()
+export class CreateUserInput {
+  @Field()
+  @MinLength(2)
+  @MaxLength(50)
+  name: string;
+
+  @Field()
+  @IsEmail()
+  email: string;
+
+  @Field()
+  @MinLength(8)
+  password: string;
+}
+
+// resolvers/UserResolver.ts
+import { Resolver, Query, Mutation, Arg, Ctx, Authorized, Int } from 'type-graphql';
+import { User } from '../entities/User';
+import { CreateUserInput } from '../inputs/CreateUserInput';
+import type { Context } from '../context';
+
+@Resolver(User)
+export class UserResolver {
+  @Query(() => [User])
+  async users(@Ctx() ctx: Context): Promise<User[]> {
+    return ctx.db.users.findAll();
+  }
+
+  @Query(() => User, { nullable: true })
+  async user(@Arg('id') id: string, @Ctx() ctx: Context): Promise<User | null> {
+    return ctx.db.users.findById(id);
+  }
+
+  @Authorized('USER')  // Auth check via authChecker
+  @Query(() => User, { nullable: true })
+  async me(@Ctx() ctx: Context): Promise<User | null> {
+    return ctx.currentUser ?? null;
+  }
+
+  @Mutation(() => User)
+  async createUser(
+    @Arg('input') input: CreateUserInput,
+    @Ctx() ctx: Context,
+  ): Promise<User> {
+    return ctx.db.users.create(input);
+  }
+}
+
+// schema.ts
+import 'reflect-metadata';
+import { buildSchema } from 'type-graphql';
+import { UserResolver } from './resolvers/UserResolver';
+import { PostResolver } from './resolvers/PostResolver';
+
+export const schema = await buildSchema({
+  resolvers: [UserResolver, PostResolver],
+  authChecker: ({ context: { currentUser } }, roles) => {
+    if (!currentUser) return false;
+    if (roles.length === 0) return true;
+    return roles.includes(currentUser.role);
+  },
+  validate: { forbidUnknownValues: false },
+});
+```
+
+## Strawberry (Python)
+
+```bash
+pip install strawberry-graphql[fastapi] uvicorn
+```
+
+```python
+# schema.py
+import strawberry
+from typing import Optional, List
+from datetime import datetime
+
+@strawberry.type
+class User:
+    id: strawberry.ID
+    name: str
+    email: str
+    created_at: datetime
+
+    @strawberry.field
+    async def posts(self, info: strawberry.types.Info) -> List["Post"]:
+        return await info.context["db"].get_posts_by_user(self.id)
+
+@strawberry.input
+class CreateUserInput:
+    name: str
+    email: str
+    password: str
+
+@strawberry.type
+class Query:
+    @strawberry.field
+    async def user(self, id: strawberry.ID, info: strawberry.types.Info) -> Optional[User]:
+        return await info.context["db"].get_user(id)
+
+    @strawberry.field
+    async def users(self, info: strawberry.types.Info) -> List[User]:
+        return await info.context["db"].get_users()
+
+@strawberry.type
+class Mutation:
+    @strawberry.mutation
+    async def create_user(
+        self, input: CreateUserInput, info: strawberry.types.Info
+    ) -> User:
+        return await info.context["db"].create_user(input)
+
+# Permission classes
+class IsAuthenticated(strawberry.permission.BasePermission):
+    message = "User is not authenticated"
+
+    def has_permission(self, source, info: strawberry.types.Info, **kwargs) -> bool:
+        return info.context["request"].user is not None
+
+@strawberry.type
+class SecureQuery:
+    @strawberry.field(permission_classes=[IsAuthenticated])
+    async def me(self, info: strawberry.types.Info) -> User:
+        return info.context["request"].user
+
+# FastAPI integration
+from fastapi import FastAPI
+from strawberry.fastapi import GraphQLRouter
+
+schema = strawberry.Schema(query=Query, mutation=Mutation)
+
+async def get_context():
+    return {"db": get_db()}
+
+graphql_app = GraphQLRouter(schema, context_getter=get_context)
+app = FastAPI()
+app.include_router(graphql_app, prefix="/graphql")
+```
+
+## Authentication Patterns
+
+### Context-based Auth
+
+```javascript
+// auth middleware in context
+const context = async ({ req }) => {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  const user = token ? await validateJWT(token) : null;
+  return { user, req };
+};
+
+// Helper function for resolvers
+function requireAuth(context) {
+  if (!context.user) {
+    throw new GraphQLError('Authentication required', {
+      extensions: { code: 'UNAUTHENTICATED' },
+    });
+  }
+  return context.user;
+}
+
+const resolvers = {
+  Query: {
+    me: (_, __, context) => {
+      const user = requireAuth(context);
+      return user;
+    },
+  },
+};
+```
+
+### @auth Directive
+
+```javascript
+import { mapSchema, getDirective, MapperKind } from '@graphql-tools/utils';
+import { defaultFieldResolver } from 'graphql';
+
+function authDirectiveTransformer(schema, directiveName) {
+  return mapSchema(schema, {
+    [MapperKind.OBJECT_FIELD]: (fieldConfig) => {
+      const authDirective = getDirective(schema, fieldConfig, directiveName)?.[0];
+
+      if (authDirective) {
+        const { resolve = defaultFieldResolver } = fieldConfig;
+        const { requires } = authDirective;
+
+        fieldConfig.resolve = async function (source, args, context, info) {
+          if (!context.user) {
+            throw new GraphQLError('Not authenticated', {
+              extensions: { code: 'UNAUTHENTICATED' },
+            });
+          }
+          if (requires && context.user.role !== requires) {
+            throw new GraphQLError('Insufficient permissions', {
+              extensions: { code: 'FORBIDDEN' },
+            });
+          }
+          return resolve(source, args, context, info);
+        };
+      }
+      return fieldConfig;
+    },
+  });
+}
+```
+
+## Rate Limiting and Depth Limiting
+
+```bash
+npm install graphql-depth-limit graphql-query-complexity
+```
+
+```javascript
+import depthLimit from 'graphql-depth-limit';
+import {
+  createComplexityLimitRule,
+  simpleEstimator,
+  fieldExtensionsEstimator,
+} from 'graphql-query-complexity';
+
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  validationRules: [
+    // Prevent deeply nested queries (DoS protection)
+    depthLimit(8),
+
+    // Calculate and limit query complexity
+    createComplexityLimitRule(5000, {
+      estimators: [
+        // Use @complexity directive on schema fields
+        fieldExtensionsEstimator(),
+        // Default complexity scores
+        simpleEstimator({
+          defaultComplexity: 1,     // Default cost per field
+        }),
+      ],
+      formatErrorFn: (cost) => ({
+        message: `Query complexity ${cost} exceeds maximum allowed complexity of 5000`,
+        extensions: { code: 'QUERY_TOO_COMPLEX', cost },
+      }),
+    }),
+  ],
+});
+```
+
+## File Uploads
+
+```bash
+npm install graphql-upload
+```
+
+```javascript
+import { graphqlUploadExpress } from 'graphql-upload/graphqlUploadExpress.mjs';
+
+// Add middleware before Apollo
+app.use(graphqlUploadExpress({ maxFileSize: 10_000_000, maxFiles: 10 }));
+
+// Schema
+const typeDefs = `#graphql
+  scalar Upload
+
+  type Mutation {
+    uploadAvatar(file: Upload!): User!
+    uploadDocuments(files: [Upload!]!): [Document!]!
+  }
+`;
+
+const resolvers = {
+  Mutation: {
+    uploadAvatar: async (_, { file }, { currentUser, storage }) => {
+      // file is a Promise — always await it
+      const { createReadStream, filename, mimetype, encoding } = await file;
+
+      // Validate file type
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimetype)) {
+        throw new GraphQLError('Invalid file type. Only JPEG, PNG, and WebP allowed.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+
+      const stream = createReadStream();
+      const url = await storage.upload(stream, { filename, mimetype });
+
+      return currentUser.db.updateAvatar(currentUser.id, url);
+    },
+  },
+};
+```
+
+## Subscriptions at Scale with Redis PubSub
+
+```bash
+npm install graphql-redis-subscriptions ioredis
+```
+
+```javascript
+import { RedisPubSub } from 'graphql-redis-subscriptions';
+import Redis from 'ioredis';
+
+const pubsub = new RedisPubSub({
+  publisher: new Redis({ host: 'redis', port: 6379 }),
+  subscriber: new Redis({ host: 'redis', port: 6379 }),
+  // Pattern-based subscriptions
+  reviver: (key, value) => {
+    if (key === 'createdAt') return new Date(value);
+    return value;
+  },
+});
+
+const resolvers = {
+  Mutation: {
+    sendMessage: async (_, { channelId, text }, { db, currentUser }) => {
+      const message = await db.messages.create({ channelId, text, userId: currentUser.id });
+      // Publishes to all server instances via Redis
+      await pubsub.publish(`MESSAGE_ADDED.${channelId}`, { messageAdded: message });
+      return message;
+    },
+  },
+  Subscription: {
+    messageAdded: {
+      subscribe: (_, { channelId }) => pubsub.asyncIterator(`MESSAGE_ADDED.${channelId}`),
+    },
+  },
+};
+```
+
+## GraphQL Codegen
+
+Generate TypeScript types and React hooks from your schema.
+
+```bash
+npm install -D @graphql-codegen/cli @graphql-codegen/typescript @graphql-codegen/typescript-operations @graphql-codegen/typescript-react-apollo
+```
+
+```yaml
+# codegen.yml
+overwrite: true
+schema: "http://localhost:4000/graphql"
+documents: "src/**/*.graphql"
+generates:
+  src/generated/graphql.ts:
+    plugins:
+      - typescript
+      - typescript-operations
+      - typescript-react-apollo
+    config:
+      withHooks: true
+      withResultType: true
+      apolloReactHooksImportFrom: "@apollo/client"
+```
+
+```graphql
+# src/queries/GetUser.graphql
+query GetUser($id: ID!) {
+  user(id: $id) {
+    id
+    name
+    email
+    posts { id title }
+  }
+}
+```
+
+```bash
+npx graphql-codegen --config codegen.yml
+```
+
+Generated usage:
+```typescript
+// ✅ Fully typed hooks generated automatically
+import { useGetUserQuery } from '../generated/graphql';
+
+function Profile({ userId }: { userId: string }) {
+  const { data, loading, error } = useGetUserQuery({
+    variables: { id: userId },
+  });
+  // data.user is fully typed as GetUserQuery['user']
+}
+```
+
+## Testing GraphQL
+
+### Server-side with Jest
+
+```bash
+npm install -D jest @jest/globals supertest
+```
+
+```javascript
+// __tests__/users.test.js
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from '../schema.js';
+import { resolvers } from '../resolvers.js';
+
+describe('User queries', () => {
+  let server;
+
+  beforeAll(async () => {
+    server = new ApolloServer({ typeDefs, resolvers });
+    await server.start();
+  });
+
+  afterAll(async () => {
+    await server.stop();
+  });
+
+  it('should fetch a user by ID', async () => {
+    const response = await server.executeOperation(
+      {
+        query: `query { user(id: "1") { id name email } }`,
+      },
+      {
+        contextValue: {
+          db: mockDb,
+          currentUser: { id: 'admin', role: 'ADMIN' },
+        },
+      },
+    );
+
+    expect(response.body.kind).toBe('single');
+    expect(response.body.singleResult.errors).toBeUndefined();
+    expect(response.body.singleResult.data?.user?.name).toBe('Alice');
+  });
+
+  it('should return UNAUTHENTICATED for me query without auth', async () => {
+    const response = await server.executeOperation(
+      { query: `query { me { id name } }` },
+      { contextValue: { currentUser: null } },
+    );
+
+    expect(response.body.singleResult.errors?.[0]?.extensions?.code).toBe('UNAUTHENTICATED');
+  });
+});
+```
+
+### Client-side with MSW
+
+```javascript
+// handlers.js — intercept GraphQL requests in tests
+import { graphql, HttpResponse } from 'msw';
+
+export const handlers = [
+  graphql.query('GetUser', ({ variables }) => {
+    return HttpResponse.json({
+      data: {
+        user: {
+          id: variables.id,
+          name: 'Test User',
+          email: 'test@example.com',
+        },
+      },
+    });
+  }),
+
+  graphql.mutation('CreatePost', ({ variables }) => {
+    return HttpResponse.json({
+      data: {
+        createPost: {
+          id: '99',
+          title: variables.input.title,
+          slug: variables.input.title.toLowerCase().replace(/ /g, '-'),
+        },
+      },
+    });
+  }),
+];
+```
+
+:::tip[Use executeOperation for Unit Tests]
+Apollo Server 4's `executeOperation` runs resolvers in-process without starting an HTTP server. It's fast, doesn't require network setup, and lets you inject mock context values. Use supertest for integration tests that need to test the full HTTP layer.
+:::

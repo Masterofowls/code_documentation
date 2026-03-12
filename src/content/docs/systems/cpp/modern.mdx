@@ -1,0 +1,416 @@
+---
+title: Modern C++ Features
+description: C++17 features, C++20 features (concepts, ranges, coroutines, modules, format), C++23 preview, module system, std::format, and ranges pipelines.
+sidebar:
+  order: 8
+tags: [systems, cpp, c]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Modern C++ Features
+
+## C++17 Features
+
+```cpp
+#include <optional>
+#include <variant>
+#include <any>
+#include <string_view>
+#include <filesystem>
+#include <execution>
+
+// --- Structured bindings ---
+auto [x, y, z] = std::tuple{1, 2.0, "three"};
+auto [key, val] = std::pair{std::string{"name"}, 42};
+
+std::map<std::string, int> scores{{"Alice", 100}, {"Bob", 85}};
+for (auto& [name, score] : scores) {
+    std::cout << name << ": " << score << "\n";
+}
+
+// Bind struct members (C++17)
+struct Point { int x, y, z; };
+auto [px, py, pz] = Point{1, 2, 3};
+
+// --- if/switch with initializer ---
+if (auto it = m.find("key"); it != m.end()) {
+    std::cout << it->second;
+}  // 'it' is out of scope here
+
+switch (auto val = compute(); val) {
+    case 0: /* ... */ break;
+    default: /* ... */ break;
+}
+
+// --- std::filesystem ---
+namespace fs = std::filesystem;
+
+fs::path p = "/home/user/docs/file.txt";
+p.filename();       // "file.txt"
+p.stem();           // "file"
+p.extension();      // ".txt"
+p.parent_path();    // "/home/user/docs"
+
+fs::exists(p);
+fs::is_directory(p.parent_path());
+fs::file_size(p);
+fs::create_directories("/new/nested/path");
+
+// Iterate directory
+for (const auto& entry : fs::directory_iterator("/home/user")) {
+    std::cout << entry.path() << "\n";
+}
+// Recursive
+for (const auto& entry : fs::recursive_directory_iterator(".")) {
+    if (entry.path().extension() == ".cpp") {
+        std::cout << entry.path() << "\n";
+    }
+}
+
+// --- Parallel algorithms (requires linking -ltbb on Linux) ---
+#include <algorithm>
+#include <execution>
+std::vector<double> big_data(1'000'000, 1.0);
+
+// Parallel sort
+std::sort(std::execution::par_unseq, big_data.begin(), big_data.end());
+
+// Parallel transform
+std::transform(std::execution::par, big_data.begin(), big_data.end(),
+               big_data.begin(), [](double x) { return x * x; });
+
+// Parallel reduce (sum)
+double total = std::reduce(std::execution::par, big_data.begin(), big_data.end(), 0.0);
+
+// --- Inline variables (define in headers without ODR violation) ---
+// header.hpp
+inline constexpr int MAX_CONNECTIONS = 100;  // OK in headers — all TUs share one instance
+inline const std::string DEFAULT_HOST = "localhost";
+
+// --- Class Template Argument Deduction (CTAD) ---
+std::pair  p2(42, "hello");     // pair<int, const char*>
+std::vector v{1, 2, 3, 4, 5};  // vector<int>
+std::tuple  t{1, 2.0, 'a'};    // tuple<int, double, char>
+
+// --- [[nodiscard]], [[maybe_unused]], [[fallthrough]] ---
+[[nodiscard]] int important_result() { return 42; }
+// important_result();  // warning: discarding nodiscard return value
+
+void process([[maybe_unused]] int debug_flag) { /* may not use debug_flag */ }
+
+switch (code) {
+    case 1:
+        handle_one();
+        [[fallthrough]];  // intentional fallthrough — suppresses warning
+    case 2:
+        handle_two();
+        break;
+}
+
+// --- std::string_view, std::optional, std::variant, std::any ---
+// (Covered in STL section)
+```
+
+## C++20 Features
+
+### Concepts
+
+```cpp
+#include <concepts>
+
+// Constrain template parameters
+template <std::integral T>
+T gcd(T a, T b) {
+    while (b) { a %= b; std::swap(a, b); }
+    return a;
+}
+
+// Custom concept
+template <typename T>
+concept Hashable = requires(T t) {
+    { std::hash<T>{}(t) } -> std::convertible_to<std::size_t>;
+};
+
+template <Hashable K, typename V>
+class HashMap { /* ... */ };
+```
+
+### Ranges
+
+```cpp
+#include <ranges>
+#include <vector>
+
+std::vector<int> numbers{1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+
+// Lazy pipeline — no intermediate containers
+auto squares_of_evens = numbers
+    | std::views::filter([](int n){ return n % 2 == 0; })
+    | std::views::transform([](int n){ return n * n; });
+
+for (int n : squares_of_evens) std::cout << n << " ";  // 4 16 36 64 100
+```
+
+### std::format (C++20)
+
+```cpp
+#include <format>
+
+// Type-safe, readable formatting (replaces sprintf, printf, stringstream)
+std::string s1 = std::format("Hello, {}!", "World");      // Hello, World!
+std::string s2 = std::format("Pi is {:.4f}", 3.14159);    // Pi is 3.1416
+std::string s3 = std::format("{:>10}", "right");          // "     right" (right-align in 10)
+std::string s4 = std::format("{:<10}", "left");           // "left      " (left-align)
+std::string s5 = std::format("{:0>8b}", 42);              // 00101010  (binary, width 8)
+std::string s6 = std::format("{:08X}", 255);              // 000000FF  (hex, width 8)
+std::string s7 = std::format("[{}, {}, {}]", 1, 2.5, 'a'); // [1, 2.5, a]
+
+// Named arguments (C++23 extension, or use positional)
+std::string s8 = std::format("{0} and {0} and {1}", "foo", "bar");  // positional
+
+// std::print (C++23) — directly print formatted output
+// std::print("Hello, {}!\n", "World");  // like printf but type-safe
+
+// Custom formatter
+struct Point { float x, y; };
+
+template <>
+struct std::formatter<Point> {
+    constexpr auto parse(std::format_parse_context& ctx) { return ctx.begin(); }
+    auto format(const Point& p, std::format_context& ctx) const {
+        return std::format_to(ctx.out(), "({:.2f}, {:.2f})", p.x, p.y);
+    }
+};
+
+Point pos{1.5f, 2.75f};
+std::cout << std::format("Position: {}\n", pos);  // Position: (1.50, 2.75)
+```
+
+### Three-Way Comparison (Spaceship Operator &lt;=>)
+
+```cpp
+#include <compare>
+
+struct Version {
+    int major, minor, patch;
+
+    // Generate all 6 comparisons (<, <=, >, >=, ==, !=) from one declaration
+    auto operator<=>(const Version&) const = default;
+};
+
+Version v1{1, 2, 3}, v2{1, 3, 0};
+bool older = v1 < v2;   // true — lexicographic comparison
+bool same  = v1 == v1;  // true
+
+// Manual spaceship for custom ordering
+struct Temperature {
+    double celsius;
+    auto operator<=>(const Temperature& rhs) const {
+        // std::strong_ordering, std::weak_ordering, or std::partial_ordering
+        return celsius <=> rhs.celsius;
+    }
+    bool operator==(const Temperature&) const = default;
+};
+```
+
+### Coroutines
+
+```cpp
+#include <coroutine>
+#include <generator>  // C++23 std::generator, or implement your own
+
+// A coroutine is a function that can suspend and resume
+
+// Generator using co_yield
+// (Requires a generator implementation — shown conceptually)
+template <typename T>
+struct Generator {
+    struct promise_type {
+        T current_value;
+        auto get_return_object() { return Generator{this}; }
+        auto initial_suspend() { return std::suspend_always{}; }
+        auto final_suspend() noexcept { return std::suspend_always{}; }
+        void unhandled_exception() { std::terminate(); }
+        auto yield_value(T value) {
+            current_value = value;
+            return std::suspend_always{};
+        }
+        void return_void() {}
+    };
+    // ... iterator interface ...
+};
+
+Generator<int> fibonacci() {
+    int a = 0, b = 1;
+    while (true) {
+        co_yield a;        // suspend here, return a to caller
+        auto next = a + b;
+        a = b;
+        b = next;
+    }
+}
+
+// Async coroutine with co_await
+// (Requires a Task/Future coroutine library)
+Task<int> async_read_file(const std::string& path) {
+    auto content = co_await async_read(path);  // suspend while I/O completes
+    co_return static_cast<int>(content.size()); // resume here
+}
+```
+
+### C++20 Modules
+
+```cpp
+// --- math.ixx (module interface unit) ---
+export module math;   // declares module "math"
+
+export namespace math {
+    // Only exported declarations are visible to importers
+    constexpr double PI = 3.14159265358979323846;
+
+    double sqrt(double x);
+    double pow(double base, int exp);
+
+    template <typename T>
+    T clamp(T value, T lo, T hi) {
+        return value < lo ? lo : (value > hi ? hi : value);
+    }
+}
+
+// Private details — NOT exported
+namespace math::detail {
+    double newton_raphson(double x, double guess);
+}
+
+// --- math.cpp (module implementation unit) ---
+module math;
+
+double math::sqrt(double x) {
+    return math::detail::newton_raphson(x, x / 2.0);
+}
+
+// --- main.cpp ---
+import math;   // import the module (not #include)
+import <iostream>;  // can also import standard headers (with module-aware stdlib)
+
+int main() {
+    std::cout << math::PI << "\n";
+    std::cout << math::sqrt(2.0) << "\n";
+    std::cout << math::clamp(15, 0, 10) << "\n";  // 10
+}
+```
+
+```bash
+# Build with modules (GCC 11+, Clang 16+, MSVC 2019+)
+g++ -std=c++20 -fmodules-ts math.ixx main.cpp -o program
+# or with CMake 3.28+:
+# target_sources(myapp PRIVATE main.cpp)
+# target_sources(myapp PUBLIC FILE_SET CXX_MODULES FILES math.ixx)
+```
+
+## C++23 Preview
+
+```cpp
+// --- std::expected<T, E> — result type (like Rust's Result) ---
+#include <expected>
+std::expected<int, std::string> safe_divide(int a, int b) {
+    if (b == 0) return std::unexpected{"Division by zero"};
+    return a / b;
+}
+
+auto result = safe_divide(10, 0);
+if (!result) std::cerr << result.error() << "\n";
+int val = result.value_or(0);
+
+// Monadic operations
+auto doubled = safe_divide(10, 2)
+    .and_then([](int v) -> std::expected<int, std::string> { return v * 2; })
+    .or_else([](auto e) -> std::expected<int, std::string> { return 0; });
+
+// --- std::stacktrace ---
+#include <stacktrace>
+void debug_function() {
+    auto trace = std::stacktrace::current();
+    std::cout << trace << "\n";  // prints call stack
+}
+
+// --- std::flat_map / std::flat_set --- (sorted arrays, better cache performance)
+#include <flat_map>
+std::flat_map<std::string, int> fmap;  // stored in two sorted vectors
+fmap.insert({"Alice", 100});
+// Same interface as std::map but ~3-5× faster for small maps
+
+// --- std::mdspan — multi-dimensional span ---
+#include <mdspan>
+std::vector<float> data(6 * 4, 0.0f);
+auto matrix = std::mdspan(data.data(), 6, 4);  // 6×4 matrix view
+matrix[2, 3] = 3.14f;  // access element (row 2, col 3)
+
+// --- if consteval (C++23) ---
+constexpr int compute(int x) {
+    if consteval {
+        // compile-time branch
+        return x * x;
+    } else {
+        // runtime branch (may use non-constexpr operations)
+        return x * x + get_runtime_offset();
+    }
+}
+```
+
+## Complete Ranges Pipeline Examples
+
+```cpp
+#include <ranges>
+#include <vector>
+#include <string>
+#include <algorithm>
+#include <numeric>
+
+// Example 1: Word frequency analysis
+std::vector<std::string> words{"the", "cat", "sat", "on", "the", "mat", "the"};
+auto unique_sorted = words
+    | std::views::all
+    // Sort (must collect first since sort needs random access)
+    // then use ranges algorithms
+    ;
+
+std::ranges::sort(words);
+auto last = std::ranges::unique(words);
+words.erase(last.begin(), last.end());  // "cat", "mat", "on", "sat", "the"
+
+// Example 2: Fibonacci sequence (first 10)
+auto fibs = std::views::iota(0)  // 0, 1, 2, 3, ...
+    | std::views::take(10)
+    | std::views::transform([a=0, b=1](int) mutable {
+        int result = a; a = b; b = result + b; return result;
+    });  // 0, 1, 1, 2, 3, 5, 8, 13, 21, 34
+
+// Example 3: CSV-style string processing
+std::string csv = "1,2,3,4,5,6,7,8,9,10";
+auto numbers = csv
+    | std::views::split(',')
+    | std::views::transform([](auto rng) {
+        auto str = std::string(rng.begin(), rng.end());
+        return std::stoi(str);
+    });
+int sum = std::ranges::fold_left(numbers, 0, std::plus{});  // C++23
+
+// Example 4: Zip two ranges
+std::vector<std::string> names{"Alice", "Bob", "Carol"};
+std::vector<int> scores{100, 85, 92};
+
+for (auto [name, score] : std::views::zip(names, scores)) {
+    std::cout << name << ": " << score << "\n";
+}
+```
+
+<CardGrid>
+  <Card title="Adopt Incrementally" icon="star">
+    C++20 features can be adopted one at a time. Start with `std::format` (replaces printf/stringstream), then `std::span` (replaces raw pointers for arrays), then concepts (replaces SFINAE). Modules require build system support — migrate last.
+</Card>
+  <Card title="Compiler Feature Status" icon="laptop">
+    Check cppreference.com/compiler_support for detailed per-feature compiler support. As of 2024: GCC 13, Clang 17, and MSVC 2022 all have excellent C++20 support. C++23 support varies — check before using `std::expected`, `std::print`, or `std::flat_map`.
+</Card>
+</CardGrid>

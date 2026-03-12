@@ -1,0 +1,316 @@
+---
+title: Getting Started with SQLite
+description: SQLite CLI commands, Python sqlite3 module, Node.js better-sqlite3, WAL mode setup, foreign keys, and in-memory databases.
+sidebar:
+  order: 2
+tags: [database, sql]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+## SQLite CLI
+
+The `sqlite3` command-line tool comes bundled with macOS and most Linux distributions. On Windows, download from [sqlite.org](https://sqlite.org/download.html):
+
+```bash
+# Open or create a database
+sqlite3 myapp.db
+
+# Open with initial SQL
+sqlite3 myapp.db "SELECT sqlite_version();"
+
+# Run a SQL file
+sqlite3 myapp.db < schema.sql
+sqlite3 myapp.db ".read schema.sql"
+```
+
+### CLI Commands
+
+| Command | Description |
+|---|---|
+| `.tables` | List all tables |
+| `.schema` | Show CREATE statements for all objects |
+| `.schema tablename` | Show CREATE statement for one table |
+| `.headers on` | Show column names in results |
+| `.mode column` | Aligned column output |
+| `.mode box` | Box-drawing table output |
+| `.mode csv` | CSV output |
+| `.mode json` | JSON output |
+| `.mode markdown` | Markdown table output |
+| `.output file.csv` | Redirect output to file |
+| `.output stdout` | Reset output to terminal |
+| `.import file.csv tablename` | Import CSV into table |
+| `.read file.sql` | Execute a SQL file |
+| `.timer on` | Show query execution time |
+| `.indexes tablename` | List indexes on a table |
+| `.help` | Show all commands |
+| `.quit` or `.exit` | Exit the CLI |
+
+```bash
+sqlite3 myapp.db <<'EOF'
+.headers on
+.mode box
+.timer on
+SELECT name, email FROM users LIMIT 5;
+.quit
+EOF
+```
+
+## Creating Your First Table
+
+```sql
+-- Create a table
+CREATE TABLE IF NOT EXISTS users (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  email      TEXT NOT NULL UNIQUE,
+  name       TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Create an index
+CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);
+
+-- Insert data
+INSERT INTO users (email, name) VALUES ('alice@example.com', 'Alice');
+INSERT INTO users (email, name) VALUES ('bob@example.com',   'Bob');
+
+-- Query
+SELECT * FROM users;
+```
+
+## Python `sqlite3` Module
+
+Python's standard library includes `sqlite3` — no additional installation needed:
+
+```python
+import sqlite3
+from pathlib import Path
+from contextlib import closing
+
+DB_PATH = Path('myapp.db')
+
+# Basic connection
+conn = sqlite3.connect(DB_PATH)
+
+# Recommended: use row_factory for dict-like access
+conn.row_factory = sqlite3.Row
+
+# Enable WAL mode and foreign keys
+conn.execute('PRAGMA journal_mode = WAL')
+conn.execute('PRAGMA foreign_keys = ON')
+
+# Create table
+conn.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        id    INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT NOT NULL UNIQUE,
+        name  TEXT NOT NULL
+    )
+''')
+conn.commit()
+
+# Insert a single row
+cursor = conn.execute(
+    'INSERT INTO users (email, name) VALUES (?, ?)',
+    ('alice@example.com', 'Alice')
+)
+print(f'Inserted row id: {cursor.lastrowid}')
+conn.commit()
+
+# Insert multiple rows efficiently
+users = [
+    ('bob@example.com',   'Bob'),
+    ('carol@example.com', 'Carol'),
+    ('dave@example.com',  'Dave'),
+]
+conn.executemany('INSERT OR IGNORE INTO users (email, name) VALUES (?, ?)', users)
+conn.commit()
+
+# Fetch one row
+row = conn.execute('SELECT * FROM users WHERE id = ?', (1,)).fetchone()
+print(dict(row))   # {'id': 1, 'email': 'alice@example.com', 'name': 'Alice'}
+
+# Fetch all rows
+rows = conn.execute('SELECT * FROM users ORDER BY name').fetchall()
+for row in rows:
+    print(row['name'], row['email'])
+
+# Fetch in batches (memory-efficient for large results)
+cursor = conn.execute('SELECT * FROM users')
+while batch := cursor.fetchmany(100):
+    for row in batch:
+        process(row)
+
+conn.close()
+```
+
+### Context Manager Pattern
+
+```python
+# Using the connection as a context manager (auto-commit or rollback)
+with sqlite3.connect('myapp.db') as conn:
+    conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA foreign_keys = ON')
+
+    # The connection auto-commits on success, rolls back on exception
+    conn.execute('INSERT INTO users (email, name) VALUES (?, ?)', ('eve@example.com', 'Eve'))
+    # No explicit commit needed — context manager handles it
+
+# For explicit transaction control:
+conn = sqlite3.connect('myapp.db')
+try:
+    conn.execute('BEGIN')
+    conn.execute('UPDATE accounts SET balance = balance - 100 WHERE id = 1')
+    conn.execute('UPDATE accounts SET balance = balance + 100 WHERE id = 2')
+    conn.execute('COMMIT')
+except Exception:
+    conn.execute('ROLLBACK')
+    raise
+finally:
+    conn.close()
+```
+
+## Node.js with `better-sqlite3`
+
+`better-sqlite3` is the recommended SQLite library for Node.js — synchronous, fast, and simple:
+
+```bash
+npm install better-sqlite3
+# TypeScript types
+npm install -D @types/better-sqlite3
+```
+
+```javascript
+const Database = require('better-sqlite3');
+
+// Open (or create) a database
+const db = new Database('myapp.db', {
+  // verbose: console.log,   // log all SQL statements
+});
+
+// Essential PRAGMAs
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+
+// Create table
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE,
+    name  TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);
+`);
+
+// Prepared statements (prepare once, run many times)
+const insertUser = db.prepare('INSERT OR IGNORE INTO users (email, name) VALUES (@email, @name)');
+const getUserById = db.prepare('SELECT * FROM users WHERE id = @id');
+const getAllUsers = db.prepare('SELECT * FROM users ORDER BY name');
+
+// Run an INSERT (returns info object)
+const info = insertUser.run({ email: 'alice@example.com', name: 'Alice' });
+console.log(info.lastInsertRowid);  // 1
+console.log(info.changes);          // 1
+
+// Get one row
+const user = getUserById.get({ id: 1 });
+console.log(user);  // { id: 1, email: 'alice@example.com', name: 'Alice' }
+
+// Get all rows
+const users = getAllUsers.all();
+console.log(users);
+
+// Iterate without loading all into memory
+for (const user of getAllUsers.iterate()) {
+  process(user);
+}
+
+// Transaction (much faster for bulk inserts)
+const insertMany = db.transaction((users) => {
+  for (const user of users) {
+    insertUser.run(user);
+  }
+});
+
+insertMany([
+  { email: 'bob@example.com',   name: 'Bob'   },
+  { email: 'carol@example.com', name: 'Carol' },
+  { email: 'dave@example.com',  name: 'Dave'  },
+]);
+```
+
+## WAL Mode
+
+WAL (Write-Ahead Logging) is the recommended mode for any multi-connection or performance-sensitive SQLite database:
+
+```sql
+-- Enable WAL mode (persists to the database file)
+PRAGMA journal_mode = WAL;
+
+-- Recommended companion PRAGMAs
+PRAGMA synchronous = NORMAL;    -- safe with WAL, faster than FULL
+PRAGMA busy_timeout = 5000;     -- wait 5s instead of failing immediately on lock
+
+-- Auto-checkpoint configuration
+PRAGMA wal_autocheckpoint = 1000;  -- checkpoint after 1000 pages (default)
+```
+
+```python
+# Python: set once on database creation
+conn = sqlite3.connect('myapp.db')
+conn.execute('PRAGMA journal_mode = WAL')
+conn.execute('PRAGMA synchronous = NORMAL')
+conn.execute('PRAGMA busy_timeout = 5000')
+conn.commit()
+conn.close()
+```
+
+WAL mode creates two additional files (`-wal` and `-shm`). These are safe to delete when no connections are open.
+
+## Foreign Keys
+
+:::caution[Foreign keys are OFF by default]
+SQLite was designed for embedded use where referential integrity is managed by the application. Foreign keys must be explicitly enabled per connection. **Always enable them** in production code.
+:::
+
+```sql
+-- Enable for the current connection (must be done on every connection open)
+PRAGMA foreign_keys = ON;
+
+-- Verify
+PRAGMA foreign_keys;  -- returns: 1 (on) or 0 (off)
+
+-- With foreign keys enabled, this will fail:
+CREATE TABLE posts (
+  id      INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  content TEXT NOT NULL
+);
+
+INSERT INTO posts (user_id, content) VALUES (999, 'Hello');
+-- Error: FOREIGN KEY constraint failed (user 999 doesn't exist)
+```
+
+## In-Memory Databases
+
+SQLite supports fully in-memory databases — no files, fastest possible access:
+
+```python
+# Python: in-memory database
+conn = sqlite3.connect(':memory:')
+conn.execute('PRAGMA foreign_keys = ON')
+
+# Shared in-memory database (multiple connections share the same data)
+conn1 = sqlite3.connect('file:memdb?mode=memory&cache=shared', uri=True)
+conn2 = sqlite3.connect('file:memdb?mode=memory&cache=shared', uri=True)
+# conn1 and conn2 see the same data
+```
+
+```javascript
+// Node.js better-sqlite3: in-memory database
+const db = new Database(':memory:');
+```
+
+:::tip[Testing with in-memory SQLite]
+In-memory databases are ideal for unit tests — each test gets a fresh database that is automatically discarded when the connection closes. No cleanup required.
+:::

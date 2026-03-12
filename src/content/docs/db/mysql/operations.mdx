@@ -1,6 +1,6 @@
 ---
-title: MySQL Operations & Data Types
-description: MySQL data types, MySQL-specific SQL syntax, functions, string/date operations, transactions, and query management.
+title: MySQL Operations
+description: MySQL data types, AUTO_INCREMENT, MySQL-specific SQL syntax, string and date functions, transactions, and process management.
 sidebar:
   order: 3
 tags: [database, sql]
@@ -8,508 +8,540 @@ tags: [database, sql]
 
 import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-# MySQL Operations & Data Types
+# MySQL Operations
 
 ## Data Types
 
-Choosing the right data type is critical for storage efficiency, query performance,
-and data integrity.
+Choosing the right data type affects storage size, query performance, and data integrity.
 
 ### Numeric Types
 
-```sql
--- Integer types (signed range shown)
-TINYINT      -- -128 to 127 (1 byte)
-SMALLINT     -- -32,768 to 32,767 (2 bytes)
-MEDIUMINT    -- -8,388,608 to 8,388,607 (3 bytes)
-INT          -- -2,147,483,648 to 2,147,483,647 (4 bytes)
-BIGINT       -- ±9.2 × 10^18 (8 bytes)
-
--- UNSIGNED doubles the positive range
-INT UNSIGNED       -- 0 to 4,294,967,295
-BIGINT UNSIGNED    -- 0 to 18,446,744,073,709,551,615
-
--- Exact decimal (use for money — avoids floating-point errors)
-DECIMAL(10, 2)   -- Up to 10 digits total, 2 after decimal point
-NUMERIC(10, 2)   -- Synonym for DECIMAL
-
--- Approximate (avoid for money)
-FLOAT            -- 4 bytes, ~7 significant digits
-DOUBLE           -- 8 bytes, ~15 significant digits
-
--- BIT type
-BIT(8)           -- 1-64 bits, stored compactly
-```
+| Type | Storage | Signed Range | Unsigned Range | Use Case |
+|------|---------|-------------|---------------|----------|
+| `TINYINT` | 1 byte | -128 to 127 | 0 to 255 | Boolean-like flags, small enums |
+| `SMALLINT` | 2 bytes | -32,768 to 32,767 | 0 to 65,535 | Port numbers, small IDs |
+| `MEDIUMINT` | 3 bytes | -8.3M to 8.3M | 0 to 16.7M | Medium-scale IDs |
+| `INT` / `INTEGER` | 4 bytes | -2.1B to 2.1B | 0 to 4.29B | Standard IDs, counts |
+| `BIGINT` | 8 bytes | ±9.2 quintillion | 0 to 18.4Q | Large IDs, timestamps, file sizes |
+| `DECIMAL(p,s)` | Variable | Exact decimal | — | Money, financial data |
+| `FLOAT` | 4 bytes | ~7 decimal digits | — | Scientific (imprecise) |
+| `DOUBLE` | 8 bytes | ~15 decimal digits | — | Scientific (imprecise) |
+| `BIT(M)` | ~M/8 bytes | 1 to 64 bits | — | Bit flags |
 
 ```sql
-CREATE TABLE products (
-  id          INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  price       DECIMAL(10, 2) NOT NULL,
-  quantity    SMALLINT UNSIGNED NOT NULL DEFAULT 0,
-  rating      FLOAT,
-  views       BIGINT UNSIGNED NOT NULL DEFAULT 0,
-  flags       BIT(8) DEFAULT b'00000000'
-);
+-- DECIMAL for money (never use FLOAT/DOUBLE for currency!)
+price DECIMAL(10, 2)      -- up to 99,999,999.99
+tax_rate DECIMAL(5, 4)    -- up to 9.9999
+
+-- UNSIGNED saves space and improves range for IDs
+user_id INT UNSIGNED NOT NULL AUTO_INCREMENT
+
+-- TINYINT(1) is MySQL's boolean convention
+is_active TINYINT(1) NOT NULL DEFAULT 1
+-- Or use the alias:
+is_deleted BOOLEAN NOT NULL DEFAULT FALSE   -- aliases to TINYINT(1)
 ```
+
+:::caution[Display Width is Deprecated]
+`INT(11)`, `BIGINT(20)` etc. — the number in parentheses is a **display width hint**, NOT the storage size. It has no effect on the range of values stored and is **deprecated in MySQL 8.0.17**. Use `INT` without a width.
+:::
 
 ### String Types
 
+| Type | Max Size | Storage | Use Case |
+|------|---------|---------|----------|
+| `CHAR(n)` | 255 chars | Fixed n bytes | Fixed-length codes (ISO country codes, MD5 hashes) |
+| `VARCHAR(n)` | 65,535 bytes | 1-2 bytes overhead + actual | Variable strings, names, emails |
+| `TINYTEXT` | 255 bytes | 1-byte length prefix | Small text |
+| `TEXT` | 65,535 bytes | 2-byte length prefix | Medium text, descriptions |
+| `MEDIUMTEXT` | 16 MB | 3-byte length prefix | Blog posts, HTML |
+| `LONGTEXT` | 4 GB | 4-byte length prefix | Very large text, documents |
+| `TINYBLOB` | 255 bytes | 1-byte length prefix | Small binary |
+| `BLOB` | 65,535 bytes | 2-byte length prefix | Images, files (prefer filesystem) |
+| `MEDIUMBLOB` | 16 MB | 3-byte length prefix | Medium binary |
+| `LONGBLOB` | 4 GB | 4-byte length prefix | Large binary |
+| `BINARY(n)` | 255 bytes | Fixed n bytes | Fixed-length binary (UUIDs stored as bytes) |
+| `VARBINARY(n)` | 65,535 bytes | Variable | Variable-length binary |
+| `ENUM('a','b')` | 1-2 bytes | 1-2 bytes | One value from a fixed list |
+| `SET('a','b')` | 1-8 bytes | 1-8 bytes | Multiple values from a fixed list |
+
 ```sql
--- Fixed-length (padded with spaces, max 255)
-CHAR(50)         -- Always uses 50 bytes; fast for fixed-length data (e.g., country codes)
+-- Use CHAR for fixed-length strings
+country_code CHAR(2) NOT NULL,       -- 'US', 'GB'
+uuid_column CHAR(36),                -- '550e8400-e29b-41d4-a716-446655440000'
 
--- Variable-length (stores only actual length, max 65,535 minus other columns)
-VARCHAR(255)     -- Common for names, emails, URLs
-VARCHAR(65535)   -- Theoretical max (limited by row size)
+-- UUID stored efficiently as BINARY(16)
+id BINARY(16) NOT NULL DEFAULT (UUID_TO_BIN(UUID())),
 
--- Large text types (stored off-row if large enough)
-TINYTEXT         -- Max 255 bytes
-TEXT             -- Max 65,535 bytes (~64 KB)
-MEDIUMTEXT       -- Max 16,777,215 bytes (~16 MB)
-LONGTEXT         -- Max 4,294,967,295 bytes (~4 GB)
+-- ENUM (values stored as integers internally)
+status ENUM('pending', 'processing', 'shipped', 'delivered', 'cancelled'),
 
--- Binary equivalent of string types
-BINARY(50)       -- Fixed-length binary
-VARBINARY(255)   -- Variable-length binary
-TINYBLOB         -- Max 255 bytes binary
-BLOB             -- Max 65,535 bytes binary
-MEDIUMBLOB       -- Max 16 MB binary
-LONGBLOB         -- Max 4 GB binary
-
--- Special
-ENUM('small', 'medium', 'large')    -- Stored as integer; max 65,535 members
-SET('read', 'write', 'execute')     -- Bit field; can store multiple values; max 64 members
+-- SET (bitmask internally)
+permissions SET('read', 'write', 'execute', 'admin')
 ```
-
-:::tip[CHAR vs VARCHAR]
-Use `CHAR` for truly fixed-length strings like ISO country codes (`CHAR(2)`),
-UUID stored as string (`CHAR(36)`), or MD5 hashes (`CHAR(32)`). For everything
-else, use `VARCHAR`. `CHAR` pads with spaces on storage and strips them on retrieval.
-:::
 
 ### Date and Time Types
 
-```sql
-DATE             -- 'YYYY-MM-DD', range: 1000-01-01 to 9999-12-31
-TIME             -- 'HH:MM:SS', range: -838:59:59 to 838:59:59
-DATETIME         -- 'YYYY-MM-DD HH:MM:SS', range: 1000-01-01 to 9999-12-31
-                 -- NOT timezone-aware; stores literal value
-TIMESTAMP        -- 'YYYY-MM-DD HH:MM:SS', range: 1970-01-01 to 2038-01-19
-                 -- Timezone-aware; stored as UTC internally
-YEAR             -- 4-digit year, range: 1901 to 2155
-```
+| Type | Storage | Format | Range | Notes |
+|------|---------|--------|-------|-------|
+| `DATE` | 3 bytes | YYYY-MM-DD | 1000-01-01 to 9999-12-31 | Date only |
+| `TIME[(fsp)]` | 3-6 bytes | HH:MM:SS[.fraction] | -838:59:59 to 838:59:59 | Duration or time of day |
+| `DATETIME[(fsp)]` | 5-8 bytes | YYYY-MM-DD HH:MM:SS | 1000-01-01 to 9999-12-31 | Absolute time, not TZ-aware |
+| `TIMESTAMP[(fsp)]` | 4-7 bytes | YYYY-MM-DD HH:MM:SS | 1970-01-01 to 2038-01-19 | UTC-stored, TZ-converted on read |
+| `YEAR` | 1 byte | YYYY | 1901 to 2155 | Year only |
 
 ```sql
-CREATE TABLE events (
-  id           INT AUTO_INCREMENT PRIMARY KEY,
-  event_date   DATE NOT NULL,
-  start_time   TIME NOT NULL,
-  created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  -- AUTO UPDATE: updated_at automatically refreshes on every row update
-  publish_year YEAR
-);
-```
+-- DATETIME vs TIMESTAMP
+created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+             ON UPDATE CURRENT_TIMESTAMP(3),
+-- TIMESTAMP auto-updates on row modification; DATETIME does not
+-- TIMESTAMP stores UTC, converts to session time_zone on read
+-- TIMESTAMP has a 2038 problem; DATETIME does not
 
-:::caution[TIMESTAMP Year 2038 Problem]
-`TIMESTAMP` is stored as a 32-bit Unix timestamp, which overflows on January 19, 2038.
-For dates beyond 2038, use `DATETIME`. MySQL 8.0 partially mitigates this but
-the fundamental limitation remains in `TIMESTAMP`.
-:::
+-- fsp = fractional seconds precision (0-6)
+event_time DATETIME(6)   -- microsecond precision
+```
 
 ### JSON Type
 
 ```sql
-CREATE TABLE orders (
-  id       INT AUTO_INCREMENT PRIMARY KEY,
-  metadata JSON,           -- Validated JSON; stored in binary format internally
-  tags     JSON            -- Can index specific JSON paths with virtual columns
-);
+-- JSON type validates JSON on insert
+metadata JSON,
 
--- Insert JSON
-INSERT INTO orders (metadata) VALUES
-  ('{"status": "pending", "items": [{"sku": "ABC", "qty": 2}]}');
+-- Querying
+SELECT metadata->>'$.name' AS name FROM products;
+SELECT * FROM products WHERE metadata->'$.price' > 100;
 
--- Extract JSON value
-SELECT metadata->>'$.status' FROM orders;           -- Returns unquoted string
-SELECT JSON_EXTRACT(metadata, '$.items[0].sku') FROM orders;
+-- Generated column from JSON (indexable!)
+ALTER TABLE products
+  ADD COLUMN price_cents INT
+  GENERATED ALWAYS AS (metadata->'$.price' * 100) STORED,
+  ADD INDEX idx_price (price_cents);
 ```
 
 ## AUTO_INCREMENT
 
 ```sql
--- AUTO_INCREMENT column (must be a key)
 CREATE TABLE users (
-  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  name VARCHAR(100) NOT NULL
-);
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  name VARCHAR(255) NOT NULL,
+  PRIMARY KEY (id)
+) AUTO_INCREMENT = 1000;   -- start from 1000
 
--- Insert and retrieve last ID
-INSERT INTO users (name) VALUES ('Alice');
-SELECT LAST_INSERT_ID();   -- Returns last AUTO_INCREMENT value for this connection
+-- Get the ID of the last inserted row in this connection
+SELECT LAST_INSERT_ID();
 
--- Bulk insert — LAST_INSERT_ID() returns first ID of the batch
-INSERT INTO users (name) VALUES ('Bob'), ('Charlie'), ('Diana');
-SELECT LAST_INSERT_ID();   -- Returns Bob's ID; Charlie and Diana are +1, +2
-
--- Check current AUTO_INCREMENT value
-SHOW TABLE STATUS LIKE 'users';
--- Or:
-SELECT AUTO_INCREMENT FROM information_schema.TABLES
-WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users';
-
--- Reset AUTO_INCREMENT
-ALTER TABLE users AUTO_INCREMENT = 1;
--- Note: MySQL won't set it lower than MAX(id) + 1
-
--- Change AUTO_INCREMENT start value at creation
-CREATE TABLE invoices (
-  id INT AUTO_INCREMENT PRIMARY KEY
-) AUTO_INCREMENT = 10000;
+-- In application code, use the connector's method (same behavior)
+-- mysql2 (Node.js): result.insertId
+-- mysql-connector-python: cursor.lastrowid
 ```
 
-## MySQL-Specific INSERT Variants
+### AUTO_INCREMENT Behavior
+
+- `AUTO_INCREMENT` only increments, never decrements, even if rows are deleted
+- Gaps are permanent — a failed transaction does NOT release the auto-increment value
+- The counter is stored in memory for InnoDB (MySQL 8.0 persists it to the redo log — no reuse after restart)
+- The maximum value is the max for the column type; inserts fail silently or error when exhausted
+
+```sql
+-- Check current AUTO_INCREMENT value
+SHOW TABLE STATUS LIKE 'users'\G
+SELECT AUTO_INCREMENT FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'myapp' AND TABLE_NAME = 'users';
+
+-- Reset AUTO_INCREMENT (only works if new value > current max)
+ALTER TABLE users AUTO_INCREMENT = 1;
+```
+
+:::caution[BIGINT for Production IDs]
+Use `BIGINT UNSIGNED` for primary keys in production tables. `INT UNSIGNED` maxes out at ~4.29 billion rows. If you're inserting millions of rows per day, `INT` exhausts in years. Migrating from INT to BIGINT on a live table is painful.
+:::
+
+## MySQL-Specific DML
 
 ### REPLACE INTO
 
-```sql
--- REPLACE = DELETE + INSERT if PK/UNIQUE conflict; INSERT if no conflict
--- WARNING: triggers BEFORE/AFTER DELETE + BEFORE/AFTER INSERT, not UPDATE
-REPLACE INTO users (id, name, email) VALUES (1, 'Alice Updated', 'alice@example.com');
+`REPLACE` deletes the existing row and inserts a new one if a duplicate key is found. It is equivalent to `DELETE` + `INSERT`, which means:
+- Auto-increment ID increases for each replace
+- Foreign key constraints on the deleted row are checked
+- Triggers fire twice (DELETE trigger + INSERT trigger)
 
--- Also works with SELECT
-REPLACE INTO users_backup SELECT * FROM users WHERE active = 1;
+```sql
+REPLACE INTO users (id, name, email)
+VALUES (42, 'Alice', 'alice@example.com');
+-- If id=42 exists: deletes row 42, inserts new row with id=42
+-- If id=42 doesn't exist: inserts new row
 ```
 
 ### INSERT IGNORE
 
-```sql
--- Skip rows that would cause a duplicate key or constraint error
-INSERT IGNORE INTO users (id, name) VALUES (1, 'Duplicate ID — silently ignored');
+Silently ignores rows that would violate a UNIQUE or PRIMARY KEY constraint. Other errors (e.g., data type mismatches) are also downgraded to warnings.
 
--- Useful for upsert-like operations where you only want new rows
-INSERT IGNORE INTO user_roles (user_id, role_id) VALUES (1, 2), (1, 3), (1, 4);
+```sql
+INSERT IGNORE INTO users (id, name, email)
+VALUES (42, 'Alice', 'alice@example.com');
+-- If id=42 exists: silently skips the insert (no error)
+-- Downside: also silences other errors — use carefully
 ```
 
 ### INSERT ... ON DUPLICATE KEY UPDATE
 
+The most useful: inserts a row, or updates specific columns if a duplicate key is found. Does not delete the existing row.
+
 ```sql
--- If PK or UNIQUE key exists: UPDATE; otherwise INSERT
-INSERT INTO page_views (page, views)
-VALUES ('homepage', 1)
-ON DUPLICATE KEY UPDATE views = views + 1;
-
--- Multi-column update
-INSERT INTO product_stats (product_id, views, purchases)
-VALUES (42, 1, 0)
+INSERT INTO page_views (page_id, view_count)
+VALUES (101, 1)
 ON DUPLICATE KEY UPDATE
-  views = views + VALUES(views),
-  purchases = purchases + VALUES(purchases);
+  view_count = view_count + 1,
+  last_viewed = NOW();
 
--- Using new alias syntax (MySQL 8.0.19+)
-INSERT INTO product_stats (product_id, views, purchases)
-VALUES (42, 1, 0) AS new_row
+-- Use VALUES() to reference the inserted value (deprecated in 8.0.20)
+INSERT INTO products (sku, name, price)
+VALUES ('ABC123', 'Widget', 9.99)
 ON DUPLICATE KEY UPDATE
-  views = views + new_row.views,
-  purchases = purchases + new_row.purchases;
+  price = VALUES(price),            -- deprecated syntax
+  name = VALUES(name);
+
+-- Modern syntax (MySQL 8.0.19+) using alias
+INSERT INTO products (sku, name, price)
+VALUES ('ABC123', 'Widget', 9.99) AS new_vals
+ON DUPLICATE KEY UPDATE
+  price = new_vals.price,
+  name = new_vals.name;
 ```
 
 ### LOAD DATA INFILE
 
+Bulk import from a CSV or delimited text file. Much faster than individual INSERTs.
+
 ```sql
--- Bulk load from CSV file (fastest way to import large datasets)
+-- Load CSV into table
 LOAD DATA INFILE '/var/lib/mysql-files/users.csv'
 INTO TABLE users
+CHARACTER SET utf8mb4
 FIELDS TERMINATED BY ','
-       ENCLOSED BY '"'
+OPTIONALLY ENCLOSED BY '"'
 LINES TERMINATED BY '\n'
-IGNORE 1 ROWS       -- Skip header row
+IGNORE 1 LINES              -- skip header row
 (name, email, created_at);
 
--- LOAD DATA LOCAL INFILE from client machine
-LOAD DATA LOCAL INFILE '/home/user/data.csv'
+-- Load from client machine (not server filesystem)
+LOAD DATA LOCAL INFILE '/home/user/users.csv'
 INTO TABLE users
-FIELDS TERMINATED BY ','
-LINES TERMINATED BY '\n'
-IGNORE 1 ROWS;
+...;
+-- Requires --local-infile=1 on server and client
 ```
-
-:::tip[LOAD DATA Performance]
-`LOAD DATA INFILE` is 20x faster than individual `INSERT` statements for bulk imports.
-Temporarily disable indexes with `ALTER TABLE t DISABLE KEYS` before loading into
-MyISAM tables, then re-enable with `ALTER TABLE t ENABLE KEYS`.
-:::
 
 ## GROUP BY and ONLY_FULL_GROUP_BY
 
+MySQL's `ONLY_FULL_GROUP_BY` SQL mode (enabled by default in MySQL 5.7.5+) enforces standard SQL: every non-aggregated column in `SELECT` must be in `GROUP BY` or be functionally dependent on a `GROUP BY` column.
+
 ```sql
--- MySQL 5.7+ enables ONLY_FULL_GROUP_BY by default
--- All non-aggregated columns in SELECT must be in GROUP BY
-SELECT department, name, COUNT(*)    -- ERROR: 'name' not in GROUP BY
-FROM employees
-GROUP BY department;
+-- FAILS with ONLY_FULL_GROUP_BY (email is not in GROUP BY)
+SELECT name, email, COUNT(*) FROM orders GROUP BY name;
 
--- Correct: either aggregate name or include in GROUP BY
-SELECT department, COUNT(*) as emp_count
-FROM employees
-GROUP BY department;
+-- CORRECT: include email in GROUP BY
+SELECT name, email, COUNT(*) FROM orders GROUP BY name, email;
 
--- Or use ANY_VALUE() if you accept any arbitrary value from the group
-SELECT department, ANY_VALUE(name) as sample_name, COUNT(*)
-FROM employees
-GROUP BY department;
+-- Or use ANY_VALUE() to suppress the error
+SELECT name, ANY_VALUE(email), COUNT(*) FROM orders GROUP BY name;
 
--- Check/change sql_mode
+-- Check current SQL modes
 SELECT @@sql_mode;
--- To disable ONLY_FULL_GROUP_BY (not recommended):
+
+-- Temporarily disable (not recommended for production)
 SET SESSION sql_mode = sys.list_drop(@@session.sql_mode, 'ONLY_FULL_GROUP_BY');
 ```
 
 ## LIMIT with UPDATE and DELETE
 
 ```sql
--- MySQL allows LIMIT on UPDATE and DELETE (non-standard)
-DELETE FROM logs WHERE created_at < DATE_SUB(NOW(), INTERVAL 90 DAY) LIMIT 1000;
+-- Delete only the oldest 100 rows
+DELETE FROM logs
+WHERE created_at < DATE_SUB(NOW(), INTERVAL 30 DAY)
+ORDER BY created_at ASC
+LIMIT 100;
 
--- Delete in batches to avoid long locks
-REPEAT
-  DELETE FROM logs WHERE created_at < DATE_SUB(NOW(), INTERVAL 90 DAY) LIMIT 1000;
-UNTIL ROW_COUNT() = 0 END REPEAT;
-
--- Update with LIMIT
-UPDATE products SET featured = 0 ORDER BY updated_at LIMIT 100;
+-- Update only 50 rows at a time (batching)
+UPDATE products
+SET status = 'archived'
+WHERE last_sold < '2020-01-01'
+ORDER BY id
+LIMIT 50;
 ```
+
+:::tip[Batch Large Operations]
+For large `DELETE` or `UPDATE` operations on millions of rows, always use `LIMIT` in a loop to avoid locking the table for too long and filling the undo log:
+```sql
+-- Loop in application code until rows_affected = 0
+DELETE FROM old_sessions WHERE expires_at < NOW() LIMIT 1000;
+```
+:::
 
 ## String Functions
 
 ```sql
--- Concatenation
-SELECT CONCAT('Hello', ', ', 'World');              -- 'Hello, World'
-SELECT CONCAT_WS(', ', 'Alice', 'Bob', 'Charlie');  -- 'Alice, Bob, Charlie' (with separator)
+-- CONCAT: join strings
+SELECT CONCAT(first_name, ' ', last_name) AS full_name FROM users;
+SELECT CONCAT_WS(', ', city, state, country) AS location FROM addresses;
+-- CONCAT_WS (with separator) skips NULLs; CONCAT returns NULL if any arg is NULL
 
--- GROUP_CONCAT — aggregate multiple rows into one string
-SELECT department, GROUP_CONCAT(name ORDER BY name SEPARATOR ', ') AS employees
-FROM staff GROUP BY department;
--- With DISTINCT and LIMIT on result length
-SET SESSION group_concat_max_len = 10000;
-SELECT GROUP_CONCAT(DISTINCT tag ORDER BY tag SEPARATOR '|') FROM post_tags GROUP BY post_id;
+-- GROUP_CONCAT: aggregate strings within a group
+SELECT
+  department,
+  GROUP_CONCAT(name ORDER BY name SEPARATOR ', ') AS members,
+  GROUP_CONCAT(DISTINCT status) AS statuses
+FROM employees
+GROUP BY department;
+-- Default separator is comma; max length: group_concat_max_len (default 1024)
+SET SESSION group_concat_max_len = 65536;
 
--- Substring operations
-SELECT SUBSTRING('Hello World', 7);           -- 'World' (from position 7)
-SELECT SUBSTRING('Hello World', 7, 5);        -- 'World' (5 chars from pos 7)
-SELECT LEFT('Hello World', 5);                -- 'Hello'
-SELECT RIGHT('Hello World', 5);               -- 'World'
-SELECT MID('Hello World', 7, 5);              -- 'World'
+-- SUBSTRING / SUBSTR
+SELECT SUBSTRING('Hello World', 7);          -- 'World'
+SELECT SUBSTRING('Hello World', 1, 5);       -- 'Hello'
+SELECT SUBSTR('Hello World', -5);            -- 'World' (negative = from end)
+SELECT MID('Hello World', 7, 5);             -- 'World' (alias)
 
--- Finding positions
-SELECT LOCATE('World', 'Hello World');         -- 7
-SELECT INSTR('Hello World', 'World');          -- 7
-SELECT POSITION('World' IN 'Hello World');     -- 7
+-- LOCATE / INSTR / POSITION
+SELECT LOCATE('World', 'Hello World');        -- 7
+SELECT LOCATE('world', 'Hello World');        -- 0 (case-sensitive with binary collation)
+SELECT INSTR('Hello World', 'World');         -- 7
+SELECT POSITION('World' IN 'Hello World');    -- 7
 
--- Replacing
-SELECT REPLACE('Hello World', 'World', 'MySQL'); -- 'Hello MySQL'
+-- REPLACE
+SELECT REPLACE('Hello World', 'World', 'MySQL');  -- 'Hello MySQL'
 
--- Trimming
-SELECT TRIM('  Hello  ');                      -- 'Hello'
-SELECT LTRIM('  Hello  ');                     -- 'Hello  '
-SELECT RTRIM('  Hello  ');                     -- '  Hello'
-SELECT TRIM(LEADING '0' FROM '000123');        -- '123'
+-- TRIM / LTRIM / RTRIM
+SELECT TRIM('  hello  ');                    -- 'hello'
+SELECT TRIM(LEADING '0' FROM '007');         -- '7'
+SELECT TRIM(BOTH 'x' FROM 'xxhelloxx');      -- 'hello'
 
--- Case conversion
-SELECT LOWER('HELLO WORLD');                   -- 'hello world'
-SELECT UPPER('hello world');                   -- 'HELLO WORLD'
+-- UPPER / LOWER
+SELECT UPPER('hello'), LOWER('WORLD');       -- 'HELLO', 'world'
 
--- Length
-SELECT LENGTH('Hello');                        -- 5 (bytes)
-SELECT CHAR_LENGTH('Hello');                   -- 5 (characters — use this for multibyte)
+-- LENGTH (byte length) vs CHAR_LENGTH (character length)
+SELECT LENGTH('café'), CHAR_LENGTH('café');  -- 5, 4 (é is 2 bytes in utf8mb4)
 
--- Formatting numbers
-SELECT FORMAT(1234567.891, 2);                 -- '1,234,567.89' (locale-aware)
+-- FORMAT: number formatting with thousands separator
+SELECT FORMAT(1234567.89, 2);                -- '1,234,567.89'
+SELECT FORMAT(1234567.89, 2, 'de_DE');       -- '1.234.567,89' (locale-aware)
 
--- Padding
-SELECT LPAD('42', 6, '0');                     -- '000042'
-SELECT RPAD('Hello', 10, '.');                 -- 'Hello.....'
+-- CONVERT charset
+SELECT CONVERT('hello' USING utf8mb4);
+SELECT CAST('2024-01-15' AS DATE);
 
--- Repeating
-SELECT REPEAT('ab', 3);                        -- 'ababab'
+-- LPAD / RPAD: pad a string to a given length
+SELECT LPAD('42', 5, '0');                   -- '00042'
+SELECT RPAD('hello', 10, '.');               -- 'hello.....'
 
--- String reverse
-SELECT REVERSE('Hello');                       -- 'olleH'
+-- REPEAT / SPACE
+SELECT REPEAT('ab', 3);                      -- 'ababab'
+SELECT SPACE(5);                             -- '     '
 
--- Convert charset
-SELECT CONVERT('text' USING utf8mb4);
+-- REVERSE
+SELECT REVERSE('hello');                     -- 'olleh'
+
+-- HEX / UNHEX
+SELECT HEX('A'), UNHEX('41');                -- '41', 'A'
 ```
 
 ## Date and Time Functions
 
 ```sql
 -- Current date/time
-SELECT NOW();            -- '2024-01-15 14:30:00' (datetime)
-SELECT CURDATE();        -- '2024-01-15' (date only)
-SELECT CURTIME();        -- '14:30:00' (time only)
-SELECT SYSDATE();        -- Similar to NOW() but evaluated per-row
-SELECT UTC_TIMESTAMP();  -- Current UTC datetime
+SELECT NOW();                                -- '2024-01-15 10:30:00' (datetime)
+SELECT SYSDATE();                            -- actual time of execution (not statement start)
+SELECT CURRENT_TIMESTAMP();                  -- synonym for NOW()
+SELECT CURDATE(), CURRENT_DATE();            -- '2024-01-15'
+SELECT CURTIME(), CURRENT_TIME();            -- '10:30:00'
+SELECT UTC_TIMESTAMP(), UTC_DATE();
 
--- Formatting
-SELECT DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s');  -- '2024-01-15 14:30:00'
-SELECT DATE_FORMAT(NOW(), '%W, %M %e, %Y');       -- 'Monday, January 15, 2024'
-SELECT DATE_FORMAT(NOW(), '%d/%m/%Y');            -- '15/01/2024'
+-- DATE_FORMAT
+SELECT DATE_FORMAT(NOW(), '%Y-%m-%d');       -- '2024-01-15'
+SELECT DATE_FORMAT(NOW(), '%W, %M %e, %Y'); -- 'Monday, January 15, 2024'
+SELECT DATE_FORMAT(NOW(), '%H:%i:%s');       -- '10:30:00'
 
--- Parsing strings to dates
-SELECT STR_TO_DATE('15/01/2024', '%d/%m/%Y');    -- '2024-01-15'
-SELECT STR_TO_DATE('Jan 15, 2024', '%b %d, %Y'); -- '2024-01-15'
+-- STR_TO_DATE: parse a string as a date
+SELECT STR_TO_DATE('15/01/2024', '%d/%m/%Y');           -- 2024-01-15
+SELECT STR_TO_DATE('January 15 2024', '%M %d %Y');      -- 2024-01-15
 
 -- Date arithmetic
 SELECT DATE_ADD(NOW(), INTERVAL 7 DAY);
-SELECT DATE_ADD(NOW(), INTERVAL 3 MONTH);
-SELECT DATE_SUB(NOW(), INTERVAL 1 YEAR);
-SELECT DATE_ADD(NOW(), INTERVAL '2 12' DAY_HOUR);
+SELECT DATE_SUB(NOW(), INTERVAL 1 MONTH);
+SELECT DATE_ADD('2024-01-31', INTERVAL 1 MONTH);       -- 2024-02-29 (leap year aware)
+SELECT ADDDATE('2024-01-15', 30);                       -- add days
 
--- Date differences
-SELECT DATEDIFF('2024-12-31', '2024-01-01');     -- 365 (days)
-SELECT TIMEDIFF('14:30:00', '09:00:00');         -- '05:30:00'
-SELECT TIMESTAMPDIFF(MONTH, '2024-01-01', '2024-06-01'); -- 5
+-- DATEDIFF / TIMEDIFF
+SELECT DATEDIFF('2024-12-31', '2024-01-01');           -- 365
+SELECT TIMEDIFF('10:30:00', '09:00:00');               -- '01:30:00'
+SELECT TIMESTAMPDIFF(YEAR, '1990-06-15', CURDATE());   -- age in years
 
--- Unix timestamps
-SELECT UNIX_TIMESTAMP();                          -- Current time as seconds since epoch
-SELECT UNIX_TIMESTAMP('2024-01-15 00:00:00');    -- Convert datetime to epoch
-SELECT FROM_UNIXTIME(1705276800);                -- Convert epoch to datetime
-SELECT FROM_UNIXTIME(1705276800, '%Y-%m-%d');    -- With format
+-- UNIX timestamps
+SELECT UNIX_TIMESTAMP();                               -- current unix timestamp
+SELECT UNIX_TIMESTAMP('2024-01-15 00:00:00');
+SELECT FROM_UNIXTIME(1705276800);                      -- unix ts to datetime
+SELECT FROM_UNIXTIME(1705276800, '%Y-%m-%d');
 
--- Extracting parts
-SELECT YEAR(NOW()), MONTH(NOW()), DAY(NOW());
+-- Date part extraction
+SELECT YEAR('2024-01-15'), MONTH('2024-01-15'), DAY('2024-01-15');
 SELECT HOUR(NOW()), MINUTE(NOW()), SECOND(NOW());
-SELECT DAYOFWEEK(NOW());   -- 1=Sunday, 7=Saturday
-SELECT DAYNAME(NOW());     -- 'Monday'
-SELECT MONTHNAME(NOW());   -- 'January'
-SELECT WEEK(NOW());        -- Week number of year
-SELECT QUARTER(NOW());     -- 1-4
-SELECT EXTRACT(YEAR_MONTH FROM NOW()); -- e.g., 202401
+SELECT DAYNAME('2024-01-15'), MONTHNAME('2024-01-15');
+SELECT DAYOFWEEK('2024-01-15');                        -- 1=Sunday
+SELECT DAYOFYEAR('2024-01-15');                        -- 15
+SELECT WEEK('2024-01-15'), YEARWEEK('2024-01-15');
+SELECT QUARTER('2024-04-15');                          -- 2
+SELECT LAST_DAY('2024-02-01');                         -- 2024-02-29
 
--- Truncating to period
-SELECT DATE(NOW());                              -- Date part only
-SELECT LAST_DAY('2024-02-01');                   -- '2024-02-29' (last day of month)
+-- EXTRACT (SQL standard)
+SELECT EXTRACT(YEAR FROM NOW());
+SELECT EXTRACT(HOUR FROM NOW());
 ```
 
 ## REGEXP
 
+MySQL supports Perl-compatible regular expressions via `REGEXP` / `RLIKE` and in MySQL 8.0, `REGEXP_LIKE`, `REGEXP_REPLACE`, `REGEXP_SUBSTR`, `REGEXP_INSTR`.
+
 ```sql
--- Basic REGEXP matching
+-- Basic REGEXP (case-insensitive by default with non-binary collation)
 SELECT * FROM users WHERE email REGEXP '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$';
-SELECT * FROM products WHERE name REGEXP 'phone|tablet|laptop';
-SELECT * FROM log_entries WHERE message REGEXP 'ERROR|FATAL|CRITICAL';
 
--- Case-insensitive by default; use REGEXP BINARY for case-sensitive
-SELECT * FROM users WHERE username REGEXP BINARY '^Admin';
-
--- Using RLIKE (synonym for REGEXP)
-SELECT * FROM articles WHERE content RLIKE 'MySQL|MariaDB|PostgreSQL';
+-- MySQL 8.0 REGEXP functions
+SELECT REGEXP_LIKE('Hello World', 'hello', 'i');        -- 1 (case-insensitive)
+SELECT REGEXP_REPLACE('foo bar baz', '\\s+', '-');      -- 'foo-bar-baz'
+SELECT REGEXP_SUBSTR('2024-01-15', '\\d{4}');           -- '2024'
+SELECT REGEXP_INSTR('Hello World', 'World');             -- 7
 ```
 
-## Conditional Functions
+## Conditional Expressions
 
 ```sql
 -- IF(condition, true_value, false_value)
-SELECT name, IF(active = 1, 'Active', 'Inactive') AS status FROM users;
-SELECT IF(score >= 60, 'Pass', 'Fail') AS result FROM exam_results;
+SELECT IF(salary > 50000, 'Senior', 'Junior') AS level FROM employees;
 
--- IFNULL(expr, fallback) — return fallback if expr is NULL
-SELECT IFNULL(phone, 'N/A') AS phone FROM contacts;
+-- IFNULL(expr, replacement_if_null)
+SELECT IFNULL(phone, 'No phone') FROM users;
 
--- NULLIF(a, b) — return NULL if a = b, otherwise a
-SELECT NULLIF(stock_count, 0) FROM products;  -- Returns NULL instead of 0
+-- NULLIF(a, b) — returns NULL if a=b, else returns a
+SELECT NULLIF(quantity, 0);     -- prevents division by zero: price / NULLIF(quantity, 0)
 
--- COALESCE(a, b, c, ...) — return first non-NULL value
-SELECT COALESCE(mobile, home_phone, work_phone, 'No phone') AS contact_phone FROM contacts;
+-- COALESCE(a, b, c, ...) — returns first non-NULL value
+SELECT COALESCE(mobile_phone, home_phone, work_phone, 'No contact') AS phone FROM users;
 
--- CASE WHEN (SQL standard, preferred)
-SELECT name,
-  CASE
-    WHEN age < 18 THEN 'Minor'
-    WHEN age BETWEEN 18 AND 64 THEN 'Adult'
-    WHEN age >= 65 THEN 'Senior'
-    ELSE 'Unknown'
-  END AS age_group
-FROM users;
-
--- Simple CASE
-SELECT name,
+-- CASE expression (SQL standard)
+SELECT
+  name,
   CASE status
-    WHEN 0 THEN 'Inactive'
-    WHEN 1 THEN 'Active'
-    WHEN 2 THEN 'Pending'
+    WHEN 'active'   THEN 'Active'
+    WHEN 'inactive' THEN 'Inactive'
+    WHEN 'banned'   THEN 'Banned'
     ELSE 'Unknown'
-  END AS status_label
-FROM users;
+  END AS status_label,
+  CASE
+    WHEN score >= 90 THEN 'A'
+    WHEN score >= 80 THEN 'B'
+    WHEN score >= 70 THEN 'C'
+    ELSE 'F'
+  END AS grade
+FROM students;
 ```
 
 ## Transactions and AUTOCOMMIT
 
 ```sql
--- Check AUTOCOMMIT mode (default: ON)
-SELECT @@autocommit;
+-- By default, AUTOCOMMIT = 1 (each statement is its own transaction)
 SHOW VARIABLES LIKE 'autocommit';
 
--- When AUTOCOMMIT=ON (default): every statement is its own transaction
--- To use explicit transactions, either:
--- 1. Disable AUTOCOMMIT for the session
+-- Disable autocommit for the session
 SET autocommit = 0;
--- 2. Or use BEGIN/START TRANSACTION explicitly
 
 -- Explicit transaction
+START TRANSACTION;  -- or: BEGIN;
+
+INSERT INTO orders (user_id, total) VALUES (1, 99.99);
+INSERT INTO order_items (order_id, product_id, qty) VALUES (LAST_INSERT_ID(), 5, 2);
+UPDATE inventory SET quantity = quantity - 2 WHERE product_id = 5;
+
+COMMIT;    -- make all changes permanent
+-- or:
+ROLLBACK;  -- undo all changes since START TRANSACTION
+
+-- SAVEPOINT for nested rollbacks
 START TRANSACTION;
-  INSERT INTO orders (customer_id, total) VALUES (1, 99.99);
-  INSERT INTO order_items (order_id, product_id, qty) VALUES (LAST_INSERT_ID(), 42, 1);
-  UPDATE inventory SET stock = stock - 1 WHERE product_id = 42;
+INSERT INTO step1 VALUES (1);
+SAVEPOINT after_step1;
+INSERT INTO step2 VALUES (2);  -- this fails
+ROLLBACK TO SAVEPOINT after_step1;  -- only undo step2
+COMMIT;  -- commit step1
+
+-- Read-only transaction (optimization hint for InnoDB)
+START TRANSACTION READ ONLY;
+SELECT * FROM reports;
 COMMIT;
-
--- Rollback on error
-START TRANSACTION;
-  UPDATE accounts SET balance = balance - 500 WHERE id = 1;
-  UPDATE accounts SET balance = balance + 500 WHERE id = 2;
-  -- If something goes wrong:
-  ROLLBACK;
-
--- SAVEPOINT — partial rollback within a transaction
-START TRANSACTION;
-  INSERT INTO logs (message) VALUES ('Step 1');
-  SAVEPOINT after_step1;
-  INSERT INTO logs (message) VALUES ('Step 2');
-  ROLLBACK TO SAVEPOINT after_step1;  -- Undo step 2, keep step 1
-COMMIT;
-
--- Transaction isolation levels
-SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
--- READ UNCOMMITTED | READ COMMITTED | REPEATABLE READ (default) | SERIALIZABLE
-SHOW VARIABLES LIKE 'transaction_isolation';
 ```
 
-## Process Management
+### Isolation Levels
 
 ```sql
--- Show running queries and connections
-SHOW PROCESSLIST;
-SHOW FULL PROCESSLIST;    -- Shows full query text
+-- View current isolation level
+SELECT @@transaction_isolation;
 
--- From information_schema (more detail)
-SELECT ID, USER, HOST, DB, COMMAND, TIME, STATE, LEFT(INFO, 100) AS query
-FROM information_schema.PROCESSLIST
-WHERE COMMAND != 'Sleep'
-ORDER BY TIME DESC;
+-- Set isolation level
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;  -- InnoDB default
+SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 
--- Kill a specific query or connection
-KILL QUERY 1234;       -- Kill just the query, keep the connection
-KILL CONNECTION 1234;  -- Kill the entire connection
-KILL 1234;             -- Equivalent to KILL CONNECTION
-
--- Find and kill long-running queries (> 30 seconds)
-SELECT CONCAT('KILL QUERY ', ID, ';') AS kill_stmt
-FROM information_schema.PROCESSLIST
-WHERE COMMAND = 'Query' AND TIME > 30
-  AND USER != 'system user';
+-- Levels (from least to most strict):
+-- READ UNCOMMITTED: dirty reads possible
+-- READ COMMITTED:   no dirty reads; non-repeatable reads possible
+-- REPEATABLE READ:  consistent snapshot per transaction (InnoDB default)
+-- SERIALIZABLE:     fully serialized; slowest
 ```
 
-:::caution[KILL Usage]
-Only kill your own queries unless you have `SUPER` or `CONNECTION_ADMIN` privilege.
-Killing a transaction mid-way causes an automatic rollback — data is safe with InnoDB.
+## SHOW PROCESSLIST and KILL
+
+```sql
+-- See all running queries
+SHOW PROCESSLIST;
+SHOW FULL PROCESSLIST;   -- shows full query text (not truncated)
+
+-- Same via information_schema
+SELECT id, user, host, db, command, time, state, info
+FROM information_schema.processlist
+WHERE command != 'Sleep'
+ORDER BY time DESC;
+
+-- Kill a query (but keep the connection)
+KILL QUERY 42;
+
+-- Kill a connection entirely
+KILL 42;
+
+-- Kill all long-running queries > 30 seconds (generate kill statements)
+SELECT CONCAT('KILL QUERY ', id, ';')
+FROM information_schema.processlist
+WHERE command = 'Query'
+  AND time > 30
+  AND user != 'replication';
+```
+
+:::tip[Performance Schema for Better Monitoring]
+`SHOW PROCESSLIST` is good for quick checks. For production monitoring, use `performance_schema.events_statements_current` which provides much more detail:
+
+```sql
+SELECT
+  t.PROCESSLIST_ID,
+  t.PROCESSLIST_USER,
+  t.PROCESSLIST_DB,
+  s.SQL_TEXT,
+  s.TIMER_WAIT / 1e12 AS elapsed_seconds,
+  s.ROWS_EXAMINED,
+  s.ROWS_SENT
+FROM performance_schema.threads t
+JOIN performance_schema.events_statements_current s
+  ON t.THREAD_ID = s.THREAD_ID
+WHERE t.PROCESSLIST_COMMAND = 'Query'
+ORDER BY elapsed_seconds DESC
+LIMIT 20;
+```
 :::

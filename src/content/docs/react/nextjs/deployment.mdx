@@ -1,0 +1,432 @@
+---
+title: Deployment
+description: Deploy Next.js to Vercel with git integration and preview deployments, self-host with Node.js or Docker, export as static HTML, set up CI/CD with GitHub Actions, and manage environment variables.
+sidebar:
+  order: 9
+tags: [react, javascript, frontend]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+Next.js supports multiple deployment targets — from Vercel's managed platform to self-hosted Node.js servers, Docker containers, and fully static HTML exports.
+
+## Vercel Deployment
+
+Vercel is the official hosting platform for Next.js, built by the same team. Deployment is essentially zero-config.
+
+<Steps>
+
+1. **Push your code to GitHub**
+
+   ```bash
+   git init
+   git add .
+   git commit -m "feat: initial Next.js app"
+   git remote add origin https://github.com/yourname/my-app.git
+   git push -u origin main
+   ```
+
+2. **Import on Vercel**
+
+   Go to [vercel.com/new](https://vercel.com/new), select your repository, and click **Deploy**. Vercel auto-detects Next.js and configures the build settings.
+
+3. **Configure environment variables**
+
+   In Vercel Dashboard → Settings → Environment Variables, add all variables from your `.env.local`. Set the correct scope (Production, Preview, Development).
+
+4. **Your app is live**
+
+   Every push to `main` triggers a production deployment. Every PR gets a unique preview URL.
+
+</Steps>
+
+### Vercel Features
+
+**Preview Deployments** — every pull request and branch gets a unique URL like `my-app-git-feature-auth-yourname.vercel.app`. Share with stakeholders for review.
+
+**Analytics** — real user performance data (Core Web Vitals, page views) integrated with next/analytics:
+
+```tsx
+// app/layout.tsx
+import { Analytics } from '@vercel/analytics/react';
+import { SpeedInsights } from '@vercel/speed-insights/next';
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html>
+      <body>
+        {children}
+        <Analytics />
+        <SpeedInsights />
+      </body>
+    </html>
+  );
+}
+```
+
+```bash
+npm install @vercel/analytics @vercel/speed-insights
+```
+
+**Edge Config** — ultra-low-latency key-value store read at the edge:
+
+```typescript
+import { get } from '@vercel/edge-config';
+
+export async function middleware(request: NextRequest) {
+  const maintenanceMode = await get<boolean>('maintenance_mode');
+  if (maintenanceMode) {
+    return NextResponse.rewrite(new URL('/maintenance', request.url));
+  }
+  return NextResponse.next();
+}
+```
+
+## Environment Variables
+
+### Naming Convention
+
+| Prefix | Exposed to | Usage |
+|---|---|---|
+| `NEXT_PUBLIC_` | Browser + Server | Public config (API URLs, Stripe publishable key) |
+| (no prefix) | Server only | Secrets (DB URL, JWT secret, API private keys) |
+
+```bash
+# .env.local — local development (never commit)
+DATABASE_URL=postgresql://localhost:5432/myapp_dev
+JWT_SECRET=your-local-32-character-secret-here
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+NEXT_PUBLIC_STRIPE_KEY=pk_test_abc123
+NEXTAUTH_SECRET=local-nextauth-secret
+OPENAI_API_KEY=sk-local-openai-key
+
+# .env.production — production defaults (can be committed if non-sensitive)
+NEXT_PUBLIC_APP_URL=https://myapp.com
+
+# .env.example — template for all variables (always commit)
+DATABASE_URL=
+JWT_SECRET=
+NEXT_PUBLIC_APP_URL=
+NEXT_PUBLIC_STRIPE_KEY=
+NEXTAUTH_SECRET=
+OPENAI_API_KEY=
+```
+
+### Environment Variable Validation
+
+```typescript
+// src/env.ts — validate at startup
+import { z } from 'zod';
+
+const serverEnvSchema = z.object({
+  NODE_ENV: z.enum(['development', 'test', 'production']),
+  DATABASE_URL: z.string().url(),
+  JWT_SECRET: z.string().min(32),
+  NEXTAUTH_SECRET: z.string().min(32),
+  OPENAI_API_KEY: z.string().startsWith('sk-').optional(),
+});
+
+const clientEnvSchema = z.object({
+  NEXT_PUBLIC_APP_URL: z.string().url(),
+  NEXT_PUBLIC_STRIPE_KEY: z.string().startsWith('pk_'),
+});
+
+// Validate server-side env (throws if missing)
+export const serverEnv = serverEnvSchema.parse(process.env);
+
+// Validate client-side env (only NEXT_PUBLIC_ vars)
+export const clientEnv = clientEnvSchema.parse({
+  NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
+  NEXT_PUBLIC_STRIPE_KEY: process.env.NEXT_PUBLIC_STRIPE_KEY,
+});
+```
+
+:::caution[NEXT_PUBLIC_ Security]
+Never put secrets in `NEXT_PUBLIC_` variables. Anything prefixed with `NEXT_PUBLIC_` is embedded in the JavaScript bundle and visible to everyone. Treat it as public information.
+:::
+
+## Self-Hosted Node.js
+
+```bash
+# Build the production app
+npm run build
+
+# Start the production server
+npm start  # Runs on PORT=3000 by default
+
+# Custom port
+PORT=8080 npm start
+```
+
+### PM2 Process Manager
+
+```bash
+npm install -g pm2
+```
+
+```javascript
+// ecosystem.config.js
+module.exports = {
+  apps: [
+    {
+      name: 'my-nextjs-app',
+      script: 'npm',
+      args: 'start',
+      cwd: '/var/www/my-app',
+      instances: 'max',          // Use all CPU cores
+      exec_mode: 'cluster',
+      env: {
+        NODE_ENV: 'production',
+        PORT: 3000,
+      },
+      error_file: '/var/log/my-app/error.log',
+      out_file: '/var/log/my-app/out.log',
+      merge_logs: true,
+      max_memory_restart: '1G',
+      restart_delay: 4000,
+    },
+  ],
+};
+```
+
+```bash
+# Start with PM2
+pm2 start ecosystem.config.js
+pm2 save              # persist across reboots
+pm2 startup           # generate startup script
+pm2 monit             # monitor resource usage
+pm2 logs my-nextjs-app # tail logs
+```
+
+## Docker Deployment
+
+Enable standalone output in `next.config.ts` for a minimal Docker image:
+
+```typescript
+// next.config.ts
+const nextConfig: NextConfig = {
+  output: 'standalone',
+};
+```
+
+```dockerfile
+# Dockerfile
+FROM node:20-alpine AS base
+
+# Dependencies stage
+FROM base AS deps
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm ci --omit=dev
+
+# Builder stage
+FROM base AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# Build environment variables (build-time only)
+ARG NEXT_PUBLIC_APP_URL
+ENV NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL
+
+RUN npm run build
+
+# Runner stage — minimal production image
+FROM base AS runner
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
+# Copy standalone output
+COPY --from=builder /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+USER nextjs
+
+EXPOSE 3000
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
+
+CMD ["node", "server.js"]
+```
+
+```yaml
+# docker-compose.yml
+services:
+  web:
+    build:
+      context: .
+      args:
+        NEXT_PUBLIC_APP_URL: https://myapp.com
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      JWT_SECRET: ${JWT_SECRET}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: myapp
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+```
+
+```bash
+# Build and run with Docker Compose
+docker compose up --build -d
+
+# View logs
+docker compose logs -f web
+
+# Health check endpoint
+# app/api/health/route.ts
+```
+
+```typescript
+// app/api/health/route.ts
+import { NextResponse } from 'next/server';
+import { db } from '@/lib/db';
+
+export async function GET() {
+  try {
+    await db.$queryRaw`SELECT 1`; // DB connectivity check
+    return NextResponse.json({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      version: process.env.npm_package_version,
+    });
+  } catch (error) {
+    return NextResponse.json(
+      { status: 'error', error: 'Database unreachable' },
+      { status: 503 }
+    );
+  }
+}
+```
+
+## Static Export
+
+For fully static sites with no server required:
+
+```typescript
+// next.config.ts
+const nextConfig: NextConfig = {
+  output: 'export',
+  trailingSlash: true,      // /about → /about/index.html
+  images: {
+    unoptimized: true,      // Required for static export (no Image optimization server)
+  },
+};
+```
+
+:::caution[Static Export Limitations]
+Static export (`output: 'export'`) does not support: Server Components that use runtime APIs (headers, cookies), Route Handlers, API routes, Server Actions, ISR/revalidation, or middleware. It generates pure HTML/CSS/JS — no server required.
+:::
+
+```bash
+npm run build
+# Output in ./out/ directory — deploy to any static host
+```
+
+## GitHub Actions CI/CD
+
+```yaml
+# .github/workflows/deploy.yml
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  lint-and-type-check:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npx tsc --noEmit
+      - run: npx prettier --check .
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    needs: lint-and-type-check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm test -- --coverage --ci
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Build Next.js
+        env:
+          NEXT_PUBLIC_APP_URL: ${{ vars.NEXT_PUBLIC_APP_URL }}
+        run: npm run build
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to Vercel
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          npm install -g vercel
+          vercel pull --yes --environment=production --token=$VERCEL_TOKEN
+          vercel build --prod --token=$VERCEL_TOKEN
+          vercel deploy --prebuilt --prod --token=$VERCEL_TOKEN
+```
+
+:::tip[Vercel GitHub Integration]
+If you use Vercel's native GitHub integration (recommended), you don't need the manual deployment steps above. Vercel automatically deploys on every push and creates preview deployments for PRs. Use the GitHub Actions workflow for linting, type checking, and testing only.
+:::

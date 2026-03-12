@@ -1,6 +1,6 @@
 ---
 title: App Router
-description: Master Next.js App Router file conventions — layout.tsx, page.tsx, loading.tsx, error.tsx, parallel routes, intercepting routes, route groups, and the Metadata API.
+description: Master Next.js App Router file conventions including layout.tsx, page.tsx, loading.tsx, error.tsx, parallel routes, intercepting routes, route groups, and the Metadata API.
 sidebar:
   order: 3
 tags: [react, javascript, frontend]
@@ -8,145 +8,206 @@ tags: [react, javascript, frontend]
 
 import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-The App Router uses the file system to define routes and their behavior. Each file in the `app/` directory serves a specific purpose.
+The App Router is Next.js's modern routing system, built on React Server Components. It uses a file-system-based convention where special files define the UI for each route segment.
 
 ## File Conventions
 
+Every folder in `app/` that contains a `page.tsx` becomes a route. Special filenames have specific roles:
+
 | File | Purpose |
 |---|---|
-| `layout.tsx` | Shared UI for a segment and its children; persistent across navigations |
-| `page.tsx` | Unique UI for the route; makes the segment publicly accessible |
-| `loading.tsx` | Suspense boundary shown while the segment loads |
-| `error.tsx` | Error boundary for unexpected errors |
+| `layout.tsx` | Shared UI that wraps child pages and persists across navigation |
+| `page.tsx` | The unique UI for a route (makes the route publicly accessible) |
+| `loading.tsx` | Instant loading state shown while a page or layout is loading |
+| `error.tsx` | Error boundary for a route segment and its children |
 | `not-found.tsx` | UI shown when `notFound()` is called |
-| `template.tsx` | Like layout but re-mounted on each navigation |
-| `route.ts` | API endpoint (HTTP handler); no UI |
-| `default.tsx` | Fallback UI for parallel routes |
+| `template.tsx` | Like layout, but creates a new instance on navigation (resets state) |
+| `route.ts` | API endpoint for the route (no UI, returns data) |
+| `default.tsx` | Fallback for parallel routes when no active state exists |
 
-## layout.tsx
+```
+app/
+├── layout.tsx          # Root layout — wraps EVERYTHING
+├── page.tsx            # Home page (/)
+├── loading.tsx         # Root loading state
+├── error.tsx           # Root error boundary
+├── not-found.tsx       # 404 page
+├── blog/
+│   ├── layout.tsx      # Blog section layout
+│   ├── page.tsx        # /blog
+│   └── [slug]/
+│       ├── page.tsx    # /blog/my-post
+│       └── loading.tsx # Loading state for individual posts
+└── dashboard/
+    ├── layout.tsx      # Dashboard layout (sidebar, nav)
+    └── page.tsx        # /dashboard
+```
 
-Layouts wrap pages and are **not** re-rendered when navigating between pages that share the same layout.
+## Root Layout
+
+The root layout is required and must include `<html>` and `<body>` tags. It's the outermost shared UI.
 
 ```tsx
-// app/layout.tsx — Root layout (required)
+// app/layout.tsx
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
-import { Header } from '@/components/layout/Header';
-import { Footer } from '@/components/layout/Footer';
-import { Providers } from '@/components/Providers';
 import './globals.css';
 
-const inter = Inter({ subsets: ['latin'] });
+const inter = Inter({
+  subsets: ['latin'],
+  variable: '--font-inter',
+  display: 'swap',
+});
 
 export const metadata: Metadata = {
-  title: { default: 'My App', template: '%s | My App' },
-  description: 'My application description',
+  metadataBase: new URL('https://myapp.com'),
+  title: {
+    default: 'MyApp — Build something great',
+    template: '%s | MyApp',
+  },
+  description: 'The best app for doing great things.',
+  openGraph: {
+    type: 'website',
+    locale: 'en_US',
+    url: 'https://myapp.com',
+    siteName: 'MyApp',
+    images: [{ url: '/og-image.png', width: 1200, height: 630 }],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    site: '@myapp',
+  },
+  robots: {
+    index: true,
+    follow: true,
+  },
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
-    <html lang="en">
-      <body className={inter.className}>
-        <Providers>
-          <Header />
-          <main>{children}</main>
-          <Footer />
-        </Providers>
+    <html lang="en" className={inter.variable}>
+      <body className="bg-white text-gray-900 antialiased">
+        {children}
       </body>
     </html>
   );
 }
 ```
 
+## Nested Layouts
+
+Layouts wrap their child segments. The blog layout only applies to `/blog/**` routes:
+
 ```tsx
-// app/dashboard/layout.tsx — Nested layout (only for /dashboard/*)
-import { Sidebar } from '@/components/layout/Sidebar';
-import { requireAuth } from '@/lib/auth';
-
-export default async function DashboardLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
-  await requireAuth(); // Protect all dashboard routes server-side
-
+// app/blog/layout.tsx
+export default function BlogLayout({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex h-screen">
-      <Sidebar />
-      <div className="flex-1 overflow-auto">
-        {children}
-      </div>
+    <div className="max-w-4xl mx-auto px-4 py-8">
+      <header className="mb-8">
+        <h1 className="text-4xl font-bold">The Blog</h1>
+        <nav>
+          <a href="/blog">All Posts</a>
+          <a href="/blog/categories">Categories</a>
+        </nav>
+      </header>
+      <main>{children}</main>
     </div>
   );
 }
 ```
 
-## page.tsx
+:::tip[Layout Persistence]
+Layouts do not unmount during navigation between child routes. This means state (scroll position, form values, fetch results) persists as users navigate between `/blog` and `/blog/my-post`. Use `template.tsx` if you need a fresh mount on each navigation.
+:::
 
-Pages receive `params` (dynamic segments) and `searchParams` (query string) as props.
+## Page Component
 
 ```tsx
-// app/page.tsx — Home route (/)
-export default function HomePage() {
-  return <h1>Home</h1>;
-}
+// app/blog/[slug]/page.tsx
+import { notFound } from 'next/navigation';
+import type { Metadata } from 'next';
 
-// app/blog/[slug]/page.tsx — Dynamic route
-interface BlogPageProps {
+interface Props {
   params: Promise<{ slug: string }>;
-  searchParams: Promise<{ page?: string }>;
+  searchParams: Promise<{ preview?: string }>;
 }
 
-export default async function BlogPage({ params, searchParams }: BlogPageProps) {
+// Dynamic metadata for this page
+export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { slug } = await params;
-  const { page = '1' } = await searchParams;
+  const post = await getPost(slug);
 
-  const post = await fetchPost(slug);
+  if (!post) return { title: 'Post Not Found' };
+
+  return {
+    title: post.title,
+    description: post.excerpt,
+    openGraph: {
+      title: post.title,
+      description: post.excerpt,
+      images: [{ url: post.coverImage, width: 1200, height: 630 }],
+      type: 'article',
+      publishedTime: post.publishedAt,
+    },
+  };
+}
+
+// Pre-render known slugs at build time
+export async function generateStaticParams() {
+  const posts = await getAllPosts();
+  return posts.map(post => ({ slug: post.slug }));
+}
+
+export default async function BlogPostPage({ params, searchParams }: Props) {
+  const { slug } = await params;
+  const { preview } = await searchParams;
+
+  const post = await getPost(slug);
+  if (!post) notFound();
 
   return (
     <article>
-      <h1>{post.title}</h1>
-      <p>Page: {page}</p>
+      <header>
+        <h1 className="text-3xl font-bold">{post.title}</h1>
+        <time dateTime={post.publishedAt}>{formatDate(post.publishedAt)}</time>
+      </header>
+      <div dangerouslySetInnerHTML={{ __html: post.contentHtml }} />
     </article>
   );
 }
 ```
 
-:::tip[params is a Promise in Next.js 15]
-In Next.js 15, `params` and `searchParams` are Promises that must be awaited. Always `await` them in new code to be forward-compatible.
-:::
+## Loading UI
 
-## loading.tsx
-
-A `loading.tsx` file automatically wraps the page in a React Suspense boundary. It shows instantly while the page's async data fetches.
+`loading.tsx` uses React Suspense under the hood. It shows immediately while the page's async work completes — no client-side JavaScript required.
 
 ```tsx
-// app/dashboard/loading.tsx
-export default function DashboardLoading() {
+// app/blog/loading.tsx
+export default function BlogLoading() {
   return (
-    <div className="animate-pulse space-y-4 p-6">
-      <div className="h-8 bg-gray-200 rounded w-1/4" />
-      <div className="grid grid-cols-3 gap-4">
-        {Array.from({ length: 3 }).map((_, i) => (
-          <div key={i} className="h-32 bg-gray-200 rounded-lg" />
-        ))}
-      </div>
-      <div className="space-y-2">
-        {Array.from({ length: 5 }).map((_, i) => (
-          <div key={i} className="h-16 bg-gray-200 rounded" />
-        ))}
-      </div>
+    <div className="space-y-6">
+      {[...Array(3)].map((_, i) => (
+        <div key={i} className="animate-pulse">
+          <div className="h-6 bg-gray-200 rounded w-3/4 mb-2" />
+          <div className="h-4 bg-gray-100 rounded w-1/2 mb-1" />
+          <div className="h-4 bg-gray-100 rounded w-2/3" />
+        </div>
+      ))}
     </div>
   );
 }
 ```
 
-## error.tsx
+## Error Boundary
 
-Error boundaries catch JavaScript errors during rendering. They **must** be Client Components.
+`error.tsx` must be a Client Component. It catches errors thrown in the route segment and its children.
 
 ```tsx
-// app/dashboard/error.tsx
+// app/blog/error.tsx
 'use client';
 
 import { useEffect } from 'react';
@@ -156,21 +217,21 @@ interface ErrorProps {
   reset: () => void;
 }
 
-export default function DashboardError({ error, reset }: ErrorProps) {
+export default function BlogError({ error, reset }: ErrorProps) {
   useEffect(() => {
-    console.error('Dashboard error:', error);
+    // Log to error reporting service
+    console.error('[Blog Error]', error);
   }, [error]);
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-[400px] gap-4">
-      <h2 className="text-xl font-semibold text-gray-900">Something went wrong</h2>
-      <p className="text-gray-500 text-sm">{error.message}</p>
-      {error.digest && (
-        <p className="text-xs text-gray-400">Error ID: {error.digest}</p>
-      )}
+    <div className="text-center py-16">
+      <h2 className="text-2xl font-bold text-gray-900 mb-4">Something went wrong</h2>
+      <p className="text-gray-600 mb-8">
+        {error.message || 'An unexpected error occurred.'}
+      </p>
       <button
         onClick={reset}
-        className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+        className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
       >
         Try again
       </button>
@@ -179,288 +240,204 @@ export default function DashboardError({ error, reset }: ErrorProps) {
 }
 ```
 
-## not-found.tsx
+## Not Found Page
 
 ```tsx
-// app/not-found.tsx — Global 404 page
+// app/not-found.tsx
 import Link from 'next/link';
 
-export default function NotFound() {
+export default function NotFoundPage() {
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen gap-4">
-      <h1 className="text-6xl font-bold text-gray-200">404</h1>
-      <h2 className="text-2xl font-semibold">Page not found</h2>
-      <p className="text-gray-500">The page you are looking for does not exist.</p>
-      <Link href="/" className="mt-4 text-blue-600 hover:underline">
-        Go home
+    <div className="min-h-screen flex flex-col items-center justify-center">
+      <h1 className="text-6xl font-bold text-gray-200 mb-4">404</h1>
+      <h2 className="text-2xl font-semibold text-gray-900 mb-2">Page Not Found</h2>
+      <p className="text-gray-500 mb-8">
+        The page you are looking for does not exist.
+      </p>
+      <Link href="/" className="text-blue-600 hover:underline">
+        Go back home
       </Link>
     </div>
   );
 }
 ```
 
+Trigger it programmatically in a page or layout:
+
 ```tsx
-// Trigger 404 from a page
 import { notFound } from 'next/navigation';
 
-export default async function PostPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function ProductPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const post = await fetchPost(id);
-  if (!post) notFound(); // Renders the nearest not-found.tsx
-  return <article>{post.title}</article>;
-}
-```
+  const product = await db.product.findUnique({ where: { id } });
 
-## template.tsx
+  if (!product) notFound(); // renders app/not-found.tsx (or nearest not-found.tsx)
 
-Unlike layouts, templates create a **new instance** for each navigation. Use for per-page animations or analytics.
-
-```tsx
-// app/template.tsx
-'use client';
-
-import { motion } from 'framer-motion';
-
-export default function Template({ children }: { children: React.ReactNode }) {
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.2 }}
-    >
-      {children}
-    </motion.div>
-  );
+  return <Product product={product} />;
 }
 ```
 
 ## Route Groups
 
-Route groups use `(folderName)` syntax. They do **not** affect the URL but let you organize files and share different layouts.
+Wrap a folder name in parentheses to create a **route group** — it organizes routes without affecting the URL structure.
 
 ```
 app/
-├── (marketing)/           # No URL segment
-│   ├── layout.tsx         # Marketing layout (no sidebar)
-│   ├── page.tsx           # / (home)
+├── (auth)/              # Group: no URL segment
+│   ├── layout.tsx       # Shared auth layout (centered card)
+│   ├── login/
+│   │   └── page.tsx     # /login
+│   └── register/
+│       └── page.tsx     # /register
+├── (marketing)/         # Group: marketing pages with full-width layout
+│   ├── layout.tsx
+│   ├── page.tsx         # /
 │   ├── about/
-│   │   └── page.tsx       # /about
+│   │   └── page.tsx     # /about
 │   └── pricing/
-│       └── page.tsx       # /pricing
-│
-└── (app)/                 # No URL segment
-    ├── layout.tsx          # App layout (sidebar + auth)
-    ├── dashboard/
-    │   └── page.tsx       # /dashboard
-    └── settings/
-        └── page.tsx       # /settings
+│       └── page.tsx     # /pricing
+└── (app)/               # Group: authenticated app with sidebar
+    ├── layout.tsx
+    └── dashboard/
+        └── page.tsx     # /dashboard
 ```
-
-:::tip[Multiple Root Layouts]
-You can have multiple root layouts using route groups. Each group can have its own `layout.tsx` with a different `<html>` and `<body>` — useful for having a marketing site and app with completely different structures.
-:::
 
 ## Private Folders
 
-Prefix with `_` to exclude from routing entirely:
+Prefix a folder with `_` to exclude it from routing. Use for component files, utilities, or test fixtures that live inside the `app/` directory:
 
 ```
 app/
-├── _components/        # Shared UI (not a route)
-├── _hooks/             # Custom hooks (not a route)
-├── dashboard/
-│   ├── _tests/         # Co-located tests (not a route)
-│   └── page.tsx
+├── blog/
+│   ├── page.tsx
+│   └── _components/        # Not a route — private to blog feature
+│       ├── PostCard.tsx
+│       └── PostList.tsx
+├── _lib/                   # Shared utilities — not a route
+│   └── formatDate.ts
+└── page.tsx
 ```
 
 ## Parallel Routes
 
-Render multiple pages in the same layout simultaneously using `@slot` folders:
+Parallel routes render multiple pages in the same layout simultaneously, using `@slot` syntax:
 
 ```
 app/
-├── layout.tsx           # Receives @team and @analytics as props
-├── page.tsx
-├── @team/
-│   └── page.tsx         # Rendered in the @team slot
-└── @analytics/
-    └── page.tsx         # Rendered in the @analytics slot
+├── layout.tsx               # Has @analytics and @team slots
+├── page.tsx                 # Default page
+├── @analytics/
+│   ├── page.tsx             # Analytics panel
+│   └── default.tsx          # Default (when not active)
+└── @team/
+    ├── page.tsx             # Team panel
+    └── default.tsx
 ```
 
 ```tsx
 // app/layout.tsx
-export default function Layout({
+export default function DashboardLayout({
   children,
-  team,
   analytics,
+  team,
 }: {
   children: React.ReactNode;
-  team: React.ReactNode;
   analytics: React.ReactNode;
+  team: React.ReactNode;
 }) {
   return (
-    <div>
-      {children}
-      <div className="grid grid-cols-2 gap-4">
-        {team}
+    <div className="grid grid-cols-12 gap-4">
+      <main className="col-span-8">{children}</main>
+      <aside className="col-span-4 space-y-4">
         {analytics}
-      </div>
+        {team}
+      </aside>
     </div>
   );
 }
 ```
 
+:::tip[Parallel Routes for Modals]
+Parallel routes combined with intercepting routes enable URL-addressable modals — the modal opens as an overlay but has its own URL, and refreshing shows the full page at that URL.
+:::
+
 ## Intercepting Routes
 
-Show a route in a modal without losing the current context. The URL updates so the modal is shareable/bookmarkable.
+Intercepting routes let you load a route within the current context while keeping the current page visible — perfect for modals.
 
 ```
 app/
 ├── feed/
-│   └── page.tsx          # Full feed list
+│   └── page.tsx                   # /feed — the main feed
 ├── photo/
 │   └── [id]/
-│       └── page.tsx      # Full photo page (direct navigation)
+│       └── page.tsx               # /photo/123 — full photo page
 └── @modal/
-    ├── default.tsx        # null — no modal by default
-    └── (.)photo/
+    ├── default.tsx                # null — no modal by default
+    └── (.)photo/                  # Intercept /photo routes from same level
         └── [id]/
-            └── page.tsx  # Intercepted: photo in modal when from feed
+            └── page.tsx           # Renders as modal over /feed
 ```
 
-```tsx
-// app/@modal/default.tsx
-export default function Default() {
-  return null;  // No modal by default
-}
-
-// app/@modal/(.)photo/[id]/page.tsx
-import { Modal } from '@/components/Modal';
-
-export default async function PhotoModal({
-  params,
-}: {
-  params: Promise<{ id: string }>;
-}) {
-  const { id } = await params;
-  const photo = await fetchPhoto(id);
-
-  return (
-    <Modal>
-      <img src={photo.url} alt={photo.title} className="max-w-2xl rounded-lg" />
-      <h2 className="mt-4 text-xl font-semibold">{photo.title}</h2>
-    </Modal>
-  );
-}
-```
+Interception syntax:
+- `(.)` — same level
+- `(..)` — one level up
+- `(..)(..)` — two levels up
+- `(...)` — from app root
 
 ## Metadata API
 
-### Static Metadata
+Next.js provides a first-class Metadata API for `<head>` tags:
 
 ```tsx
-// app/about/page.tsx
-import type { Metadata } from 'next';
-
+// Static metadata
 export const metadata: Metadata = {
-  title: 'About Us',
-  description: 'Learn about our team and mission.',
-  openGraph: {
-    title: 'About Us',
-    description: 'Learn about our team and mission.',
-    images: [{ url: '/og/about.png', width: 1200, height: 630 }],
-  },
-  twitter: {
-    card: 'summary_large_image',
-    title: 'About Us',
-    images: ['/og/about.png'],
-  },
-  keywords: ['about', 'team', 'mission'],
-  alternates: {
-    canonical: 'https://myapp.com/about',
-  },
+  title: 'My Page',
+  description: 'Page description',
 };
-```
 
-### Dynamic Metadata with generateMetadata
-
-```tsx
-// app/blog/[slug]/page.tsx
-import type { Metadata, ResolvingMetadata } from 'next';
-
-interface Props {
+// Dynamic metadata (async, access params/data)
+export async function generateMetadata({
+  params,
+}: {
   params: Promise<{ slug: string }>;
-}
-
-export async function generateMetadata(
-  { params }: Props,
-  parent: ResolvingMetadata
-): Promise<Metadata> {
+}): Promise<Metadata> {
   const { slug } = await params;
-  const post = await fetchPost(slug);
-
-  const parentImages = (await parent).openGraph?.images ?? [];
+  const post = await getPost(slug);
 
   return {
     title: post.title,
     description: post.excerpt,
+    alternates: {
+      canonical: `/blog/${slug}`,
+    },
     openGraph: {
       title: post.title,
-      description: post.excerpt,
-      type: 'article',
-      publishedTime: post.publishedAt,
-      authors: [post.author.name],
-      images: [
-        {
-          url: post.coverImage,
-          width: 1200,
-          height: 630,
-          alt: post.title,
-        },
-        ...parentImages,
-      ],
+      images: [post.coverImage],
     },
   };
 }
 ```
 
-## generateStaticParams
-
-Pre-generate static pages at build time:
+### Title Template
 
 ```tsx
-// app/blog/[slug]/page.tsx
-export async function generateStaticParams() {
-  const posts = await fetchAllPosts();
-  return posts.map(post => ({ slug: post.slug }));
-}
+// Root layout sets the template
+export const metadata: Metadata = {
+  title: {
+    default: 'MyApp',          // Shown when no child sets title
+    template: '%s | MyApp',    // %s = child's title
+    absolute: 'Override All',  // Ignores template entirely
+  },
+};
 
-// Nested dynamic segments
-// app/[lang]/blog/[slug]/page.tsx
-export async function generateStaticParams() {
-  const languages = ['en', 'fr', 'de'];
-  const posts = await fetchAllPosts();
+// Child page — title becomes "About Us | MyApp"
+export const metadata: Metadata = {
+  title: 'About Us',
+};
 
-  return languages.flatMap(lang =>
-    posts.map(post => ({ lang, slug: post.slug }))
-  );
-}
-
-// Return 404 for unknown paths instead of dynamic rendering
-export const dynamicParams = false;
-```
-
-## Route Segment Config
-
-```typescript
-// app/dashboard/page.tsx — configure per-segment caching behavior
-
-// Force dynamic rendering (never cache)
-export const dynamic = 'force-dynamic';
-
-// ISR — revalidate every 60 seconds
-export const revalidate = 60;
-
-// Edge runtime for global low-latency
-export const runtime = 'edge';
+// Child page using absolute — title is just "Our Blog" (no template)
+export const metadata: Metadata = {
+  title: { absolute: 'Our Blog' },
+};
 ```

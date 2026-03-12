@@ -1,6 +1,6 @@
 ---
 title: Native APIs
-description: Access device features including camera, location, notifications, file system, haptics, sensors, and background APIs with Expo modules.
+description: Access device hardware and OS features in React Native — camera, location, notifications, file system, sensors, push notifications, haptics, and background APIs using Expo SDK modules.
 sidebar:
   order: 7
 tags: [react, mobile]
@@ -8,32 +8,50 @@ tags: [react, mobile]
 
 import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-Expo provides a comprehensive set of pre-built native modules that cover most device APIs you'll need. Each module must be installed and may require permission declarations in `app.json`.
+React Native exposes device hardware and operating system APIs through native modules. Expo provides a comprehensive SDK that wraps these capabilities in a consistent, cross-platform API.
 
-## Camera — expo-camera
+## Permissions Pattern
+
+Most native APIs require explicit user permissions. Always request permissions before accessing restricted resources and handle the case where they are denied.
+
+```typescript
+import { Alert, Linking } from 'react-native';
+
+async function requestWithFallback(
+  requestFn: () => Promise<{ status: string }>,
+  permissionName: string
+): Promise<boolean> {
+  const { status } = await requestFn();
+
+  if (status === 'granted') return true;
+
+  if (status === 'denied') {
+    Alert.alert(
+      `${permissionName} Permission Required`,
+      `Please enable ${permissionName} access in Settings to use this feature.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Open Settings', onPress: () => Linking.openSettings() },
+      ]
+    );
+  }
+
+  return false;
+}
+```
+
+## Camera
 
 ```bash
 npx expo install expo-camera
 ```
 
-Add permissions to `app.json`:
-
-```json
-{
-  "expo": {
-    "plugins": [
-      ["expo-camera", { "cameraPermission": "Allow $(CFBUNDLEDISPLAYNAME) to access your camera." }]
-    ]
-  }
-}
-```
-
 ```tsx
-import { CameraView, useCameraPermissions, CameraType } from 'expo-camera';
-import { useState, useRef } from 'react';
+import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
+import { useRef, useState } from 'react';
 import { View, Text, Pressable, StyleSheet, Image } from 'react-native';
 
-export default function CameraScreen() {
+export function CameraScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const [facing, setFacing] = useState<CameraType>('back');
   const [photo, setPhoto] = useState<string | null>(null);
@@ -43,12 +61,10 @@ export default function CameraScreen() {
 
   if (!permission.granted) {
     return (
-      <View style={styles.center}>
-        <Text style={styles.message}>
-          We need camera permission to continue.
-        </Text>
-        <Pressable style={styles.btn} onPress={requestPermission}>
-          <Text style={styles.btnText}>Grant Permission</Text>
+      <View style={styles.centered}>
+        <Text style={styles.message}>Camera access is needed to take photos.</Text>
+        <Pressable style={styles.button} onPress={requestPermission}>
+          <Text style={styles.buttonText}>Grant Permission</Text>
         </Pressable>
       </View>
     );
@@ -57,20 +73,20 @@ export default function CameraScreen() {
   const takePicture = async () => {
     if (!cameraRef.current) return;
     const result = await cameraRef.current.takePictureAsync({
-      quality: 0.8,
+      quality: 0.8,          // 0–1
       base64: false,
-      exif: false,
       skipProcessing: false,
+      exif: true,
     });
     if (result) setPhoto(result.uri);
   };
 
   if (photo) {
     return (
-      <View style={styles.preview}>
-        <Image source={{ uri: photo }} style={styles.previewImage} />
-        <Pressable style={styles.btn} onPress={() => setPhoto(null)}>
-          <Text style={styles.btnText}>Retake</Text>
+      <View style={styles.container}>
+        <Image source={{ uri: photo }} style={StyleSheet.absoluteFillObject} resizeMode="cover" />
+        <Pressable style={styles.retakeButton} onPress={() => setPhoto(null)}>
+          <Text style={styles.buttonText}>Retake</Text>
         </Pressable>
       </View>
     );
@@ -80,179 +96,146 @@ export default function CameraScreen() {
     <View style={styles.container}>
       <CameraView
         ref={cameraRef}
-        style={styles.camera}
+        style={StyleSheet.absoluteFillObject}
         facing={facing}
         flash="auto"
-      >
-        <View style={styles.controls}>
-          <Pressable
-            style={styles.flipBtn}
-            onPress={() => setFacing((f) => (f === 'back' ? 'front' : 'back'))}
-          >
-            <Text style={styles.flipText}>Flip</Text>
-          </Pressable>
-          <Pressable style={styles.captureBtn} onPress={takePicture} />
-        </View>
-      </CameraView>
+      />
+      <View style={styles.controls}>
+        <Pressable onPress={() => setFacing(f => f === 'back' ? 'front' : 'back')}>
+          <Text style={styles.buttonText}>Flip</Text>
+        </Pressable>
+        <Pressable style={styles.shutterButton} onPress={takePicture}>
+          <View style={styles.shutterInner} />
+        </Pressable>
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
-  camera: { flex: 1 },
-  controls: { position: 'absolute', bottom: 40, left: 0, right: 0, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 40 },
-  captureBtn: { width: 72, height: 72, borderRadius: 36, backgroundColor: '#fff', borderWidth: 4, borderColor: 'rgba(255,255,255,0.5)' },
-  flipBtn: { padding: 12 },
-  flipText: { color: '#fff', fontSize: 16, fontWeight: '600' },
-  center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
-  message: { textAlign: 'center', marginBottom: 16, fontSize: 16 },
-  btn: { backgroundColor: '#007AFF', borderRadius: 8, paddingHorizontal: 20, paddingVertical: 12 },
-  btnText: { color: '#fff', fontWeight: '600' },
-  preview: { flex: 1 },
-  previewImage: { flex: 1 },
+  container: { flex: 1, backgroundColor: '#000' },
+  centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
+  message: { fontSize: 16, textAlign: 'center', marginBottom: 20 },
+  button: { backgroundColor: '#007AFF', paddingHorizontal: 24, paddingVertical: 12, borderRadius: 10 },
+  retakeButton: { position: 'absolute', bottom: 48, alignSelf: 'center', backgroundColor: 'rgba(0,0,0,0.6)', padding: 12, borderRadius: 10 },
+  buttonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  controls: { position: 'absolute', bottom: 48, width: '100%', flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', paddingHorizontal: 40 },
+  shutterButton: { width: 72, height: 72, borderRadius: 36, backgroundColor: 'rgba(255,255,255,0.3)', justifyContent: 'center', alignItems: 'center', borderWidth: 3, borderColor: '#fff' },
+  shutterInner: { width: 56, height: 56, borderRadius: 28, backgroundColor: '#fff' },
 });
 ```
 
-## Image Picker — expo-image-picker
+## Image Picker
 
 ```bash
 npx expo install expo-image-picker
 ```
 
-```tsx
+```typescript
 import * as ImagePicker from 'expo-image-picker';
-import { Image, Pressable, Text, View, StyleSheet } from 'react-native';
-import { useState } from 'react';
 
-export function AvatarPicker() {
-  const [image, setImage] = useState<string | null>(null);
+export async function pickImage(): Promise<string | null> {
+  const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+  if (status !== 'granted') return null;
 
-  const pickImage = async () => {
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') {
-      alert('Media library permission is required.');
-      return;
-    }
+  const result = await ImagePicker.launchImageLibraryAsync({
+    mediaTypes: ['images'],
+    allowsEditing: true,
+    aspect: [1, 1],        // Square crop
+    quality: 0.8,
+    allowsMultipleSelection: false,
+  });
 
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
-      aspect: [1, 1],
-      quality: 0.8,
-    });
-
-    if (!result.canceled) {
-      setImage(result.assets[0]?.uri ?? null);
-    }
-  };
-
-  return (
-    <Pressable style={styles.picker} onPress={pickImage}>
-      {image ? (
-        <Image source={{ uri: image }} style={styles.avatar} />
-      ) : (
-        <Text style={styles.placeholder}>Tap to select photo</Text>
-      )}
-    </Pressable>
-  );
+  if (result.canceled) return null;
+  return result.assets[0]?.uri ?? null;
 }
 
-const styles = StyleSheet.create({
-  picker: { width: 100, height: 100, borderRadius: 50, overflow: 'hidden', backgroundColor: '#F2F2F7', justifyContent: 'center', alignItems: 'center' },
-  avatar: { width: '100%', height: '100%' },
-  placeholder: { fontSize: 12, color: '#8E8E93', textAlign: 'center', padding: 8 },
-});
+export async function capturePhoto(): Promise<string | null> {
+  const { status } = await ImagePicker.requestCameraPermissionsAsync();
+  if (status !== 'granted') return null;
+
+  const result = await ImagePicker.launchCameraAsync({
+    allowsEditing: true,
+    quality: 0.9,
+  });
+
+  if (result.canceled) return null;
+  return result.assets[0]?.uri ?? null;
+}
 ```
 
-## Location — expo-location
+## Location
 
 ```bash
 npx expo install expo-location
-```
-
-```json
-{
-  "expo": {
-    "plugins": [
-      ["expo-location", {
-        "locationAlwaysAndWhenInUsePermission": "Allow $(CFBUNDLEDISPLAYNAME) to use your location."
-      }]
-    ]
-  }
-}
 ```
 
 ```typescript
 import * as Location from 'expo-location';
 import { useEffect, useState, useRef } from 'react';
 
-interface Coords {
-  latitude: number;
-  longitude: number;
-  accuracy: number | null;
+// One-time location fetch
+export async function getCurrentLocation() {
+  const { status } = await Location.requestForegroundPermissionsAsync();
+  if (status !== 'granted') throw new Error('Location permission denied');
+
+  const location = await Location.getCurrentPositionAsync({
+    accuracy: Location.Accuracy.Balanced,
+    timeInterval: 5000,
+    distanceInterval: 10,
+  });
+
+  return {
+    latitude: location.coords.latitude,
+    longitude: location.coords.longitude,
+    accuracy: location.coords.accuracy,
+    timestamp: location.timestamp,
+  };
 }
 
-export function useLocation() {
-  const [coords, setCoords] = useState<Coords | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const watchRef = useRef<Location.LocationSubscription | null>(null);
+// Reverse geocode
+export async function getAddressFromCoords(lat: number, lng: number) {
+  const [address] = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lng });
+  return `${address.street}, ${address.city}, ${address.country}`;
+}
+
+// Continuous location tracking hook
+export function useLocationTracking(active: boolean) {
+  const [location, setLocation] = useState<Location.LocationObject | null>(null);
+  const subscriptionRef = useRef<Location.LocationSubscription | null>(null);
 
   useEffect(() => {
-    let mounted = true;
+    if (!active) {
+      subscriptionRef.current?.remove();
+      return;
+    }
 
     (async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        if (mounted) setError('Location permission denied');
-        return;
-      }
+      if (status !== 'granted') return;
 
-      // Get current position once
-      const location = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.High,
-      });
-
-      if (mounted) {
-        setCoords({
-          latitude: location.coords.latitude,
-          longitude: location.coords.longitude,
-          accuracy: location.coords.accuracy,
-        });
-        setLoading(false);
-      }
-
-      // Watch for position updates
-      watchRef.current = await Location.watchPositionAsync(
+      subscriptionRef.current = await Location.watchPositionAsync(
         {
-          accuracy: Location.Accuracy.Balanced,
-          timeInterval: 5000,
-          distanceInterval: 10,
+          accuracy: Location.Accuracy.High,
+          timeInterval: 10000,   // Every 10 seconds
+          distanceInterval: 20,  // Or every 20 meters
         },
-        (newLocation) => {
-          if (mounted) {
-            setCoords({
-              latitude: newLocation.coords.latitude,
-              longitude: newLocation.coords.longitude,
-              accuracy: newLocation.coords.accuracy,
-            });
-          }
-        },
+        (newLocation) => setLocation(newLocation)
       );
     })();
 
-    return () => {
-      mounted = false;
-      watchRef.current?.remove();
-    };
-  }, []);
+    return () => subscriptionRef.current?.remove();
+  }, [active]);
 
-  return { coords, error, loading };
+  return location;
 }
 ```
 
-## Notifications — expo-notifications
+:::caution[Background Location]
+Background location tracking requires the `expo-task-manager` module and an explicit `BACKGROUND_LOCATION` permission in your app.json. It also requires App Store review justification on iOS and is heavily regulated to protect battery life.
+:::
+
+## Push Notifications
 
 ```bash
 npx expo install expo-notifications expo-device
@@ -262,20 +245,21 @@ npx expo install expo-notifications expo-device
 import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
 import { Platform } from 'react-native';
+import Constants from 'expo-constants';
 
-// Configure how notifications appear when app is foregrounded
+// Configure how notifications are presented when app is in foreground
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
     shouldPlaySound: true,
-    shouldSetBadge: false,
+    shouldSetBadge: true,
   }),
 });
 
-// Register for push notifications
-export async function registerForPushNotificationsAsync(): Promise<string | null> {
+// Register for push notifications and return Expo Push Token
+export async function registerForPushNotifications(): Promise<string | null> {
   if (!Device.isDevice) {
-    console.warn('Push notifications require a physical device');
+    console.warn('Push notifications only work on physical devices');
     return null;
   }
 
@@ -297,58 +281,58 @@ export async function registerForPushNotificationsAsync(): Promise<string | null
     finalStatus = status;
   }
 
-  if (finalStatus !== 'granted') {
-    console.warn('Push notification permission not granted');
-    return null;
-  }
+  if (finalStatus !== 'granted') return null;
 
-  const { data: token } = await Notifications.getExpoPushTokenAsync({
-    projectId: 'your-expo-project-id',
-  });
+  const projectId = Constants.expoConfig?.extra?.eas?.projectId;
+  const { data: pushToken } = await Notifications.getExpoPushTokenAsync({ projectId });
 
-  return token;
+  return pushToken;
 }
 
-// Schedule a local notification
+// Local notification (no server needed)
 export async function scheduleLocalNotification(
   title: string,
   body: string,
-  triggerSeconds: number = 5,
+  delaySeconds: number = 0
 ) {
-  await Notifications.scheduleNotificationAsync({
+  return Notifications.scheduleNotificationAsync({
     content: {
       title,
       body,
-      data: { screen: 'Home' },
-      sound: 'default',
+      data: { type: 'local' },
+      sound: true,
+      badge: 1,
     },
-    trigger: {
-      seconds: triggerSeconds,
-      repeats: false,
-    },
+    trigger: delaySeconds > 0
+      ? { seconds: delaySeconds }
+      : null,  // null = immediate
   });
 }
 
-// Listen for notifications
-import { useEffect, useRef } from 'react';
-import { useNavigation } from '@react-navigation/native';
-
-export function useNotificationListener() {
-  const navigation = useNavigation();
-  const responseRef = useRef<Notifications.Subscription>();
-
+// Listen for notification interactions
+export function useNotificationListeners() {
   useEffect(() => {
-    responseRef.current = Notifications.addNotificationResponseReceivedListener((response) => {
-      const screen = response.notification.request.content.data?.screen as string;
-      if (screen) navigation.navigate(screen as never);
+    // Notification received while app is open
+    const receivedSub = Notifications.addNotificationReceivedListener(notification => {
+      console.log('Received:', notification.request.content.title);
     });
 
-    return () => responseRef.current?.remove();
-  }, [navigation]);
+    // User tapped the notification
+    const responseSub = Notifications.addNotificationResponseReceivedListener(response => {
+      const data = response.notification.request.content.data;
+      console.log('Tapped notification with data:', data);
+      // Navigate based on data.type
+    });
+
+    return () => {
+      receivedSub.remove();
+      responseSub.remove();
+    };
+  }, []);
 }
 ```
 
-## File System — expo-file-system
+## File System
 
 ```bash
 npx expo install expo-file-system
@@ -357,62 +341,56 @@ npx expo install expo-file-system
 ```typescript
 import * as FileSystem from 'expo-file-system';
 
-const CACHE_DIR = `${FileSystem.cacheDirectory}downloads/`;
-const DOC_DIR = FileSystem.documentDirectory!;
-
-// Ensure directory exists
-async function ensureDir(dir: string) {
-  const { exists } = await FileSystem.getInfoAsync(dir);
-  if (!exists) await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
-}
-
-// Download a file with progress
-export async function downloadFile(
-  url: string,
-  filename: string,
-  onProgress?: (progress: number) => void,
-): Promise<string> {
-  await ensureDir(CACHE_DIR);
-  const destination = `${CACHE_DIR}${filename}`;
+// Download a file
+export async function downloadFile(url: string, filename: string) {
+  const destinationUri = `${FileSystem.documentDirectory}${filename}`;
 
   const downloadResumable = FileSystem.createDownloadResumable(
     url,
-    destination,
+    destinationUri,
     {},
-    (downloadProgress) => {
-      const progress =
-        downloadProgress.totalBytesWritten / downloadProgress.totalBytesExpectedToWrite;
-      onProgress?.(progress);
-    },
+    ({ totalBytesWritten, totalBytesExpectedToWrite }) => {
+      const progress = totalBytesWritten / totalBytesExpectedToWrite;
+      console.log(`Download progress: ${Math.round(progress * 100)}%`);
+    }
   );
 
   const result = await downloadResumable.downloadAsync();
-  return result?.uri ?? destination;
+  return result?.uri;
 }
 
 // Read a text file
-export async function readTextFile(path: string): Promise<string> {
-  return FileSystem.readAsStringAsync(path, { encoding: FileSystem.EncodingType.UTF8 });
+export async function readTextFile(uri: string): Promise<string> {
+  return FileSystem.readAsStringAsync(uri, {
+    encoding: FileSystem.EncodingType.UTF8,
+  });
 }
 
 // Write a text file
 export async function writeTextFile(filename: string, content: string): Promise<string> {
-  const path = `${DOC_DIR}${filename}`;
-  await FileSystem.writeAsStringAsync(path, content, {
+  const uri = `${FileSystem.documentDirectory}${filename}`;
+  await FileSystem.writeAsStringAsync(uri, content, {
     encoding: FileSystem.EncodingType.UTF8,
   });
-  return path;
+  return uri;
 }
 
 // Copy a file
-export async function copyFile(from: string, to: string): Promise<void> {
-  await FileSystem.copyAsync({ from, to });
+export async function copyFile(sourceUri: string, destFilename: string) {
+  const destUri = `${FileSystem.documentDirectory}${destFilename}`;
+  await FileSystem.copyAsync({ from: sourceUri, to: destUri });
+  return destUri;
 }
 
-// Delete a file
-export async function deleteFile(path: string): Promise<void> {
-  const { exists } = await FileSystem.getInfoAsync(path);
-  if (exists) await FileSystem.deleteAsync(path);
+// Check file info
+export async function getFileInfo(uri: string) {
+  const info = await FileSystem.getInfoAsync(uri);
+  if (!info.exists) return null;
+  return {
+    exists: true,
+    size: info.isDirectory ? 0 : info.size,
+    modificationTime: info.modificationTime,
+  };
 }
 ```
 
@@ -421,29 +399,31 @@ export async function deleteFile(path: string): Promise<void> {
 ```typescript
 import { Linking } from 'react-native';
 
-// Open a URL in Safari/Chrome
+// Open URL in default browser
 await Linking.openURL('https://example.com');
 
-// Open app settings (to grant permissions)
-await Linking.openSettings();
-
-// Make a phone call
-const phone = 'tel:+15551234567';
-const canCall = await Linking.canOpenURL(phone);
-if (canCall) await Linking.openURL(phone);
-
-// Send an email
+// Open email client
 await Linking.openURL('mailto:support@example.com?subject=Help&body=Hello');
 
-// Send an SMS
-await Linking.openURL('sms:+15551234567');
+// Make a phone call
+await Linking.openURL('tel:+15551234567');
 
-// Open Maps
-await Linking.openURL('maps://?q=Eiffel+Tower'); // iOS
-await Linking.openURL('geo:48.8588,2.2944?q=Eiffel+Tower'); // Android
+// Send SMS
+await Linking.openURL('sms:+15551234567?body=Hello');
+
+// Open app settings
+await Linking.openSettings();
+
+// Check if URL can be opened (iOS requires LSApplicationQueriesSchemes in Info.plist)
+const canOpen = await Linking.canOpenURL('twitter://');
+if (canOpen) {
+  await Linking.openURL('twitter://user?screen_name=reactnative');
+} else {
+  await Linking.openURL('https://twitter.com/reactnative');
+}
 ```
 
-## Haptics — expo-haptics
+## Haptics
 
 ```bash
 npx expo install expo-haptics
@@ -452,112 +432,99 @@ npx expo install expo-haptics
 ```typescript
 import * as Haptics from 'expo-haptics';
 
-// Light tap feedback (e.g., tab selection)
+// Light, medium, heavy impact (like pressing a button)
 await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-
-// Medium impact (e.g., button press)
 await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-
-// Heavy impact (e.g., confirmation action)
 await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
 
-// Success notification (e.g., form submitted)
+// Notification feedback (success, warning, error)
 await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-
-// Warning
 await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-
-// Error
 await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
 
-// Selection changed (e.g., picker scroll)
+// Simple selection change feedback
 await Haptics.selectionAsync();
 ```
 
-:::tip[Haptics on Android]
-`expo-haptics` uses Android's `Vibrator` API for haptic feedback. The experience is less precise than iOS Taptic Engine but still provides meaningful feedback.
-:::
+```tsx
+// Usage in a delete button
+<Pressable
+  onPress={async () => {
+    await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    confirmDelete();
+  }}
+>
+  <Text>Delete</Text>
+</Pressable>
+```
 
-## Sensors — expo-sensors
+## Sensors
 
 ```bash
 npx expo install expo-sensors
 ```
 
 ```typescript
-import { Accelerometer, Gyroscope, Barometer } from 'expo-sensors';
+import { Accelerometer, Gyroscope } from 'expo-sensors';
 import { useEffect, useState } from 'react';
 
-// Accelerometer
-export function useAccelerometer(intervalMs = 100) {
+export function useAccelerometer(active: boolean) {
   const [data, setData] = useState({ x: 0, y: 0, z: 0 });
 
   useEffect(() => {
-    Accelerometer.setUpdateInterval(intervalMs);
-    const sub = Accelerometer.addListener(setData);
-    return () => sub.remove();
-  }, [intervalMs]);
+    if (!active) return;
+
+    Accelerometer.setUpdateInterval(100); // 10Hz (every 100ms)
+    const subscription = Accelerometer.addListener(setData);
+    return () => subscription.remove();
+  }, [active]);
 
   return data;
 }
 
 // Shake detection
-export function useShakeDetection(onShake: () => void, threshold = 1.5) {
-  useEffect(() => {
-    Accelerometer.setUpdateInterval(100);
-    const sub = Accelerometer.addListener(({ x, y, z }) => {
-      const acceleration = Math.sqrt(x * x + y * y + z * z);
-      if (acceleration > threshold) onShake();
-    });
-    return () => sub.remove();
-  }, [onShake, threshold]);
-}
-
-// Barometer (altitude / pressure)
-export function useBarometer() {
-  const [pressure, setPressure] = useState<number | null>(null);
+export function useShakeDetection(onShake: () => void) {
+  const SHAKE_THRESHOLD = 2.0; // G-force threshold
+  const acc = useAccelerometer(true);
 
   useEffect(() => {
-    Barometer.setUpdateInterval(1000);
-    const sub = Barometer.addListener(({ pressure: p }) => setPressure(p));
-    return () => sub.remove();
-  }, []);
-
-  return pressure;
+    const total = Math.sqrt(acc.x ** 2 + acc.y ** 2 + acc.z ** 2);
+    if (total > SHAKE_THRESHOLD) {
+      onShake();
+    }
+  }, [acc, onShake]);
 }
 ```
 
 ## BackHandler (Android)
 
-Handle the Android hardware back button:
-
 ```typescript
 import { BackHandler } from 'react-native';
 import { useEffect } from 'react';
 
-export function useAndroidBackHandler(onBack: () => boolean) {
+// Intercept Android back button
+export function useBackHandler(handler: () => boolean) {
   useEffect(() => {
-    const sub = BackHandler.addEventListener('hardwareBackPress', onBack);
-    return () => sub.remove();
-  }, [onBack]);
+    const subscription = BackHandler.addEventListener('hardwareBackPress', handler);
+    return () => subscription.remove();
+  }, [handler]);
 }
 
-// Usage: prevent going back when modal is open
-export function ConfirmationModal({ visible }: { visible: boolean }) {
-  useAndroidBackHandler(() => {
+// Usage in a modal
+export function ConfirmModal({ visible, onDismiss }: ModalProps) {
+  useBackHandler(() => {
     if (visible) {
-      // Return true to prevent default back behavior
-      return true;
+      onDismiss();
+      return true; // prevent default back action
     }
-    return false;
+    return false; // let default back action happen
   });
-  // ...
+
+  return <Modal visible={visible}>{/* ... */}</Modal>;
 }
 ```
 
 ## AppState
-
-Monitor whether the app is in the foreground, background, or inactive:
 
 ```typescript
 import { AppState, AppStateStatus } from 'react-native';
@@ -567,77 +534,60 @@ export function useAppState(onChange?: (state: AppStateStatus) => void) {
   const appState = useRef(AppState.currentState);
 
   useEffect(() => {
-    const sub = AppState.addEventListener('change', (nextState) => {
-      const prev = appState.current;
+    const subscription = AppState.addEventListener('change', nextState => {
+      if (appState.current === 'background' && nextState === 'active') {
+        console.log('App came to foreground');
+        // Refresh data, check for updates, etc.
+      }
+      if (appState.current === 'active' && nextState === 'background') {
+        console.log('App went to background');
+        // Persist any unsaved data
+      }
       appState.current = nextState;
-
-      // App came to foreground
-      if (prev.match(/inactive|background/) && nextState === 'active') {
-        console.log('App foregrounded — refreshing data');
-        onChange?.(nextState);
-      }
-
-      // App went to background
-      if (nextState.match(/inactive|background/) && prev === 'active') {
-        console.log('App backgrounded — saving state');
-      }
+      onChange?.(nextState);
     });
 
-    return () => sub.remove();
+    return () => subscription.remove();
   }, [onChange]);
 
   return appState.current;
 }
 ```
 
-## NetInfo — Network Status
+## NetInfo
 
 ```bash
 npx expo install @react-native-community/netinfo
 ```
 
 ```typescript
-import NetInfo, { useNetInfo } from '@react-native-community/netinfo';
+import NetInfo from '@react-native-community/netinfo';
+import { useEffect, useState } from 'react';
 
-// Hook
 export function useNetworkStatus() {
-  const state = useNetInfo();
-  return {
-    isOnline: state.isConnected && state.isInternetReachable,
-    type: state.type, // 'wifi' | 'cellular' | 'none' | etc.
-    isWifi: state.type === 'wifi',
-    isCellular: state.type === 'cellular',
-  };
-}
+  const [isConnected, setIsConnected] = useState<boolean | null>(null);
+  const [connectionType, setConnectionType] = useState<string>('unknown');
 
-// One-time check
-const state = await NetInfo.fetch();
-if (!state.isConnected) {
-  alert('No internet connection');
+  useEffect(() => {
+    // Get initial state
+    NetInfo.fetch().then(state => {
+      setIsConnected(state.isConnected);
+      setConnectionType(state.type);
+    });
+
+    // Subscribe to changes
+    const unsubscribe = NetInfo.addEventListener(state => {
+      setIsConnected(state.isConnected);
+      setConnectionType(state.type);
+    });
+
+    return unsubscribe;
+  }, []);
+
+  return { isConnected, connectionType };
 }
 ```
 
-## Vibration
-
-```typescript
-import { Vibration } from 'react-native';
-
-// Single vibration
-Vibration.vibrate();
-
-// Vibrate for 500ms
-Vibration.vibrate(500);
-
-// Pattern: [wait, vibrate, wait, vibrate] in ms
-Vibration.vibrate([0, 500, 200, 500]);
-
-// Repeat pattern (second arg = repeat)
-Vibration.vibrate([0, 100, 100], true);
-
-// Stop
-Vibration.cancel();
-```
-
-:::caution[Use Haptics over Vibration]
-Prefer `expo-haptics` over `Vibration` for UI feedback. `Vibration` is raw motor control — no distinction between feedback types, and iOS support is limited to simple patterns only.
+:::tip[Offline Banner]
+Use `useNetworkStatus()` to show a persistent banner when the user is offline, letting them know the app is running in offline mode.
 :::

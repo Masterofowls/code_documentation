@@ -1,6 +1,6 @@
 ---
-title: Jobs & Steps in GitHub Actions
-description: Complete reference for job structure, outputs, service containers, caching, artifacts, GitHub Script, job summaries, and secure masking.
+title: Jobs & Steps
+description: Job structure, outputs, service containers, caching, artifacts, and the full GitHub Actions step API.
 sidebar:
   order: 4
 tags: [devops, ci-cd]
@@ -8,86 +8,82 @@ tags: [devops, ci-cd]
 
 import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-Jobs and steps are the execution units of GitHub Actions. This page covers the full job configuration surface — from service containers and outputs to caching strategies and artifact management.
+Jobs are the execution units of a workflow. Each job runs on its own fresh runner. This page covers the complete job API, service containers, inter-job outputs, caching, and artifact management.
 
 ## Job Structure
 
-A job is defined as a key under `jobs:` with the following fields:
+A job is defined by its ID key under `jobs:`. Here is the full set of job-level configuration options:
 
 ```yaml
 jobs:
-  build:
-    name: Build Application           # display name
-    runs-on: ubuntu-latest            # runner type
-    needs: [lint, test]              # dependencies
-    if: success()                     # conditional execution
-    environment: production           # GitHub Environment
-    timeout-minutes: 30              # job-level timeout
-    continue-on-error: false         # whether failures cascade
-    outputs:                         # values exposed to downstream jobs
-      version: ${{ steps.version.outputs.value }}
-    env:                             # job-level env vars
-      NODE_ENV: production
-    strategy:                        # matrix (see Workflows page)
+  deploy:
+    name: Deploy to Production       # Display name (optional)
+    runs-on: ubuntu-latest            # Runner label
+    needs: [build, test]              # Job dependencies
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://myapp.com
+    timeout-minutes: 30               # Default: 360 (6 hours)
+    continue-on-error: false
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      deployed-url: ${{ steps.deploy.outputs.url }}
+    strategy:
       matrix:
-        node: [18, 20]
-    container:                       # run job inside a Docker container
-      image: node:20-alpine
-    services:                        # sidecar containers
-      postgres:
-        image: postgres:16
+        region: [us-east-1, eu-west-1]
+    env:
+      DEPLOY_ENV: production
+    steps:
+      - uses: actions/checkout@v4
 ```
 
 ## Job Outputs
 
-Jobs can expose values to downstream jobs. The flow is:
-
-<Steps>
-1. A step writes to `$GITHUB_OUTPUT`
-2. The job declares an `outputs:` block referencing that step's output
-3. Downstream jobs reference it with `needs.JOBID.outputs.KEY`
-</Steps>
+Pass data between jobs using outputs. A step writes to `$GITHUB_OUTPUT`; the job exposes the value; a downstream job reads it via `needs.<job-id>.outputs.<name>`.
 
 ```yaml
 jobs:
   build:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.get-version.outputs.version }}
-      image-tag: ${{ steps.build-image.outputs.tag }}
+      image-tag: ${{ steps.meta.outputs.image-tag }}
+      build-time: ${{ steps.build.outputs.timestamp }}
+
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Get version
-        id: get-version
+      - name: Generate image tag
+        id: meta
         run: |
-          VERSION=$(node -p "require('./package.json').version")
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          TAG="sha-${GITHUB_SHA::8}"
+          echo "image-tag=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Build Docker image
-        id: build-image
+      - name: Record build time
+        id: build
         run: |
-          TAG="myapp:$(git rev-parse --short HEAD)"
-          docker build -t "$TAG" .
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
 
   deploy:
     runs-on: ubuntu-latest
     needs: build
     steps:
-      - name: Deploy version ${{ needs.build.outputs.version }}
+      - name: Deploy image
         run: |
-          echo "Deploying: ${{ needs.build.outputs.version }}"
-          echo "Image: ${{ needs.build.outputs.image-tag }}"
+          echo "Deploying ${{ needs.build.outputs.image-tag }}"
+          echo "Built at ${{ needs.build.outputs.build-time }}"
 ```
 
-:::caution[Deprecated set-output]
-The old `::set-output name=key::value` command syntax is deprecated and disabled. Always use `echo "key=value" >> $GITHUB_OUTPUT` instead.
+:::tip[`$GITHUB_OUTPUT` replaces `set-output`]
+The old `echo "::set-output name=key::value"` workflow command is deprecated. Always use `echo "key=value" >> $GITHUB_OUTPUT` (appending to the file at `$GITHUB_OUTPUT`).
 :::
 
 ## Service Containers
 
-Service containers run as Docker sidecars alongside your job — perfect for databases, caches, and message queues in integration tests.
+Service containers are Docker containers that run alongside your job — useful for databases, caches, and other external dependencies in integration tests.
 
 ### PostgreSQL Service
 
@@ -98,7 +94,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:16
         env:
           POSTGRES_USER: testuser
           POSTGRES_PASSWORD: testpass
@@ -113,33 +109,19 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-      - run: npm ci
+
+      - name: Run migrations
+        env:
+          DATABASE_URL: postgresql://testuser:testpass@localhost:5432/testdb
+        run: npm run db:migrate
+
       - name: Run integration tests
         env:
           DATABASE_URL: postgresql://testuser:testpass@localhost:5432/testdb
         run: npm run test:integration
 ```
 
-### Redis Service
-
-```yaml
-services:
-  redis:
-    image: redis:7-alpine
-    ports:
-      - 6379:6379
-    options: >-
-      --health-cmd "redis-cli ping"
-      --health-interval 10s
-      --health-timeout 5s
-      --health-retries 5
-```
-
-### Multiple Services
+### Redis and PostgreSQL Together
 
 ```yaml
 services:
@@ -147,72 +129,74 @@ services:
     image: postgres:16
     env:
       POSTGRES_PASSWORD: secret
+    options: >-
+      --health-cmd pg_isready
+      --health-interval 10s
+      --health-timeout 5s
+      --health-retries 5
     ports:
       - 5432:5432
-    options: --health-cmd pg_isready --health-interval 5s --health-retries 5
 
   redis:
-    image: redis:7
+    image: redis:7-alpine
+    options: >-
+      --health-cmd "redis-cli ping"
+      --health-interval 10s
+      --health-timeout 5s
+      --health-retries 5
     ports:
       - 6379:6379
-
-  rabbitmq:
-    image: rabbitmq:3-management
-    ports:
-      - 5672:5672
-      - 15672:15672
-    env:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
 ```
 
-:::tip[Service Container Networking]
-On `ubuntu-latest` runners, services are accessible via `localhost`. When running jobs inside a container (`container:` key), services are accessible by their service name (e.g., `postgres:5432`).
+:::caution[Port mapping requirement]
+When running on `ubuntu-latest` (not inside a container), you must map ports with `ports:` to access the service via `localhost`. The service container is on Docker's internal network by default.
 :::
 
 ## Container Jobs
 
-Run your entire job inside a Docker container instead of the default runner VM:
+Run your entire job inside a Docker container instead of on the bare runner:
 
 ```yaml
 jobs:
   test:
     runs-on: ubuntu-latest
     container:
-      image: python:3.12-slim
+      image: node:20-alpine
       env:
-        PIP_NO_CACHE_DIR: '1'
-      options: --cpus 2 --memory 4g
+        NODE_ENV: test
+      options: --cpus 2
       volumes:
         - /tmp:/tmp
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    services:
+      db:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: secret
+        # Note: use service name as hostname, not localhost!
+
     steps:
       - uses: actions/checkout@v4
-      - run: pip install -r requirements.txt
-      - run: pytest
+      - run: npm ci
+      - name: Connect to DB
+        env:
+          DATABASE_URL: postgresql://postgres:secret@db:5432/postgres
+        run: npm test
 ```
 
-When using container jobs with services, reference services by name:
+When using container jobs, service containers are accessible by their **service name** as the hostname (e.g., `db`, `redis`), not `localhost`.
+
+## Caching with `actions/cache@v4`
+
+Caching stores and restores arbitrary paths between runs, reducing build times significantly.
 
 ```yaml
-container:
-  image: node:20-alpine
-services:
-  db:
-    image: postgres:16
-steps:
-  - env:
-      DATABASE_URL: postgresql://postgres@db:5432/test
-    run: npm run test:db
-```
-
-## `actions/cache@v4`
-
-Cache directories between runs to speed up dependency installation significantly.
-
-```yaml
-- name: Cache npm dependencies
-  uses: actions/cache@v4
+- name: Cache node_modules
   id: cache-npm
+  uses: actions/cache@v4
   with:
     path: ~/.npm
     key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
@@ -224,36 +208,42 @@ Cache directories between runs to speed up dependency installation significantly
   run: npm ci
 ```
 
-### Caching Multiple Paths
+### Cache Keys and Restore Keys
+
+The `key` must be an exact match for a cache hit. `restore-keys` are fallback prefix patterns:
 
 ```yaml
-- uses: actions/cache@v4
-  with:
-    path: |
-      ~/.npm
-      node_modules
-      .next/cache
-    key: nextjs-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}-${{ hashFiles('**/*.ts', '**/*.tsx') }}
-    restore-keys: |
-      nextjs-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}-
-      nextjs-${{ runner.os }}-
+key: build-${{ runner.os }}-${{ hashFiles('**/yarn.lock') }}-${{ github.sha }}
+restore-keys: |
+  build-${{ runner.os }}-${{ hashFiles('**/yarn.lock') }}-
+  build-${{ runner.os }}-
+  build-
 ```
 
-### Python Pip Cache
+If the exact `key` is found → **cache hit** (restored, not saved again).
+If only `restore-keys` match → **partial hit** (restored, new cache saved with exact key at job end).
 
+### Common Cache Configurations
+
+<Tabs>
+<TabItem label="npm">
+```yaml
+- uses: actions/setup-node@v4
+  with:
+    node-version: '20'
+    cache: 'npm'   # Built-in caching via setup-node
+```
+</TabItem>
+<TabItem label="pip">
 ```yaml
 - uses: actions/cache@v4
   with:
     path: ~/.cache/pip
     key: pip-${{ runner.os }}-${{ hashFiles('**/requirements*.txt') }}
-    restore-keys: |
-      pip-${{ runner.os }}-
-
-- run: pip install -r requirements.txt
+    restore-keys: pip-${{ runner.os }}-
 ```
-
-### Rust Cargo Cache
-
+</TabItem>
+<TabItem label="Cargo">
 ```yaml
 - uses: actions/cache@v4
   with:
@@ -265,29 +255,39 @@ Cache directories between runs to speed up dependency installation significantly
       target/
     key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
 ```
+</TabItem>
+<TabItem label="Docker layers">
+```yaml
+- uses: actions/cache@v4
+  with:
+    path: /tmp/.buildx-cache
+    key: buildx-${{ runner.os }}-${{ github.sha }}
+    restore-keys: buildx-${{ runner.os }}-
+```
+</TabItem>
+</Tabs>
 
-## `actions/upload-artifact@v4` and `download-artifact@v4`
+## Artifacts
 
-Share files between jobs or preserve build outputs for download.
+Artifacts are files uploaded during a workflow run. They persist after the job finishes and can be downloaded from the GitHub UI or shared between jobs.
 
-### Upload
+### Upload Artifacts
 
 ```yaml
 - name: Upload test results
+  if: always()   # Upload even if tests fail
   uses: actions/upload-artifact@v4
-  if: always()   # upload even if tests fail
   with:
     name: test-results-${{ matrix.node }}
     path: |
-      test-results/
       coverage/
-    retention-days: 14
-    compression-level: 6   # 0-9, default 6
+      test-results.xml
+    retention-days: 30       # Default: 90, max: 90
+    if-no-files-found: error # error | warn | ignore
     overwrite: false
-    if-no-files-found: warn   # error | warn | ignore
 ```
 
-### Download in the Same Workflow
+### Download Artifacts
 
 ```yaml
 jobs:
@@ -301,35 +301,34 @@ jobs:
           path: dist/
 
   deploy:
-    needs: build
     runs-on: ubuntu-latest
+    needs: build
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: dist
-          path: dist/
-      - run: ./deploy.sh dist/
+          path: dist/      # Download to this path
+
+      - run: ls dist/
+
+  # Download ALL artifacts from this workflow run
+  report:
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts/   # No 'name' = download all
 ```
 
-### Download All Artifacts
+## `actions/github-script`
 
-```yaml
-- uses: actions/download-artifact@v4
-  with:
-    path: all-artifacts/    # downloads all artifacts into subdirectories
-    pattern: test-results-* # filter by name pattern
-    merge-multiple: true    # merge into single directory
-```
-
-## `actions/github-script@v7`
-
-Run JavaScript that uses the Octokit API directly — useful for interacting with GitHub's API without extra dependencies.
+Run JavaScript that has full access to the GitHub API via the `@octokit/rest` client:
 
 ```yaml
 - name: Comment on PR
   uses: actions/github-script@v7
   with:
-    github-token: ${{ secrets.GITHUB_TOKEN }}
     script: |
       const { data: comments } = await github.rest.issues.listComments({
         owner: context.repo.owner,
@@ -338,10 +337,10 @@ Run JavaScript that uses the Octokit API directly — useful for interacting wit
       });
 
       const botComment = comments.find(c =>
-        c.user.type === 'Bot' && c.body.includes('Coverage Report')
+        c.user.type === 'Bot' && c.body.includes('## Test Results')
       );
 
-      const body = `## Coverage Report\n\nCoverage: **${process.env.COVERAGE}%**`;
+      const body = `## Test Results\n✅ All tests passed at ${new Date().toISOString()}`;
 
       if (botComment) {
         await github.rest.issues.updateComment({
@@ -358,90 +357,89 @@ Run JavaScript that uses the Octokit API directly — useful for interacting wit
           body,
         });
       }
-    env:
-      COVERAGE: '87.3'
-```
-
-### Using Script Output
-
-```yaml
-- name: Get latest release
-  id: latest-release
-  uses: actions/github-script@v7
-  with:
-    result-encoding: string
-    script: |
-      const { data } = await github.rest.repos.getLatestRelease({
-        owner: context.repo.owner,
-        repo: context.repo.repo,
-      });
-      return data.tag_name;
-
-- name: Use release tag
-  run: echo "Latest: ${{ steps.latest-release.outputs.result }}"
 ```
 
 ## Job Summary (`$GITHUB_STEP_SUMMARY`)
 
-Write Markdown to the job summary — visible in the Actions run UI.
+Write Markdown to `$GITHUB_STEP_SUMMARY` and it appears in the workflow run summary page:
 
 ```yaml
 - name: Generate test summary
   if: always()
   run: |
-    echo "## Test Results 🧪" >> $GITHUB_STEP_SUMMARY
+    echo "## Test Results" >> $GITHUB_STEP_SUMMARY
     echo "" >> $GITHUB_STEP_SUMMARY
-    echo "| Test Suite | Status | Duration |" >> $GITHUB_STEP_SUMMARY
-    echo "|---|---|---|" >> $GITHUB_STEP_SUMMARY
-    echo "| Unit Tests | ✅ Passed | 12.3s |" >> $GITHUB_STEP_SUMMARY
-    echo "| Integration Tests | ✅ Passed | 45.1s |" >> $GITHUB_STEP_SUMMARY
-    echo "| E2E Tests | ❌ Failed | 120.0s |" >> $GITHUB_STEP_SUMMARY
-    echo "" >> $GITHUB_STEP_SUMMARY
-    echo "> Coverage: **87.3%**" >> $GITHUB_STEP_SUMMARY
+    echo "| Status | Count |" >> $GITHUB_STEP_SUMMARY
+    echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+    echo "| ✅ Passed | $(grep -c 'PASS' test-output.txt || echo 0) |" >> $GITHUB_STEP_SUMMARY
+    echo "| ❌ Failed | $(grep -c 'FAIL' test-output.txt || echo 0) |" >> $GITHUB_STEP_SUMMARY
 ```
 
 ## Masking Sensitive Values
 
-Prevent a value from appearing in logs:
+Use `add-mask` to prevent a value from appearing in logs:
 
 ```yaml
-- name: Compute and mask a token
+- name: Set dynamic secret
   run: |
-    TOKEN=$(./generate-token.sh)
-    echo "::add-mask::$TOKEN"
-    echo "DYNAMIC_TOKEN=$TOKEN" >> $GITHUB_ENV
-
-- name: Use token (masked in logs)
-  run: ./deploy.sh $DYNAMIC_TOKEN
+    DYNAMIC_TOKEN=$(./get-token.sh)
+    echo "::add-mask::$DYNAMIC_TOKEN"
+    echo "TOKEN=$DYNAMIC_TOKEN" >> $GITHUB_ENV
 ```
 
-Secrets referenced with `${{ secrets.X }}` are automatically masked.
+Any value masked with `add-mask` is replaced with `***` in all subsequent log output.
+
+## Environment Variables: `$GITHUB_ENV` and `$GITHUB_PATH`
+
+### Persist env vars across steps (`$GITHUB_ENV`)
+
+```yaml
+- name: Set environment variables for next steps
+  run: |
+    echo "APP_VERSION=$(node -p "require('./package.json').version")" >> $GITHUB_ENV
+    echo "BUILD_DATE=$(date -u +%Y%m%d)" >> $GITHUB_ENV
+
+- name: Use persisted env
+  run: echo "Building version $APP_VERSION on $BUILD_DATE"
+```
+
+### Add to PATH (`$GITHUB_PATH`)
+
+```yaml
+- name: Add custom tools to PATH
+  run: echo "/usr/local/my-tools/bin" >> $GITHUB_PATH
+
+- name: Use custom tool
+  run: my-tool --version
+```
 
 ## Complete Job with All Features
 
 ```yaml
 jobs:
   full-example:
-    name: Integration Test
+    name: Full Integration Test
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      test-coverage: ${{ steps.coverage.outputs.pct }}
 
     services:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_PASSWORD: testpass
+          POSTGRES_PASSWORD: secret
           POSTGRES_DB: testdb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-retries 5
         ports:
           - 5432:5432
-        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
       redis:
-        image: redis:7
+        image: redis:7-alpine
         ports:
           - 6379:6379
-
-    outputs:
-      test-count: ${{ steps.results.outputs.count }}
 
     steps:
       - uses: actions/checkout@v4
@@ -453,39 +451,37 @@ jobs:
 
       - uses: actions/cache@v4
         with:
-          path: .test-cache
-          key: test-cache-${{ runner.os }}-${{ hashFiles('tests/**') }}
+          path: ~/.cache/playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
 
       - run: npm ci
 
       - name: Run migrations
         env:
-          DATABASE_URL: postgresql://postgres:testpass@localhost:5432/testdb
+          DATABASE_URL: postgresql://postgres:secret@localhost:5432/testdb
         run: npm run db:migrate
 
       - name: Run integration tests
-        id: results
+        id: test
         env:
-          DATABASE_URL: postgresql://postgres:testpass@localhost:5432/testdb
+          DATABASE_URL: postgresql://postgres:secret@localhost:5432/testdb
           REDIS_URL: redis://localhost:6379
-        run: |
-          npm run test:integration -- --reporter=json > results.json
-          COUNT=$(jq '.numPassedTests' results.json)
-          echo "count=$COUNT" >> $GITHUB_OUTPUT
+        run: npm run test:integration -- --coverage
 
-      - name: Upload test artifacts
-        uses: actions/upload-artifact@v4
+      - name: Parse coverage
+        id: coverage
+        if: always()
+        run: |
+          PCT=$(node -p "require('./coverage/coverage-summary.json').total.lines.pct")
+          echo "pct=$PCT" >> $GITHUB_OUTPUT
+          echo "## Coverage: $PCT%" >> $GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: integration-results
+          name: test-artifacts
           path: |
-            results.json
             coverage/
-          retention-days: 7
-
-      - name: Write summary
-        if: always()
-        run: |
-          echo "## Integration Test Summary" >> $GITHUB_STEP_SUMMARY
-          echo "Tests passed: **${{ steps.results.outputs.count }}**" >> $GITHUB_STEP_SUMMARY
+            test-results/
+          retention-days: 14
 ```

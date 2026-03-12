@@ -1,6 +1,6 @@
 ---
 title: Memory Management in C
-description: Stack vs heap, dynamic allocation with malloc/calloc/realloc/free, memory layout, alignment, leak detection, and allocator patterns.
+description: Stack vs heap, malloc/calloc/realloc/free, memory layout, alignment, memory errors, leak detection, and allocator patterns in C.
 sidebar:
   order: 4
 tags: [systems, cpp, c]
@@ -10,27 +10,27 @@ import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/
 
 # Memory Management in C
 
-C gives you direct control over memory — a superpower that demands responsibility. This guide covers where memory lives, how to allocate and free it correctly, and how to detect and prevent common memory errors.
+C gives you direct control over memory — the most powerful and most dangerous feature of the language. Understanding where your data lives, how long it lives, and how to manage it correctly is the foundation of writing correct, fast C programs.
 
 ## Memory Layout of a C Program
 
-When a C program runs, the OS maps it into a virtual address space divided into several segments:
+When a C program runs, the OS maps virtual memory into several distinct regions:
 
 ```
 High addresses
-┌─────────────────────┐
-│   Stack             │ ← Grows downward; local variables, function frames
-│   ↓                 │
-│                     │
-│   ↑                 │
-│   Heap              │ ← Grows upward; malloc/calloc/realloc allocations
-├─────────────────────┤
-│   BSS segment       │ ← Uninitialized global/static variables (zeroed by OS)
-├─────────────────────┤
-│   Data segment      │ ← Initialized global/static variables
-├─────────────────────┤
-│   Text segment      │ ← Read-only executable code (machine instructions)
-└─────────────────────┘
+┌─────────────────────────────┐
+│        Stack                │  ← grows downward; automatic variables, return addresses
+│         ↓                   │
+│   (unmapped / guard page)   │
+│         ↑                   │
+│        Heap                 │  ← grows upward; malloc/calloc/realloc allocations
+├─────────────────────────────┤
+│    BSS Segment              │  ← zero-initialized global/static data
+├─────────────────────────────┤
+│    Data Segment             │  ← initialized global/static data
+├─────────────────────────────┤
+│    Text Segment             │  ← read-only; compiled machine code + string literals
+└─────────────────────────────┘
 Low addresses
 ```
 
@@ -38,435 +38,513 @@ Low addresses
 #include <stdio.h>
 #include <stdlib.h>
 
-// Text segment: code
-int add(int a, int b) { return a + b; }
+// Text segment: the code itself
+// Data segment: initialized statics
+int global_init = 42;          // data segment
+static float static_init = 3.14f;  // data segment
 
-// Data segment: initialized globals
-int global_init = 100;
-const char *greeting = "Hello"; // String in read-only data section
+// BSS segment: zero-initialized
+int global_zero;               // BSS — guaranteed to be 0
+static char static_zero[100];  // BSS
 
-// BSS segment: uninitialized (zero-initialized) globals
-int global_uninit;      // = 0 at startup
-static int static_var;  // = 0 at startup
+int main(void)
+{
+    int stack_var = 10;        // stack
+    int *heap_var = malloc(4); // heap
 
-int main(void) {
-    // Stack: local variables
-    int local = 42;
-    char buf[256];
+    printf("stack:  %p\n", (void*)&stack_var);
+    printf("heap:   %p\n", (void*)heap_var);
+    printf("global: %p\n", (void*)&global_init);
+    printf("bss:    %p\n", (void*)&global_zero);
+    // Typical output: stack > heap > global > bss
 
-    // Heap: dynamic allocation
-    int *heap_ptr = malloc(sizeof(int));
-    *heap_ptr = 99;
-
-    printf("global_init: %p\n", (void*)&global_init); // Data segment address
-    printf("global_uninit: %p\n", (void*)&global_uninit); // BSS address
-    printf("local: %p\n", (void*)&local);             // Stack address (high)
-    printf("heap_ptr: %p\n", (void*)heap_ptr);         // Heap address (low-mid)
-    printf("add func: %p\n", (void*)add);              // Text segment address
-
-    free(heap_ptr);
+    free(heap_var);
     return 0;
 }
 ```
 
 ## Storage Duration
 
-C has three storage duration classes:
-
-| Duration | Lifetime | Where |
-|----------|---------|-------|
-| **Automatic** | Block scope (function/block entry to exit) | Stack |
-| **Static** | Entire program execution | Data/BSS segment |
-| **Dynamic** | From `malloc` until `free` | Heap |
+| Duration | Where | Lifetime | Examples |
+|----------|-------|----------|---------|
+| **Automatic** | Stack | From declaration to end of enclosing block | Local variables, function parameters |
+| **Static** | Data/BSS | Entire program duration | Global variables, `static` local variables |
+| **Thread-local** | Per-thread stack | Thread's lifetime | `_Thread_local` variables (C11) |
+| **Allocated** | Heap | From `malloc` until `free` | Dynamic arrays, linked lists, trees |
 
 ```c
-void storage_example(void) {
-    int automatic_var = 10;         // Automatic: lives on the stack, dies when function returns
-    static int static_local = 0;    // Static: initialized once, persists across calls
-    static_local++;                 // Retains value between calls
+#include <stdio.h>
 
-    // static_local is 1 on first call, 2 on second, etc.
-    printf("Call count: %d\n", static_local);
+void demonstrate_static_local(void)
+{
+    // Static local: lives in BSS/data, initialized once, persists across calls
+    static int count = 0;
+    count++;
+    printf("called %d times\n", count);
 }
 
-// Global variables have static duration automatically
-int program_wide = 42;
+int main(void)
+{
+    demonstrate_static_local();  // 1
+    demonstrate_static_local();  // 2
+    demonstrate_static_local();  // 3
+    return 0;
+}
 ```
 
 ## Stack Frames
 
-Each function call creates a **stack frame** (also called an activation record):
+Each function call creates a **stack frame** (activation record) on the stack:
 
-```c
-// Each call to this function pushes a new frame onto the stack
-int factorial(int n) {
-    // Stack frame contains: return address, saved registers, local variables
-    if (n <= 1) return 1;
-    return n * factorial(n - 1);  // Each recursive call adds another frame
-}
-
-// Stack overflow: too many nested calls exhaust the stack space (typically 1-8 MB)
-// factorial(100000) would likely overflow the stack
+```
+Stack frame for function foo(int a, int b):
+┌─────────────────────┐  ← high address (frame bottom)
+│  Return address     │  where to jump back to when foo() returns
+│  Saved registers    │  callee-saved registers (rbx, r12, etc.)
+│  Parameter a        │  (on x86-64 first 6 params are in registers)
+│  Parameter b        │
+│  Local variable x   │
+│  Local variable arr │  ← arr[0]
+│  ...                │
+└─────────────────────┘  ← low address (stack grows down)
 ```
 
-:::caution[Stack Size Limits]
-The default stack size is typically 1–8 MB depending on the OS. Deep recursion or large stack-allocated arrays can overflow the stack. For large buffers, use heap allocation (`malloc`). Use `ulimit -s` on Linux to check/set the stack size limit.
-:::
+```c
+#include <stdio.h>
 
-## Dynamic Memory Allocation
+void leaf(void)
+{
+    int x = 999;
+    printf("leaf: &x = %p\n", (void*)&x);
+}
 
-### malloc — Allocate Uninitialized Memory
+void middle(void)
+{
+    int y = 42;
+    printf("middle: &y = %p\n", (void*)&y);
+    leaf();
+}
+
+int main(void)
+{
+    int z = 1;
+    printf("main: &z = %p\n", (void*)&z);
+    middle();
+    return 0;
+}
+// Address of z > y > x — each is deeper (lower address) in the call chain
+```
+
+## Dynamic Memory: malloc, calloc, realloc, free
 
 ```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void)
+{
+    /* malloc — allocate N bytes, UNINITIALIZED (may contain garbage) */
+    int *arr = malloc(10 * sizeof(int));
+    if (arr == NULL) {
+        fprintf(stderr, "malloc failed\n");
+        return 1;
+    }
+
+    /* calloc — allocate N elements of size M, ZERO-INITIALIZED */
+    double *data = calloc(20, sizeof(double));
+    if (data == NULL) {
+        free(arr);
+        fprintf(stderr, "calloc failed\n");
+        return 1;
+    }
+    // data[0..19] are all 0.0
+
+    /* realloc — resize an existing allocation */
+    // Returns new pointer (may or may not be same address)
+    // If it fails, returns NULL — the ORIGINAL pointer is still valid!
+    int *bigger = realloc(arr, 20 * sizeof(int));
+    if (bigger == NULL) {
+        // arr is STILL VALID here — don't lose it!
+        free(arr);
+        free(data);
+        fprintf(stderr, "realloc failed\n");
+        return 1;
+    }
+    arr = bigger;   // now arr points to the larger buffer
+
+    /* Using the memory */
+    for (int i = 0; i < 20; i++) arr[i] = i * i;
+
+    /* free — release heap memory */
+    free(arr);    // always free what you malloc/calloc/realloc
+    free(data);
+    // After free: arr and data are DANGLING POINTERS
+    arr  = NULL;  // neutralize
+    data = NULL;
+
+    /* free(NULL) is always safe — it's a no-op */
+    free(NULL);
+
+    return 0;
+}
+```
+
+:::caution[realloc Anti-Pattern]
+Never write `ptr = realloc(ptr, new_size)`. If `realloc` fails, it returns `NULL` and the original allocation is still valid — but you've just lost the only pointer to it. Always assign to a temporary variable first.
+:::
+
+### Safe realloc Pattern
+
+```c
+#include <stdlib.h>
+#include <errno.h>
+
+// Returns new pointer on success; returns NULL and preserves old_ptr on failure
+void *safe_realloc(void *old_ptr, size_t new_size)
+{
+    void *new_ptr = realloc(old_ptr, new_size);
+    if (new_ptr == NULL && new_size > 0) {
+        // old_ptr is still valid
+        return NULL;
+    }
+    return new_ptr;
+}
+
+// Dynamic array growth pattern
+typedef struct {
+    int    *data;
+    size_t  count;
+    size_t  capacity;
+} IntVec;
+
+int vec_push(IntVec *v, int value)
+{
+    if (v->count == v->capacity) {
+        size_t new_cap = (v->capacity == 0) ? 8 : v->capacity * 2;
+        int *new_data = safe_realloc(v->data, new_cap * sizeof(int));
+        if (!new_data) return -1;   // out of memory
+        v->data     = new_data;
+        v->capacity = new_cap;
+    }
+    v->data[v->count++] = value;
+    return 0;
+}
+```
+
+## Alignment and aligned_alloc (C11)
+
+Data types have alignment requirements — they must be stored at addresses that are multiples of their size (on most architectures):
+
+```c
+#include <stdalign.h>  // alignas, alignof
 #include <stdlib.h>
 #include <stdio.h>
 
-// malloc: allocates 'size' bytes on the heap, returns void*, uninitialized
-void *malloc(size_t size);
+// SIMD types often require 32-byte alignment
+typedef struct {
+    alignas(32) float data[8];  // aligned to 32-byte boundary
+} AVXVec;
 
-// Usage
-int *p = malloc(sizeof(int));
-if (p == NULL) {             // Always check for failure!
-    perror("malloc failed");
-    exit(EXIT_FAILURE);
+int main(void)
+{
+    printf("alignof(char)   = %zu\n", alignof(char));    // 1
+    printf("alignof(int)    = %zu\n", alignof(int));     // 4
+    printf("alignof(double) = %zu\n", alignof(double));  // 8
+    printf("alignof(AVXVec) = %zu\n", alignof(AVXVec));  // 32
+
+    // aligned_alloc(alignment, size) — C11
+    // alignment must be a power of 2; size must be multiple of alignment
+    float *simd_buf = aligned_alloc(32, 32 * sizeof(float));
+    if (!simd_buf) { /* handle error */ }
+    printf("simd_buf address: %p (should end in 0)\n", (void*)simd_buf);
+    free(simd_buf);  // free works on aligned_alloc memory
+
+    // Stack-aligned variable
+    alignas(64) char cache_line[64];  // 64-byte cache line aligned
+    printf("cache_line: %p\n", (void*)cache_line);
+
+    return 0;
 }
-*p = 42;
-printf("%d\n", *p);
-free(p);
-p = NULL;                    // Good practice: null after free
-
-// Allocating an array of 100 ints
-int n = 100;
-int *arr = malloc(n * sizeof(int)); // or malloc(n * sizeof *arr) — safer idiom
-if (!arr) { exit(EXIT_FAILURE); }
-
-for (int i = 0; i < n; i++) arr[i] = i * i;
-free(arr);
-arr = NULL;
 ```
 
-### calloc — Allocate Zero-Initialized Memory
+### Struct Padding and Memory Layout
 
 ```c
-// calloc: allocates count*size bytes, ZERO-INITIALIZED
-// Prototype: void *calloc(size_t count, size_t size);
-int *arr = calloc(100, sizeof(int));
-if (!arr) { exit(EXIT_FAILURE); }
-// arr[0..99] are all 0
+#include <stddef.h>
+#include <stdio.h>
 
-// calloc is often safer than malloc+memset and may be faster (OS can use
-// copy-on-write zero pages)
-free(arr);
-```
+// Poorly ordered — lots of padding
+struct Padded {
+    char   a;    // 1 byte + 3 bytes padding
+    int    b;    // 4 bytes
+    char   c;    // 1 byte + 7 bytes padding
+    double d;    // 8 bytes
+};               // total: 24 bytes
 
-### realloc — Resize an Allocation
+// Well-ordered — minimal padding
+struct Packed {
+    double d;    // 8 bytes
+    int    b;    // 4 bytes
+    char   a;    // 1 byte
+    char   c;    // 1 byte + 2 bytes padding
+};               // total: 16 bytes
 
-```c
-// realloc: resize a previous allocation
-// May move to a new address (returns new pointer)
-// Prototype: void *realloc(void *ptr, size_t new_size);
+int main(void)
+{
+    printf("sizeof(struct Padded) = %zu\n", sizeof(struct Padded)); // 24
+    printf("sizeof(struct Packed) = %zu\n", sizeof(struct Packed)); // 16
 
-int *buf = malloc(10 * sizeof(int));
-if (!buf) exit(EXIT_FAILURE);
+    // offsetof — byte offset of a member
+    printf("offsetof Padded.b = %zu\n", offsetof(struct Padded, b)); // 4
+    printf("offsetof Padded.d = %zu\n", offsetof(struct Padded, d)); // 16
 
-// Grow to 20 elements
-// CRITICAL: use a temp variable — if realloc fails and returns NULL,
-// the original pointer is still valid and must be freed
-int *tmp = realloc(buf, 20 * sizeof(int));
-if (tmp == NULL) {
-    // realloc failed; buf still valid
-    free(buf);
-    exit(EXIT_FAILURE);
+    // Force no padding — NOT portable, but common for network/file formats
+    #pragma pack(push, 1)
+    struct NoPadding {
+        char   a;
+        int    b;
+        double d;
+    };
+    #pragma pack(pop)
+    printf("sizeof(NoPadding) = %zu\n", sizeof(struct NoPadding));  // 13
+
+    return 0;
 }
-buf = tmp;  // Safe to update now
-
-// Shrink to 5 elements (always succeeds in practice, but check anyway)
-tmp = realloc(buf, 5 * sizeof(int));
-if (tmp) buf = tmp;
-
-// realloc(ptr, 0) is implementation-defined in C17 (may return NULL or freed ptr)
-// In C23, realloc(ptr, 0) is equivalent to free(ptr), returning NULL.
-
-free(buf);
 ```
 
-### free
+## Memory Errors and Detection Tools
 
-```c
-// free: releases heap memory previously returned by malloc/calloc/realloc
-// Prototype: void free(void *ptr);
-
-// Rules:
-// 1. Only free memory from malloc/calloc/realloc (not stack variables)
-// 2. Don't double-free
-// 3. Don't use memory after freeing
-// 4. free(NULL) is safe and a no-op
-
-int *p = malloc(sizeof(int));
-*p = 5;
-free(p);       // Release
-p = NULL;      // Null out to prevent dangling pointer use
-
-free(NULL);    // Safe — does nothing
-```
-
-## Aligned Allocation (C11)
+### Common Memory Errors
 
 ```c
 #include <stdlib.h>
-#include <stdalign.h>
+#include <string.h>
 
-// aligned_alloc: allocate memory with specific alignment
-// Requires: size must be a multiple of alignment
-// alignment must be a power of 2 and a multiple of sizeof(void*)
+void buffer_overflow(void)
+{
+    char buf[8];
+    strcpy(buf, "This string is way too long!");  // OVERFLOW
+    // Use strncpy(buf, src, sizeof(buf) - 1); buf[sizeof(buf)-1] = '\0';
+}
 
-float *simd = aligned_alloc(32, 32 * sizeof(float)); // 32-byte aligned for AVX
-if (!simd) exit(EXIT_FAILURE);
-// Use SIMD instructions (AVX) safely on 'simd'
-free(simd);
+void heap_buffer_overflow(void)
+{
+    int *p = malloc(5 * sizeof(int));
+    p[5] = 99;   // one past end — heap corruption
+    free(p);
+}
 
-// Check alignment of types
-printf("Alignment of double: %zu\n", _Alignof(double));  // Usually 8
-printf("Alignment of int:    %zu\n", _Alignof(int));      // Usually 4
+void use_after_free_example(void)
+{
+    int *p = malloc(sizeof(int));
+    *p = 42;
+    free(p);
+    printf("%d\n", *p);  // USE-AFTER-FREE — undefined behavior
+}
 
-// Declare a variable with specific alignment
-_Alignas(64) char cache_line_buffer[64]; // Aligned to cache line
+void memory_leak(void)
+{
+    for (int i = 0; i < 1000; i++) {
+        int *p = malloc(sizeof(int));
+        *p = i;
+        // forgot to free(p) — leak 4000 bytes per call!
+    }
+}
+
+void stack_overflow_risk(int depth)
+{
+    char big_array[1024 * 1024];  // 1 MB on stack each call
+    if (depth > 0) stack_overflow_risk(depth - 1);
+}
 ```
 
-## Memory Errors and Detection
-
-### Valgrind
+### Detection with Valgrind
 
 ```bash
 # Compile with debug symbols
-gcc -g -O0 main.c -o main
+gcc -g -O0 main.c -o program
 
-# Run under Valgrind (reports leaks, invalid reads/writes)
-valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes ./main
+# Full leak check
+valgrind --leak-check=full \
+         --show-leak-kinds=all \
+         --track-origins=yes \
+         --verbose \
+         ./program
 
-# Typical output for a leak:
-# ==12345== LEAK SUMMARY:
-# ==12345==    definitely lost: 40 bytes in 1 blocks
-# ==12345==    indirectly lost: 0 bytes in 0 blocks
-
-# Check for invalid reads/writes (buffer overflow, use-after-free):
-# ==12345== Invalid write of size 4
-# ==12345==    at 0x4005A1: main (main.c:12)
+# Valgrind output categories:
+# "definitely lost" — memory you allocated and lost the pointer to
+# "indirectly lost" — memory reachable only through other lost blocks
+# "possibly lost"   — pointer to middle of allocation (bad practice)
+# "still reachable" — allocated but not freed at exit (often acceptable)
 ```
 
 ### AddressSanitizer (ASan)
 
 ```bash
-# Compile with ASan — fast runtime detection (2x slowdown typical)
-gcc -fsanitize=address -g -O1 main.c -o main_asan
+# Compile with ASan
+gcc -fsanitize=address,undefined -g -fno-omit-frame-pointer main.c -o program_asan
 
-# ASan catches:
-# - Heap buffer overflow
-# - Stack buffer overflow
-# - Global buffer overflow
-# - Use-after-free
-# - Use-after-return
-# - Double-free
-# - Memory leaks (with ASAN_OPTIONS=detect_leaks=1)
+# Run normally — ASan intercepts allocations
+./program_asan
 
-# Run normally; ASan reports errors at the point of occurrence
-./main_asan
-
-# Example ASan output:
-# ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000058
-# WRITE of size 4 at 0x602000000058 thread T0
-#     #0 0x401234 in main main.c:15
-```
-
-### Example Programs with Common Errors
-
-```c
-// 1. Memory leak — never freed
-void leak_example(void) {
-    int *p = malloc(100 * sizeof(int)); // allocated
-    // forgot to call free(p) — LEAK
-}
-
-// 2. Use-after-free
-void uaf_example(void) {
-    int *p = malloc(sizeof(int));
-    *p = 42;
-    free(p);
-    printf("%d\n", *p); // USE AFTER FREE — UB
-}
-
-// 3. Buffer overflow (heap)
-void overflow_example(void) {
-    int *buf = malloc(5 * sizeof(int));
-    for (int i = 0; i <= 5; i++) {  // Off by one: i <= 5 writes index 5
-        buf[i] = i;                   // buf[5] is out of bounds — OVERFLOW
-    }
-    free(buf);
-}
-
-// 4. Double free
-void double_free_example(void) {
-    int *p = malloc(sizeof(int));
-    free(p);
-    free(p); // DOUBLE FREE — heap corruption
-}
-```
-
-## Memory Alignment and Struct Padding
-
-The compiler inserts padding bytes into structs to satisfy alignment requirements of each member.
-
-```c
-#include <stdio.h>
-#include <stddef.h>  // offsetof
-
-// Struct with padding
-struct Padded {
-    char  a;      // 1 byte at offset 0
-    // 3 bytes padding
-    int   b;      // 4 bytes at offset 4
-    char  c;      // 1 byte at offset 8
-    // 7 bytes padding  
-    double d;     // 8 bytes at offset 16
-};                // Total: 24 bytes (not 1+4+1+8 = 14!)
-
-printf("sizeof(struct Padded) = %zu\n", sizeof(struct Padded)); // 24
-
-// Print offsets
-printf("offset a = %zu\n", offsetof(struct Padded, a)); // 0
-printf("offset b = %zu\n", offsetof(struct Padded, b)); // 4
-printf("offset c = %zu\n", offsetof(struct Padded, c)); // 8
-printf("offset d = %zu\n", offsetof(struct Padded, d)); // 16
-
-// Reorder fields to minimize padding (largest alignment first)
-struct Optimized {
-    double d;  // 8 bytes at offset 0
-    int   b;   // 4 bytes at offset 8
-    char  a;   // 1 byte at offset 12
-    char  c;   // 1 byte at offset 13
-    // 2 bytes padding for struct alignment
-};             // Total: 16 bytes — saves 8 bytes!
-
-printf("sizeof(struct Optimized) = %zu\n", sizeof(struct Optimized)); // 16
-
-// Packed struct: remove all padding (GCC/Clang extension)
-struct __attribute__((packed)) NoPadding {
-    char   a; // offset 0
-    int    b; // offset 1 (UNALIGNED — may be slow or crash on some architectures)
-    char   c; // offset 5
-    double d; // offset 6
-};            // Total: 15 bytes
-```
-
-:::caution[Packed Structs and Alignment]
-`__attribute__((packed))` removes padding but may create unaligned accesses. On x86 this is usually slow (hardware fixup) but works. On ARM/MIPS strict alignment is required — unaligned access causes a hardware exception. Use packed only for serialization/network protocols, not for general data structures.
-:::
-
-## Cache-Friendly Data Layouts
-
-```c
-// BAD: Array of Structures (AoS) — poor cache performance when accessing single fields
-struct Entity {
-    float x, y, z;      // Position
-    float vx, vy, vz;   // Velocity
-    int   health;
-    int   active;
-};
-struct Entity entities[1000];
-
-// Updating all positions: entities[i].x += entities[i].vx
-// Each entity is 32 bytes; iterating x,vx means skipping y,z,vy,vz,health,active
-// Cache utilization: ~25% (only x and vx are used from each cache line)
-
-// GOOD: Structure of Arrays (SoA) — excellent cache performance for SIMD
-struct EntityComponents {
-    float x[1000], y[1000], z[1000];    // All x positions contiguous
-    float vx[1000], vy[1000], vz[1000]; // All velocities contiguous
-    int   health[1000];
-    int   active[1000];
-};
-
-// Updating: components.x[i] += components.vx[i]
-// x[] and vx[] are contiguous arrays — excellent spatial locality
-// SIMD auto-vectorization friendly
-```
-
-## Arena Allocator Pattern
-
-An arena allocator pre-allocates a large buffer and hands out sub-regions from it. Freeing is O(1) — just reset the bump pointer.
-
-```c
-#include <stdlib.h>
-#include <string.h>
-#include <stddef.h>
-
-#define ARENA_SIZE (1024 * 1024)  // 1 MB arena
-
-typedef struct {
-    unsigned char *base;   // Start of the arena
-    size_t         used;   // Bytes allocated so far
-    size_t         capacity;
-} Arena;
-
-Arena arena_create(size_t capacity) {
-    Arena a;
-    a.base = malloc(capacity);
-    a.used = 0;
-    a.capacity = capacity;
-    return a;
-}
-
-// Bump pointer allocation: O(1) with alignment
-void *arena_alloc(Arena *a, size_t size, size_t align) {
-    // Round up 'used' to the required alignment
-    size_t aligned_offset = (a->used + align - 1) & ~(align - 1);
-    if (aligned_offset + size > a->capacity) return NULL; // Out of space
-    a->used = aligned_offset + size;
-    return a->base + aligned_offset;
-}
-
-// Reset all allocations in O(1) — no per-object free needed
-void arena_reset(Arena *a) {
-    a->used = 0;
-}
-
-void arena_destroy(Arena *a) {
-    free(a->base);
-    a->base = NULL;
-    a->used = a->capacity = 0;
-}
-
-// Usage
-Arena scratch = arena_create(ARENA_SIZE);
-
-// Allocate from arena (aligned to 8 bytes)
-int   *nums   = arena_alloc(&scratch, 100 * sizeof(int),   _Alignof(int));
-float *floats = arena_alloc(&scratch, 50  * sizeof(float), _Alignof(float));
-char  *str    = arena_alloc(&scratch, 256,                 1);
-
-// ... use allocations ...
-
-arena_reset(&scratch);  // Free everything at once — O(1)!
-arena_destroy(&scratch);
+# Environment variables
+ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 ./program_asan
 ```
 
 ## Flexible Array Members (C99)
 
 ```c
-// A struct can have a zero-length array as its last member (C99)
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
+// Flexible array member — must be last; struct has incomplete size
 typedef struct {
     size_t length;
-    int    data[];  // Flexible array member — no size specified
-} IntArray;
+    char   data[];   // zero-length array (flexible)
+} String;
 
-// Allocate: sizeof(IntArray) + desired_count * sizeof(int)
-size_t n = 10;
-IntArray *arr = malloc(sizeof(IntArray) + n * sizeof(int));
-arr->length = n;
-for (size_t i = 0; i < n; i++) arr->data[i] = (int)i;
+String *create_string(const char *s)
+{
+    size_t len = strlen(s);
+    // Allocate struct + space for the string data
+    String *str = malloc(sizeof(String) + len + 1);
+    if (!str) return NULL;
+    str->length = len;
+    memcpy(str->data, s, len + 1);  // copy including null terminator
+    return str;
+}
 
-// sizeof(IntArray) does NOT include the flexible array
-printf("sizeof(IntArray) = %zu\n", sizeof(IntArray)); // 8 (just the size_t)
+int main(void)
+{
+    String *s = create_string("Hello, World!");
+    printf("length=%zu, data=%s\n", s->length, s->data);
+    free(s);  // one free for both header and data
+    return 0;
+}
+```
 
-free(arr);
+## Arena Allocator Pattern
+
+An arena (also called a linear or bump allocator) allocates by incrementing a pointer. **Freeing is instant** — just reset the pointer. No per-object overhead.
+
+```c
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdalign.h>
+
+#define ARENA_SIZE (1024 * 1024)  // 1 MB
+
+typedef struct {
+    unsigned char *base;
+    size_t         used;
+    size_t         capacity;
+} Arena;
+
+static Arena arena_init(size_t size)
+{
+    Arena a;
+    a.base     = malloc(size);
+    a.used     = 0;
+    a.capacity = size;
+    return a;
+}
+
+// Aligned bump allocation
+static void *arena_alloc(Arena *a, size_t size, size_t align)
+{
+    // Align the current offset
+    size_t offset = (a->used + align - 1) & ~(align - 1);
+    if (offset + size > a->capacity) return NULL;  // out of memory
+    a->used = offset + size;
+    return a->base + offset;
+}
+
+static void arena_reset(Arena *a)
+{
+    a->used = 0;   // "free" everything — O(1)
+}
+
+static void arena_destroy(Arena *a)
+{
+    free(a->base);
+    a->base = NULL;
+}
+
+// Convenience macros
+#define ARENA_ALLOC(arena, T) \
+    ((T *)arena_alloc((arena), sizeof(T), alignof(T)))
+#define ARENA_ALLOC_N(arena, T, n) \
+    ((T *)arena_alloc((arena), sizeof(T) * (n), alignof(T)))
+
+int main(void)
+{
+    Arena a = arena_init(ARENA_SIZE);
+
+    // Allocate many objects — no individual frees needed
+    int *nums = ARENA_ALLOC_N(&a, int, 100);
+    for (int i = 0; i < 100; i++) nums[i] = i;
+
+    double *vals = ARENA_ALLOC_N(&a, double, 50);
+    for (int i = 0; i < 50; i++) vals[i] = (double)i * 0.1;
+
+    printf("Arena used: %zu / %zu bytes\n", a.used, a.capacity);
+
+    // "Free" all at once
+    arena_reset(&a);
+    printf("Arena reset: used = %zu\n", a.used);  // 0
+
+    arena_destroy(&a);
+    return 0;
+}
+```
+
+:::tip[When to Use an Arena]
+Arenas excel for **request-scoped** allocations (e.g., parse a JSON document, process it, free everything at once), **frame allocations** in games (allocate scratch memory per frame, reset at frame end), and **compiler symbol tables**.
+:::
+
+## Cache-Friendly Data Layouts
+
+```c
+// SLOW: Array of Structs (AoS) — poor cache utilization when only one field accessed
+typedef struct {
+    float x, y, z;  // position
+    float vx, vy, vz; // velocity
+    float mass;
+} Particle_AoS;
+
+Particle_AoS particles_aos[10000];
+
+void update_positions_aos(float dt)
+{
+    for (int i = 0; i < 10000; i++) {
+        // Loads 28 bytes per particle, uses 12 bytes of position
+        // Cache line: 64 bytes — fits ~2 particles
+        particles_aos[i].x += particles_aos[i].vx * dt;
+        particles_aos[i].y += particles_aos[i].vy * dt;
+        particles_aos[i].z += particles_aos[i].vz * dt;
+    }
+}
+
+// FAST: Struct of Arrays (SoA) — all x values contiguous
+typedef struct {
+    float x[10000], y[10000], z[10000];    // positions
+    float vx[10000], vy[10000], vz[10000]; // velocities
+    float mass[10000];
+} Particles_SoA;
+
+Particles_SoA particles_soa;
+
+void update_positions_soa(float dt)
+{
+    // SIMD-friendly: operates on 16 floats per cache line
+    for (int i = 0; i < 10000; i++) {
+        particles_soa.x[i] += particles_soa.vx[i] * dt;
+        particles_soa.y[i] += particles_soa.vy[i] * dt;
+        particles_soa.z[i] += particles_soa.vz[i] * dt;
+    }
+}
 ```

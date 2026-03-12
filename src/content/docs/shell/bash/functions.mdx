@@ -1,0 +1,428 @@
+---
+title: Bash Functions
+description: Function declarations, local variables, return values, error handling with trap, and signal management.
+sidebar:
+  order: 5
+tags: [cli, shell, scripting]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Bash Functions
+
+## Function Declaration
+
+```bash
+# Syntax 1: POSIX-compatible (preferred for portability)
+greet() {
+  echo "Hello, $1!"
+}
+
+# Syntax 2: bash keyword (clearer intent)
+function greet {
+  echo "Hello, $1!"
+}
+
+# Syntax 3: combined (accepted but redundant)
+function greet() {
+  echo "Hello, $1!"
+}
+
+# Calling functions
+greet "Alice"             # Hello, Alice!
+greet "Bob" "extra arg"   # Extra args are accessible as $2, $3...
+
+# Function must be DEFINED before it's CALLED
+# (unless called from main() which is called at the end)
+main() {
+  greet "World"   # OK because main is called AFTER greet is defined
+}
+greet() {
+  echo "Hello, $1!"
+}
+main
+```
+
+## Local Variables
+
+```bash
+# Without local: variable is global and leaks outside the function!
+bad_function() {
+  result="computed value"   # LEAKS to caller's scope!
+}
+
+# With local: variable is scoped to the function
+good_function() {
+  local result="computed value"
+  local -i count=0          # local integer
+  local -a arr=()           # local array
+  local -A map=()           # local associative array (bash 4+)
+  echo "$result"
+}
+
+# Pitfall: local with command substitution
+# These are NOT the same:
+local var=$(failing_command)           # return code is LOST (local returns 0)
+local var; var=$(failing_command)      # return code is preserved (use this!)
+
+# Demonstrate the issue:
+fail_test() {
+  local result=$(false)           # local returns 0, even though false failed!
+  echo "exit: $?"                 # prints 0 — wrong!
+}
+
+safe_test() {
+  local result
+  result=$(false)                  # captures exit code correctly
+  echo "exit: $?"                  # prints 1 — correct!
+}
+```
+
+:::caution[local Hides Return Codes]
+`local var=$(command)` always returns 0 because `local` itself is a successful command. Always declare with `local var` on one line and assign on the next to preserve exit codes.
+:::
+
+## Return Values
+
+```bash
+# Functions return an exit code (0-255) via return, not a value
+# 0 = success, non-zero = failure (by convention)
+
+is_valid_email() {
+  local email="$1"
+  [[ "$email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]
+  # The [[ ]] sets $? automatically, no explicit return needed
+  # But explicit is clearer:
+  # return $?
+}
+
+# Check return value with $?
+if is_valid_email "alice@example.com"; then
+  echo "Valid email"
+fi
+
+# Or capture it
+is_valid_email "notanemail"
+echo "Exit code: $?"  # non-zero
+```
+
+## Returning Data from Functions
+
+Since functions can only return numbers (0-255), use these patterns for returning data:
+
+```bash
+# ─── Pattern 1: Echo + Command Substitution ──────────────
+get_username() {
+  local uid="$1"
+  # Print result to stdout, caller captures it
+  echo "$(id -un "$uid" 2>/dev/null)"
+}
+
+username=$(get_username 1000)
+echo "Username: $username"
+
+# ─── Pattern 2: Global Variable (avoid when possible) ────
+# Use if the function needs to return an array
+_RESULT=""    # convention: underscore prefix for "return" globals
+
+get_files_list() {
+  mapfile -t _RESULT < <(find "$1" -name "*.sh" -type f)
+}
+
+get_files_list "/home/alice"
+for f in "${_RESULT[@]}"; do
+  echo "$f"
+done
+
+# ─── Pattern 3: Nameref (Bash 4.3+) — cleanest ──────────
+get_stats() {
+  local -n _ret_data="$1"    # nameref: _ret_data is alias for var named in $1
+  _ret_data[count]=42
+  _ret_data[total]=1234
+  _ret_data[avg]="29.38"
+}
+
+declare -A stats
+get_stats stats
+echo "Count: ${stats[count]}, Total: ${stats[total]}"
+
+# ─── Pattern 4: Global Array with nameref ────────────────
+get_sorted_files() {
+  local -n _out="$1"
+  local dir="$2"
+  mapfile -t _out < <(find "$dir" -type f | sort)
+}
+
+declare -a result_files
+get_sorted_files result_files "/home/alice"
+echo "Found ${#result_files[@]} files"
+```
+
+## Recursive Functions
+
+```bash
+# Fibonacci (demonstrates recursion but memoization makes it practical)
+declare -A fib_cache=([0]=0 [1]=1)
+
+fibonacci() {
+  local n="$1"
+  if [[ -v fib_cache[$n] ]]; then
+    echo "${fib_cache[$n]}"
+    return
+  fi
+  local a b result
+  a=$(fibonacci $(( n - 1 )))
+  b=$(fibonacci $(( n - 2 )))
+  result=$(( a + b ))
+  fib_cache[$n]=$result
+  echo "$result"
+}
+
+echo "Fib(10) = $(fibonacci 10)"  # 55
+
+# Recursive directory processing
+process_dir() {
+  local dir="$1"
+  local depth="${2:-0}"
+  local indent
+  indent=$(printf '%*s' "$((depth * 2))" '')
+
+  for item in "$dir"/*; do
+    [[ -e "$item" ]] || continue
+    if [[ -d "$item" ]]; then
+      echo "${indent}DIR:  ${item##*/}"
+      process_dir "$item" "$(( depth + 1 ))"   # recurse
+    else
+      echo "${indent}FILE: ${item##*/}"
+    fi
+  done
+}
+
+process_dir /etc 0
+```
+
+## Passing Arrays to Functions
+
+```bash
+# Bash doesn't have first-class array passing
+# Workaround 1: Pass array elements with "${arr[@]}"
+print_items() {
+  for item in "$@"; do     # $@ receives all elements
+    echo "  - $item"
+  done
+}
+
+myarr=("apple" "banana" "cherry pie")
+print_items "${myarr[@]}"   # expands to three arguments
+
+# Workaround 2: Serialize with nameref (recommended)
+process_array() {
+  local -n _arr="$1"        # nameref
+  for item in "${_arr[@]}"; do
+    echo "Item: $item"
+  done
+}
+
+fruits=("apple" "banana" "cherry pie")
+process_array fruits          # pass the variable NAME, not ${fruits[@]}
+
+# Multiple arrays via nameref
+merge_arrays() {
+  local -n _arr1="$1"
+  local -n _arr2="$2"
+  local -n _result="$3"
+  _result=("${_arr1[@]}" "${_arr2[@]}")
+}
+
+arr1=(a b c)
+arr2=(d e f)
+declare -a merged
+merge_arrays arr1 arr2 merged
+echo "${merged[@]}"   # a b c d e f
+```
+
+## Error Handling
+
+```bash
+# ─── err() function pattern ──────────────────────────────
+err() {
+  echo "[ERROR] $(date '+%H:%M:%S') ${FUNCNAME[1]}:${BASH_LINENO[0]} — $*" >&2
+}
+
+warn() {
+  echo "[WARN]  $(date '+%H:%M:%S') ${FUNCNAME[1]}:${BASH_LINENO[0]} — $*" >&2
+}
+
+# Usage
+copy_config() {
+  local src="$1" dst="$2"
+  if [[ ! -f "$src" ]]; then
+    err "Source file not found: $src"
+    return 1
+  fi
+  cp "$src" "$dst" || { err "Failed to copy $src to $dst"; return 1; }
+}
+
+# ─── ERR trap ────────────────────────────────────────────
+# Triggered on any command failure (with set -e)
+handle_error() {
+  local exit_code=$?
+  local line_no="${BASH_LINENO[0]}"
+  local func="${FUNCNAME[1]:-main}"
+  local cmd="${BASH_COMMAND}"
+  echo "[FATAL] Command failed (exit $exit_code) at line $line_no in $func: $cmd" >&2
+}
+trap handle_error ERR
+
+# Detailed call stack in error
+handle_error_verbose() {
+  local exit_code=$?
+  echo "[FATAL] Exit code: $exit_code" >&2
+  echo "[FATAL] Failed command: ${BASH_COMMAND}" >&2
+  echo "[FATAL] Call stack:" >&2
+  local i
+  for (( i = 1; i < ${#FUNCNAME[@]}; i++ )); do
+    echo "  [${i}] ${FUNCNAME[$i]}() line ${BASH_LINENO[$((i-1))]}" >&2
+  done
+}
+```
+
+## trap — Cleanup and Signal Handling
+
+```bash
+# trap: execute command when signal or event occurs
+# Syntax: trap 'command' SIGNAL [SIGNAL...]
+
+# ─── Cleanup on exit ─────────────────────────────────────
+TMPDIR_CREATED=""
+
+cleanup() {
+  local exit_code=$?
+  echo "Cleaning up..." >&2
+  [[ -n "$TMPDIR_CREATED" ]] && rm -rf "$TMPDIR_CREATED"
+  # Remove PID file
+  [[ -f /run/myscript.pid ]] && rm -f /run/myscript.pid
+  # Reset terminal (if you used tput)
+  tput cnorm 2>/dev/null   # restore cursor
+  exit "$exit_code"
+}
+
+trap cleanup EXIT        # on any exit (normal or error)
+trap cleanup INT TERM    # on Ctrl+C and kill
+
+TMPDIR_CREATED=$(mktemp -d)
+echo "Working in $TMPDIR_CREATED"
+# ... work happens here ...
+# cleanup() will run automatically when script exits
+
+# ─── Ignore signals ──────────────────────────────────────
+trap '' INT   # ignore Ctrl+C (SIGINT)
+trap '' HUP   # ignore hangup
+
+# ─── Reset to default ────────────────────────────────────
+trap - INT    # reset SIGINT to default behavior
+
+# ─── Signal list ─────────────────────────────────────────
+# EXIT: on any exit (including error)
+# INT:  Ctrl+C (SIGINT, signal 2)
+# TERM: kill command default (SIGTERM, signal 15)
+# HUP:  terminal closed (SIGHUP, signal 1)
+# QUIT: Ctrl+\ (SIGQUIT, signal 3)
+# USR1: user-defined (SIGUSR1, signal 10)
+# USR2: user-defined (SIGUSR2, signal 12)
+# ERR:  any command fails (with set -e)
+# DEBUG: before each command
+
+# ─── Graceful shutdown pattern ───────────────────────────
+shutdown_requested=false
+
+handle_shutdown() {
+  echo "Shutdown requested..." >&2
+  shutdown_requested=true
+}
+trap handle_shutdown SIGTERM SIGINT
+
+# In main loop:
+while true; do
+  "$shutdown_requested" && break
+  do_work
+  sleep 1
+done
+echo "Shutdown complete"
+```
+
+## Function Libraries
+
+```bash
+# lib/colors.sh — color output library
+#!/usr/bin/env bash
+# Usage: source lib/colors.sh
+
+# Only define if not already sourced
+[[ -n "${_LIB_COLORS_LOADED:-}" ]] && return 0
+readonly _LIB_COLORS_LOADED=1
+
+# Check if colors are supported
+if [[ -t 1 ]] && [[ "$(tput colors 2>/dev/null)" -ge 8 ]]; then
+  RED='\033[0;31m'
+  GREEN='\033[0;32m'
+  YELLOW='\033[1;33m'
+  BLUE='\033[0;34m'
+  BOLD='\033[1m'
+  RESET='\033[0m'
+else
+  RED='' GREEN='' YELLOW='' BLUE='' BOLD='' RESET=''
+fi
+
+success() { echo -e "${GREEN}✓${RESET} $*"; }
+info()    { echo -e "${BLUE}ℹ${RESET} $*"; }
+warn()    { echo -e "${YELLOW}⚠${RESET} $*" >&2; }
+error()   { echo -e "${RED}✗${RESET} $*" >&2; }
+
+# Using the library
+source "$(dirname "${BASH_SOURCE[0]}")/lib/colors.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib/logging.sh"
+
+success "Deployment complete"
+warn "Memory usage is high"
+error "Database connection failed"
+```
+
+## Coprocess
+
+```bash
+# coproc: run command as background coprocess with two-way pipes
+# Useful for long-running interactive commands
+
+coproc MYPROC { python3 -i 2>/dev/null; }
+# MYPROC[0] = fd to read from coprocess stdout
+# MYPROC[1] = fd to write to coprocess stdin
+
+echo "import math" >&"${MYPROC[1]}"
+echo "print(math.sqrt(144))" >&"${MYPROC[1]}"
+read -r result <&"${MYPROC[0]}"
+echo "sqrt(144) = $result"   # 12.0
+
+# Close the coprocess
+exec {MYPROC[1]}>&-
+
+# Coprocess is not commonly needed — named pipes (mkfifo) are more portable
+```
+
+## export -f (Export Functions)
+
+```bash
+# Export a function so subshells and scripts can use it
+process_file() {
+  local file="$1"
+  echo "Processing: $file"
+}
+export -f process_file
+
+# Now available in subshell
+bash -c 'process_file test.txt'
+
+# Common use: parallel processing with xargs or GNU parallel
+find . -name "*.log" -print0 | xargs -0 -I{} -P4 bash -c 'process_file "$@"' _ {}
+# -P4: 4 parallel processes
+```

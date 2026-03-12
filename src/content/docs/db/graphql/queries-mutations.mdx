@@ -1,0 +1,649 @@
+---
+title: GraphQL Queries, Mutations & Client Patterns
+description: Client query syntax, variables, fragments, mutations, pagination, optimistic updates, cache manipulation, subscriptions, and HTTP caching.
+sidebar:
+  order: 5
+tags: [database, api]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# GraphQL Queries, Mutations & Client Patterns
+
+## Query Syntax
+
+### Basic Query with Variables
+
+```graphql
+# Always name your operations — required for APQ and debugging
+query GetUserProfile($userId: ID!, $postLimit: Int = 10) {
+  user(id: $userId) {
+    id
+    name
+    email
+    bio
+    avatar
+    posts(limit: $postLimit, orderBy: CREATED_AT_DESC) {
+      id
+      title
+      slug
+      publishedAt
+    }
+    followersCount
+    followingCount
+  }
+}
+```
+
+Variables are sent as a separate JSON object, never interpolated into the query string:
+
+```json
+{
+  "userId": "42",
+  "postLimit": 5
+}
+```
+
+### Aliases
+
+```graphql
+# Aliases let you rename fields in the response and make duplicate queries
+query GetDashboard($userId: ID!) {
+  # Alias: 'currentUser' instead of 'user'
+  currentUser: user(id: $userId) {
+    name
+    email
+  }
+  # Query same field with different args
+  recentPosts: posts(limit: 5, orderBy: CREATED_AT_DESC) {
+    id
+    title
+  }
+  popularPosts: posts(limit: 5, orderBy: VIEWS_DESC) {
+    id
+    title
+    viewCount
+  }
+  # Alias to avoid naming conflicts
+  adminStats: stats(scope: ADMIN) { userCount }
+  publicStats: stats(scope: PUBLIC) { viewCount }
+}
+```
+
+### Fragments
+
+```graphql
+# Named fragment — reuse across multiple queries
+fragment UserBasic on User {
+  id
+  name
+  avatar
+  role
+}
+
+fragment PostSummary on Post {
+  id
+  title
+  slug
+  publishedAt
+  author {
+    ...UserBasic  # Use the fragment
+  }
+}
+
+# Use fragments in queries
+query GetFeed {
+  feed {
+    ...PostSummary
+    likesCount
+    commentsCount
+  }
+}
+
+query GetUserWithPosts($userId: ID!) {
+  user(id: $userId) {
+    ...UserBasic
+    bio
+    posts(limit: 10) {
+      ...PostSummary
+    }
+  }
+}
+```
+
+### Inline Fragments
+
+```graphql
+# Inline fragments for polymorphic types (unions/interfaces)
+query GetSearchResults($query: String!) {
+  search(query: $query) {
+    __typename  # Get the actual type name
+    # Common fields (if using interface)
+    ... on Article {
+      id
+      title
+      excerpt
+      author { name }
+    }
+    ... on Product {
+      id
+      name
+      price
+      inStock
+    }
+    ... on User {
+      id
+      name
+      avatar
+      followersCount
+    }
+    ... on Video {
+      id
+      title
+      duration
+      thumbnailUrl
+    }
+  }
+}
+```
+
+### Conditional Fields
+
+```graphql
+query GetUser($id: ID!, $includeEmail: Boolean!, $skipPhone: Boolean!) {
+  user(id: $id) {
+    id
+    name
+    # Include this field only when $includeEmail is true
+    email @include(if: $includeEmail)
+    # Skip this field when $skipPhone is true
+    phone @skip(if: $skipPhone)
+    # @include and @skip can be combined
+    address @include(if: $includeEmail) @skip(if: $skipPhone)
+  }
+}
+```
+
+## Mutations
+
+### Single Mutation
+
+```graphql
+mutation CreatePost($input: CreatePostInput!) {
+  createPost(input: $input) {
+    id
+    title
+    slug
+    status
+    createdAt
+    author {
+      id
+      name
+    }
+  }
+}
+```
+
+Variables:
+```json
+{
+  "input": {
+    "title": "Getting Started with GraphQL",
+    "content": "GraphQL is a query language...",
+    "tags": ["graphql", "api"],
+    "status": "DRAFT"
+  }
+}
+```
+
+### Multiple Mutations (Sequential)
+
+```graphql
+# Multiple mutations in one document execute sequentially
+mutation PublishAndNotify($postId: ID!, $channelId: ID!) {
+  publishPost(id: $postId) {
+    id
+    status
+    publishedAt
+  }
+  sendNotification(channelId: $channelId, message: "New post published!") {
+    id
+    delivered
+  }
+}
+```
+
+:::caution[Multiple Mutations Execute Sequentially]
+Unlike fields in a query (which can execute in parallel), mutations in a single operation execute **sequentially** in document order. This is intentional to prevent race conditions. However, separate mutation operations sent as a batch can still run in parallel.
+:::
+
+### Mutation Error Patterns
+
+<Tabs>
+  <TabItem label="Pattern 1: errors field">
+    GraphQL always returns HTTP 200. Errors appear in the `errors` array at the top level or as a union result type.
+
+    ```graphql
+    mutation CreateUser($input: CreateUserInput!) {
+      createUser(input: $input) {
+        id
+        name
+        email
+      }
+    }
+    ```
+
+    ```json
+    {
+      "data": { "createUser": null },
+      "errors": [{
+        "message": "Email already registered",
+        "locations": [{ "line": 2, "column": 3 }],
+        "path": ["createUser"],
+        "extensions": {
+          "code": "CONFLICT",
+          "field": "email"
+        }
+      }]
+    }
+    ```
+</TabItem>
+  <TabItem label="Pattern 2: Union Result Type">
+    Better pattern — errors are part of the type system.
+
+    ```graphql
+    union CreateUserResult = User | ValidationError | DuplicateEmailError
+
+    type Query { _: Boolean }
+
+    type Mutation {
+      createUser(input: CreateUserInput!): CreateUserResult!
+    }
+    ```
+
+    ```graphql
+    mutation CreateUser($input: CreateUserInput!) {
+      createUser(input: $input) {
+        ... on User {
+          id
+          name
+          email
+        }
+        ... on ValidationError {
+          message
+          field
+          code
+        }
+        ... on DuplicateEmailError {
+          message
+          suggestedEmails
+        }
+      }
+    }
+    ```
+
+    This makes errors explicit in the schema — clients know all possible outcomes.
+</TabItem>
+</Tabs>
+
+## Pagination Patterns
+
+### Offset Pagination
+
+```graphql
+query GetUsers($limit: Int = 20, $offset: Int = 0) {
+  users(limit: $limit, offset: $offset) {
+    id
+    name
+    email
+  }
+  usersCount  # Total for UI page numbers
+}
+```
+
+### Cursor-based Connection Pagination
+
+```graphql
+query GetUsersConnection($first: Int!, $after: String) {
+  usersConnection(first: $first, after: $after, orderBy: CREATED_AT_DESC) {
+    edges {
+      cursor
+      node {
+        id
+        name
+        email
+        createdAt
+      }
+    }
+    pageInfo {
+      hasNextPage
+      hasPreviousPage
+      startCursor
+      endCursor
+    }
+    totalCount
+  }
+}
+```
+
+Fetching the next page:
+```json
+{
+  "first": 20,
+  "after": "eyJpZCI6IjIwIn0="  // endCursor from previous response
+}
+```
+
+## Apollo Client with React
+
+### Setup
+
+```javascript
+// apolloClient.js
+import { ApolloClient, InMemoryCache, createHttpLink, split } from '@apollo/client';
+import { setContext } from '@apollo/client/link/context';
+import { GraphQLWsLink } from '@apollo/client/link/subscriptions';
+import { createClient } from 'graphql-ws';
+import { getMainDefinition } from '@apollo/client/utilities';
+
+const httpLink = createHttpLink({ uri: 'https://api.example.com/graphql' });
+
+const authLink = setContext((_, { headers }) => ({
+  headers: {
+    ...headers,
+    authorization: localStorage.getItem('token')
+      ? `Bearer ${localStorage.getItem('token')}`
+      : '',
+  },
+}));
+
+const wsLink = new GraphQLWsLink(
+  createClient({ url: 'wss://api.example.com/graphql' })
+);
+
+// Route subscriptions to WebSocket, queries/mutations to HTTP
+const splitLink = split(
+  ({ query }) => {
+    const definition = getMainDefinition(query);
+    return (
+      definition.kind === 'OperationDefinition' &&
+      definition.operation === 'subscription'
+    );
+  },
+  wsLink,
+  authLink.concat(httpLink),
+);
+
+export const client = new ApolloClient({
+  link: splitLink,
+  cache: new InMemoryCache({
+    typePolicies: {
+      Query: {
+        fields: {
+          // Merge paginated results
+          usersConnection: {
+            keyArgs: false,
+            merge(existing = { edges: [] }, incoming) {
+              return {
+                ...incoming,
+                edges: [...existing.edges, ...incoming.edges],
+              };
+            },
+          },
+        },
+      },
+    },
+  }),
+});
+```
+
+### Queries with Hooks
+
+```javascript
+import { useQuery, useLazyQuery, gql } from '@apollo/client';
+
+const GET_USER = gql`
+  query GetUser($id: ID!) {
+    user(id: $id) {
+      id
+      name
+      email
+      posts(limit: 5) {
+        id
+        title
+      }
+    }
+  }
+`;
+
+function UserProfile({ userId }) {
+  const { loading, error, data, refetch, fetchMore } = useQuery(GET_USER, {
+    variables: { id: userId },
+    // Options
+    skip: !userId,                  // Skip if no userId
+    fetchPolicy: 'cache-and-network', // Show cached, refetch in background
+    nextFetchPolicy: 'cache-first',  // Subsequent fetches use cache
+    pollInterval: 30000,            // Refetch every 30 seconds
+    notifyOnNetworkStatusChange: true,
+    onCompleted: (data) => console.log('Loaded:', data.user.name),
+    onError: (error) => console.error('Error:', error.message),
+  });
+
+  if (loading) return <Spinner />;
+  if (error) return <Error message={error.message} />;
+
+  return <div>{data.user.name}</div>;
+}
+```
+
+### Mutations with Optimistic Updates
+
+```javascript
+import { useMutation, gql } from '@apollo/client';
+
+const LIKE_POST = gql`
+  mutation LikePost($postId: ID!) {
+    likePost(id: $postId) {
+      id
+      likesCount
+      likedByCurrentUser
+    }
+  }
+`;
+
+function LikeButton({ post }) {
+  const [likePost, { loading }] = useMutation(LIKE_POST, {
+    variables: { postId: post.id },
+
+    // Optimistic update — update UI immediately without waiting for server
+    optimisticResponse: {
+      likePost: {
+        __typename: 'Post',
+        id: post.id,
+        likesCount: post.likedByCurrentUser
+          ? post.likesCount - 1
+          : post.likesCount + 1,
+        likedByCurrentUser: !post.likedByCurrentUser,
+      },
+    },
+
+    // Refetch related queries after mutation
+    refetchQueries: ['GetFeed'],
+
+    // Or update cache directly (avoids extra network request)
+    update(cache, { data: { likePost } }) {
+      cache.modify({
+        id: cache.identify(post),
+        fields: {
+          likesCount: () => likePost.likesCount,
+          likedByCurrentUser: () => likePost.likedByCurrentUser,
+        },
+      });
+    },
+  });
+
+  return (
+    <button onClick={() => likePost()} disabled={loading}>
+      {post.likedByCurrentUser ? '❤️' : '🤍'} {post.likesCount}
+    </button>
+  );
+}
+```
+
+### Cache Manipulation
+
+```javascript
+import { useApolloClient } from '@apollo/client';
+
+function CacheExample() {
+  const client = useApolloClient();
+
+  const addToCache = (newUser) => {
+    // Write a query result to cache
+    client.cache.writeQuery({
+      query: GET_USER,
+      variables: { id: newUser.id },
+      data: { user: newUser },
+    });
+  };
+
+  const removeFromCache = (userId) => {
+    // Evict a specific object from cache
+    client.cache.evict({ id: `User:${userId}` });
+    // Clean up dangling references
+    client.cache.gc();
+  };
+
+  const updateListInCache = (newPost) => {
+    client.cache.modify({
+      fields: {
+        posts(existingPosts = []) {
+          const newPostRef = client.cache.writeFragment({
+            data: newPost,
+            fragment: gql`
+              fragment NewPost on Post {
+                id title slug publishedAt
+              }
+            `,
+          });
+          return [newPostRef, ...existingPosts];
+        },
+      },
+    });
+  };
+}
+```
+
+### Subscriptions
+
+```javascript
+import { useSubscription, gql } from '@apollo/client';
+
+const MESSAGE_ADDED = gql`
+  subscription OnMessageAdded($channelId: ID!) {
+    messageAdded(channelId: $channelId) {
+      id
+      text
+      author { id name avatar }
+      createdAt
+    }
+  }
+`;
+
+function ChatChannel({ channelId }) {
+  const { data, loading, error } = useSubscription(MESSAGE_ADDED, {
+    variables: { channelId },
+    onData: ({ client, data }) => {
+      // Update the messages cache when a new message arrives
+      client.cache.modify({
+        fields: {
+          messages(existing = []) {
+            const newRef = client.cache.writeFragment({
+              data: data.data.messageAdded,
+              fragment: gql`fragment M on Message { id text author { name } createdAt }`,
+            });
+            return [...existing, newRef];
+          },
+        },
+      });
+    },
+  });
+}
+```
+
+## Fragment Colocation
+
+Co-locate fragments with the components that use them for better maintainability.
+
+```javascript
+// PostCard.jsx
+export const POST_CARD_FRAGMENT = gql`
+  fragment PostCard on Post {
+    id
+    title
+    slug
+    excerpt
+    publishedAt
+    author {
+      ...AuthorInfo
+    }
+    tags { id name }
+  }
+  ${AUTHOR_INFO_FRAGMENT}
+`;
+
+function PostCard({ post }) { /* ... */ }
+
+// Feed.jsx
+import { POST_CARD_FRAGMENT } from './PostCard';
+
+const GET_FEED = gql`
+  query GetFeed($limit: Int!) {
+    feed(limit: $limit) {
+      ...PostCard  # Uses the fragment defined in PostCard
+    }
+  }
+  ${POST_CARD_FRAGMENT}
+`;
+```
+
+:::tip[Fragment Colocation Benefits]
+When a component needs a new field, you only change its fragment. The parent query doesn't need to change. This is the "Colocation" principle that makes large GraphQL codebases maintainable.
+:::
+
+## HTTP Caching with GraphQL
+
+```javascript
+// Use GET for queries to enable HTTP caching
+// Apollo Server automatically allows GET for queries
+
+// With Persisted Queries, GET requests are cacheable by CDN
+import { ApolloServer } from '@apollo/server';
+import { expressMiddleware } from '@apollo/server/express4';
+import { ApolloServerPluginCacheControl } from '@apollo/server/plugin/cacheControl';
+
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  plugins: [
+    ApolloServerPluginCacheControl({
+      defaultMaxAge: 5,        // 5 seconds default
+      calculateHttpHeaders: true, // Set Cache-Control header
+    }),
+  ],
+});
+
+// Set maxAge on specific resolvers
+const resolvers = {
+  Query: {
+    publicPosts: (_, __, ___, info) => {
+      info.cacheControl.setCacheHint({ maxAge: 60, scope: 'PUBLIC' });
+      return db.posts.findPublished();
+    },
+    currentUser: (_, __, ___, info) => {
+      info.cacheControl.setCacheHint({ maxAge: 0, scope: 'PRIVATE' });
+      return db.users.findById(ctx.currentUser.id);
+    },
+  },
+};
+```

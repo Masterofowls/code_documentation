@@ -1,0 +1,326 @@
+---
+title: Memory Management in C++
+description: RAII, smart pointers (unique_ptr, shared_ptr, weak_ptr), memory ordering, atomics, placement new, allocators, PMR, memory profiling, and exception safety.
+sidebar:
+  order: 6
+tags: [systems, cpp, c]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Memory Management in C++
+
+## RAII Deep Dive
+
+**RAII (Resource Acquisition Is Initialization)** is C++'s core resource management philosophy: tie resource lifetime to object lifetime. The destructor always runs, even during exception unwinding.
+
+```cpp
+#include <fstream>
+#include <mutex>
+#include <memory>
+
+// RAII wrapping a mutex lock
+class ScopedLock {
+public:
+    explicit ScopedLock(std::mutex& m) : mutex_(m) { mutex_.lock(); }
+    ~ScopedLock() { mutex_.unlock(); }
+    // Non-copyable, non-movable
+    ScopedLock(const ScopedLock&) = delete;
+    ScopedLock& operator=(const ScopedLock&) = delete;
+private:
+    std::mutex& mutex_;
+};
+
+// RAII wrapping a database connection
+class DbConnection {
+public:
+    DbConnection(const std::string& url) {
+        handle_ = db_connect(url.c_str());  // acquire
+        if (!handle_) throw std::runtime_error("Connection failed");
+    }
+    ~DbConnection() {
+        if (handle_) db_disconnect(handle_);  // release (always!)
+    }
+    DbHandle* get() { return handle_; }
+private:
+    DbHandle* handle_ = nullptr;
+};
+
+// Exception safety with RAII
+void risky_operation() {
+    DbConnection db{"localhost:5432"};  // acquired
+    ScopedLock lock{global_mutex};      // locked
+    // ... do work ...
+    // if exception thrown: lock and db are both properly cleaned up!
+}  // db disconnected, lock released — guaranteed
+```
+
+## Smart Pointers
+
+### unique_ptr — Exclusive Ownership
+
+```cpp
+#include <memory>
+
+// unique_ptr<T> — owns one object, non-copyable, movable
+// Zero overhead over raw pointer — same size, same cost
+
+// Creation — always prefer make_unique (exception-safe, efficient)
+auto p1 = std::make_unique<int>(42);
+auto p2 = std::make_unique<std::string>("hello");
+
+// Access
+int value = *p1;              // dereference
+p2->size();                   // member access
+int* raw = p1.get();          // get raw pointer (p1 still owns it)
+
+// Ownership transfer (move-only)
+auto p3 = std::move(p1);      // p1 is now nullptr, p3 owns the int
+// auto p4 = p3;              // ERROR: cannot copy unique_ptr
+
+// Release ownership
+int* released = p3.release(); // p3 is now nullptr, caller must delete released
+delete released;
+
+// Reset (delete current, optionally take new)
+p3.reset();                   // delete and set to nullptr
+p3.reset(new int(100));       // delete old, take ownership of new
+
+// Array variant
+auto arr = std::make_unique<int[]>(100);
+arr[0] = 42;  arr[50] = 99;   // array access
+
+// Custom deleter
+auto closer = [](FILE* f){ if (f) std::fclose(f); };
+using FilePtr = std::unique_ptr<FILE, decltype(closer)>;
+FilePtr file{std::fopen("data.txt", "r"), closer};
+```
+
+### shared_ptr — Shared Ownership
+
+```cpp
+// shared_ptr<T> — reference-counted, multiple owners, thread-safe ref count
+// Overhead: one extra heap allocation for control block (use make_shared to combine)
+
+auto sp1 = std::make_shared<std::string>("shared");
+auto sp2 = sp1;                // copy: ref count = 2
+auto sp3 = sp1;                // copy: ref count = 3
+std::cout << sp1.use_count();  // 3
+
+sp2.reset();  // sp2 releases ownership: ref count = 2
+// When last shared_ptr is destroyed, the object is deleted
+
+// make_shared: ONE allocation for both object and control block
+auto efficient = std::make_shared<MyClass>(args...);  // 1 allocation
+// new + shared_ptr ctor: TWO allocations
+auto wasteful = std::shared_ptr<MyClass>(new MyClass(args...));  // 2 allocations
+
+// Accessing the control block
+sp1.use_count();   // number of shared_ptr owners
+sp1.unique();      // true if use_count() == 1 (deprecated in C++20)
+
+// enable_shared_from_this — get shared_ptr to *this inside a member function
+class Node : public std::enable_shared_from_this<Node> {
+public:
+    std::shared_ptr<Node> get_shared() {
+        return shared_from_this();  // correct: reuses existing control block
+        // DON'T: return std::shared_ptr<Node>(this);  // double-delete!
+    }
+};
+```
+
+### weak_ptr — Non-Owning Observer
+
+```cpp
+// weak_ptr<T> — observes a shared_ptr without affecting ref count
+// Used to break reference cycles and implement caches/observers
+
+auto strong = std::make_shared<int>(42);
+std::weak_ptr<int> weak = strong;  // weak reference, ref count still 1
+
+// Must lock() to access — may return empty shared_ptr if object was deleted
+if (auto locked = weak.lock()) {
+    std::cout << *locked << "\n";  // safe access
+} else {
+    std::cout << "Object expired\n";
+}
+weak.expired();  // true if the object has been deleted
+
+// Breaking reference cycles with weak_ptr
+struct Parent;
+struct Child {
+    std::shared_ptr<Parent> parent;  // strong reference to parent
+};
+struct Parent {
+    std::weak_ptr<Child> child;      // WEAK reference to child (breaks cycle)
+};
+// Without weak_ptr: parent holds child, child holds parent → memory leak!
+```
+
+## Memory Ordering and Atomics
+
+```cpp
+#include <atomic>
+
+// Atomic types — thread-safe read/write without locks
+std::atomic<int>   counter{0};
+std::atomic<bool>  ready{false};
+std::atomic<float> sensor{0.0f};  // note: may not be lock-free on all platforms
+
+// Basic operations
+counter.store(42, std::memory_order_relaxed);    // write
+int val = counter.load(std::memory_order_acquire); // read
+int old = counter.fetch_add(1, std::memory_order_acq_rel); // add and return old
+counter.fetch_sub(1);
+counter.fetch_and(0xFF);
+counter.fetch_or(0x01);
+
+// Compare-and-swap (CAS) — fundamental primitive for lock-free structures
+int expected = 0;
+bool swapped = counter.compare_exchange_strong(
+    expected,                      // in/out: expected value
+    42,                            // desired value
+    std::memory_order_acq_rel,     // success order
+    std::memory_order_relaxed      // failure order
+);
+// If counter == expected: sets counter=42, returns true
+// If counter != expected: sets expected=counter, returns false
+
+// compare_exchange_weak — may spuriously fail (use in a loop)
+do {
+    expected = counter.load(std::memory_order_relaxed);
+} while (!counter.compare_exchange_weak(expected, expected + 1));
+
+// Memory ordering (from weakest/fastest to strongest/slowest):
+// memory_order_relaxed  — no ordering constraints, just atomicity
+// memory_order_consume  — data dependency ordering (deprecated in C++17)
+// memory_order_acquire  — all reads/writes AFTER this line see everything BEFORE the
+//                         corresponding release operation
+// memory_order_release  — all reads/writes BEFORE this line happen-before all
+//                         acquire operations that see this write
+// memory_order_acq_rel  — both acquire and release (for read-modify-write ops)
+// memory_order_seq_cst  — total sequential consistency (default, most expensive)
+
+// Producer-consumer with acquire/release
+// Thread 1 (producer):
+data = 42;
+ready.store(true, std::memory_order_release);  // "data = 42" visible after this
+
+// Thread 2 (consumer):
+while (!ready.load(std::memory_order_acquire));  // spin until ready
+std::cout << data;  // guaranteed to see 42
+```
+
+## placement new and operator new
+
+```cpp
+#include <new>
+
+// Placement new — construct object in pre-allocated memory (no allocation)
+alignas(int) unsigned char buffer[sizeof(int)];
+int* p = new (buffer) int{42};  // construct int in buffer
+p->~int();  // must manually call destructor (no deallocation needed)
+
+// Use case: custom memory pools
+alignas(std::max_align_t) char pool[1024];
+char* ptr = pool;
+
+auto allocate_from_pool = [&](size_t size, size_t align) -> void* {
+    size_t space = pool + sizeof(pool) - ptr;
+    void* aligned = ptr;
+    if (!std::align(align, size, aligned, space)) return nullptr;
+    ptr = static_cast<char*>(aligned) + size;
+    return aligned;
+};
+
+MyObj* obj = new (allocate_from_pool(sizeof(MyObj), alignof(MyObj))) MyObj{};
+obj->~MyObj();  // manual destructor call
+
+// Overloading operator new (per-class allocator)
+class PoolObject {
+public:
+    void* operator new(std::size_t size) {
+        return g_pool.allocate(size);  // custom allocator
+    }
+    void operator delete(void* ptr) noexcept {
+        g_pool.deallocate(ptr);
+    }
+};
+
+// nothrow new — returns nullptr instead of throwing on failure
+int* safe = new (std::nothrow) int{42};
+if (!safe) { /* handle allocation failure */ }
+```
+
+## C++17 PMR (Polymorphic Memory Resource)
+
+```cpp
+#include <memory_resource>
+#include <vector>
+
+// PMR allows changing the allocator at runtime without changing the container type
+
+// --- Stack-based allocation (no heap) ---
+std::array<std::byte, 4096> buffer;
+std::pmr::monotonic_buffer_resource pool{buffer.data(), buffer.size()};
+std::pmr::vector<int> v{&pool};  // uses stack buffer instead of heap
+for (int i = 0; i < 100; i++) v.push_back(i);
+// When pool is destroyed, all memory is freed at once (no per-element free)
+
+// --- Pool resource (reuses fixed-size blocks) ---
+std::pmr::unsynchronized_pool_resource object_pool;  // single-threaded
+std::pmr::synchronized_pool_resource shared_pool;    // multi-threaded
+std::pmr::vector<std::pmr::string> strings{&object_pool};
+
+// --- Chained allocators (fallback to heap if pool exhausted) ---
+std::pmr::monotonic_buffer_resource upstream;  // fallback when buffer exhausted
+std::array<std::byte, 1024> small_buf;
+std::pmr::monotonic_buffer_resource fast_pool{small_buf.data(), small_buf.size(), &upstream};
+```
+
+## Exception Safety Guarantees
+
+```cpp
+// Every function should document and enforce one of these guarantees:
+
+// 1. Nothrow guarantee — never throws, marked noexcept
+void swap_noexcept(int& a, int& b) noexcept {
+    int temp = a; a = b; b = temp;
+}
+
+// 2. Strong guarantee — if exception thrown, object unchanged (rollback)
+class SafeVector {
+public:
+    void push_back(const std::string& s) {
+        auto new_data = data_;           // copy
+        new_data.push_back(s);           // may throw — operates on copy
+        data_ = std::move(new_data);     // commit (noexcept)
+    }
+private:
+    std::vector<std::string> data_;
+};
+
+// 3. Basic guarantee — if exception thrown, object in valid (but modified) state
+// (minimum requirement for any well-written function)
+
+// 4. No guarantee — avoid: leaves object in corrupt/unusable state
+
+// noexcept specifier and operator
+void destroy() noexcept;           // guaranteed not to throw
+void risky()   noexcept(false);    // may throw (same as no noexcept)
+// noexcept functions are required for move semantics in containers!
+// std::vector uses move when noexcept, copy otherwise (for strong guarantee)
+```
+
+<CardGrid>
+  <Card title="Smart Pointer Decision Tree" icon="information">
+    - `unique_ptr`: single owner, transfers ownership via move
+    - `shared_ptr`: multiple owners, reference-counted
+    - `weak_ptr`: observe without owning (break cycles)
+    - Raw pointer: when you observe but don't own (and lifetime is guaranteed)
+    - Never use `new`/`delete` directly — always use smart pointers
+</Card>
+  <Card title="noexcept Is Critical for Performance" icon="rocket">
+    Mark move constructors, move assignment operators, and swap functions as `noexcept`. Without `noexcept`, `std::vector` must copy on reallocation instead of move — potentially 10× slower for large objects.
+</Card>
+</CardGrid>

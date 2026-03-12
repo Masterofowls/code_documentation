@@ -1,0 +1,310 @@
+---
+title: Getting Started with PostgreSQL
+description: Install PostgreSQL, manage the service, connect with psql, create users and databases, configure pg_hba.conf, and run pg_dump backups.
+sidebar:
+  order: 2
+tags: [database, sql]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+## Installation
+
+<Tabs>
+<TabItem label="Ubuntu/Debian">
+```bash
+# Add official PostgreSQL APT repo
+sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+
+sudo apt update
+sudo apt install -y postgresql-17 postgresql-contrib-17
+
+# Start the service
+sudo systemctl enable --now postgresql
+```
+</TabItem>
+<TabItem label="RHEL/Fedora">
+```bash
+# Install the repo RPM
+sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+
+# Disable built-in PostgreSQL module
+sudo dnf -qy module disable postgresql
+
+sudo dnf install -y postgresql17-server postgresql17-contrib
+sudo /usr/pgsql-17/bin/postgresql-17-setup initdb
+sudo systemctl enable --now postgresql-17
+```
+</TabItem>
+<TabItem label="macOS (Homebrew)">
+```bash
+brew install postgresql@17
+
+# Start as a background service
+brew services start postgresql@17
+
+# Or start manually
+/opt/homebrew/opt/postgresql@17/bin/postgres -D /opt/homebrew/var/postgresql@17
+
+# Add to PATH
+echo 'export PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH"' >> ~/.zshrc
+```
+</TabItem>
+<TabItem label="Docker">
+```bash
+docker run -d \
+  --name postgres \
+  -e POSTGRES_USER=myuser \
+  -e POSTGRES_PASSWORD=mypassword \
+  -e POSTGRES_DB=mydb \
+  -p 5432:5432 \
+  -v postgres_data:/var/lib/postgresql/data \
+  postgres:17
+
+# Connect
+docker exec -it postgres psql -U myuser -d mydb
+```
+</TabItem>
+</Tabs>
+
+## Service Management
+
+```bash
+# systemd
+sudo systemctl start   postgresql
+sudo systemctl stop    postgresql
+sudo systemctl restart postgresql
+sudo systemctl status  postgresql
+
+# macOS Homebrew
+brew services start  postgresql@17
+brew services stop   postgresql@17
+brew services restart postgresql@17
+```
+
+## Connecting with psql
+
+```bash
+# As the postgres superuser (Linux)
+sudo -u postgres psql
+
+# With explicit parameters
+psql -U myuser -d mydb -h localhost -p 5432
+
+# From a connection URI
+psql "postgres://myuser:mypassword@localhost:5432/mydb"
+psql "postgresql://myuser:mypassword@localhost:5432/mydb?sslmode=require"
+```
+
+### .pgpass File
+
+Store passwords so psql doesn't prompt:
+
+```bash
+# ~/.pgpass format: hostname:port:database:username:password
+echo "localhost:5432:mydb:myuser:mypassword" >> ~/.pgpass
+chmod 600 ~/.pgpass
+```
+
+## Users and Roles
+
+In PostgreSQL, users and roles are the same thing — a role with `LOGIN` privilege is a user:
+
+```sql
+-- Create a user with a password
+CREATE USER appuser WITH PASSWORD 'secret-password' CREATEDB;
+
+-- Create a role (no login by default)
+CREATE ROLE readonly;
+
+-- Create a superuser
+CREATE USER admin WITH SUPERUSER PASSWORD 'admin-pass';
+
+-- Create a role with specific privileges
+CREATE ROLE app_readwrite
+  LOGIN
+  PASSWORD 'rw-pass'
+  CONNECTION LIMIT 20;
+
+-- Alter an existing user
+ALTER USER appuser WITH PASSWORD 'new-password';
+ALTER ROLE appuser SET search_path TO myschema, public;
+
+-- List users
+\du
+
+-- Drop a user
+DROP USER IF EXISTS appuser;
+```
+
+## GRANT and REVOKE
+
+```sql
+-- Grant database-level privileges
+GRANT CONNECT ON DATABASE mydb TO appuser;
+
+-- Grant schema privileges
+GRANT USAGE ON SCHEMA public TO appuser;
+GRANT CREATE ON SCHEMA public TO appuser;
+
+-- Grant table privileges
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO appuser;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO appuser;
+
+-- Grant on future tables
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO appuser;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT USAGE, SELECT ON SEQUENCES TO appuser;
+
+-- Grant a role to another role (role membership)
+GRANT readonly TO reporting_user;
+
+-- Read-only role pattern
+CREATE ROLE readonly_role;
+GRANT CONNECT ON DATABASE mydb TO readonly_role;
+GRANT USAGE ON SCHEMA public TO readonly_role;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO readonly_role;
+
+-- Revoke
+REVOKE INSERT, UPDATE, DELETE ON products FROM readonly_role;
+```
+
+## CREATE DATABASE
+
+```sql
+CREATE DATABASE myapp
+  OWNER     = myuser
+  ENCODING  = 'UTF8'
+  LC_COLLATE = 'en_US.UTF-8'
+  LC_CTYPE   = 'en_US.UTF-8'
+  TEMPLATE  = template0;
+
+-- Clone an existing database
+CREATE DATABASE myapp_test TEMPLATE myapp;
+
+-- List databases
+\l
+
+-- Connect
+\c myapp
+```
+
+## pg_hba.conf — Authentication Configuration
+
+`pg_hba.conf` controls which clients can connect and how they authenticate:
+
+```
+# TYPE  DATABASE  USER      ADDRESS       METHOD
+# Local connections
+local   all       postgres                peer
+local   all       all                     md5
+
+# Remote connections
+host    all       all       127.0.0.1/32  scram-sha-256
+host    all       all       ::1/128       scram-sha-256
+
+# Allow specific user from specific network
+host    mydb      appuser   10.0.0.0/8    scram-sha-256
+
+# TLS required from all external addresses
+hostssl all       all       0.0.0.0/0     scram-sha-256
+```
+
+After editing, reload without restarting:
+
+```bash
+sudo systemctl reload postgresql
+# Or in psql:
+SELECT pg_reload_conf();
+```
+
+## psql Variables and Scripting
+
+```sql
+-- Set a variable
+\set myvar 'hello'
+SELECT :'myvar';   -- 'hello'
+
+-- Environment variable
+\set schema :PGOPTIONS
+
+-- Prompt variable
+\set PROMPT1 '%n@%/%R%# '
+
+-- Conditional execution
+\set ON_ERROR_STOP on
+
+-- Execute a file
+\i /path/to/migration.sql
+
+-- Output to file
+\o /tmp/query_result.csv
+SELECT * FROM orders LIMIT 100;
+\o   -- reset to stdout
+
+-- Timing
+\timing on
+SELECT COUNT(*) FROM large_table;
+\timing off
+```
+
+## pg_dump and pg_restore
+
+```bash
+# Dump a database in custom format (recommended)
+pg_dump -U myuser -d mydb -F c -f backup.dump
+
+# Dump as plain SQL
+pg_dump -U myuser -d mydb > backup.sql
+
+# Dump a specific table
+pg_dump -U myuser -d mydb -t orders -F c -f orders.dump
+
+# Dump with compression
+pg_dump -U myuser -d mydb -F c -Z 9 -f backup.dump
+
+# Restore from custom format
+pg_restore -U myuser -d mydb_new -F c backup.dump
+
+# Restore (clean: drop objects before recreating)
+pg_restore -U myuser -d mydb -F c --clean backup.dump
+
+# Parallel restore (use multiple cores)
+pg_restore -U myuser -d mydb -j 4 -F d backup_dir/
+
+# Dump for parallel restore (directory format)
+pg_dump -U myuser -d mydb -F d -j 4 -f backup_dir/
+
+# Dump schema only (no data)
+pg_dump -U myuser -d mydb --schema-only -f schema.sql
+
+# Dump data only
+pg_dump -U myuser -d mydb --data-only -f data.sql
+```
+
+:::caution[pg_dump consistency]
+`pg_dump` takes a consistent snapshot using a transaction, so it does not lock tables. However, the dump may be large and slow for very large databases. Consider `pg_basebackup` for physical backups of production systems.
+:::
+
+## Multiline Queries in psql
+
+```sql
+-- psql accepts multiline input; the query runs when ; is reached
+SELECT
+  c.name,
+  COUNT(o.id) AS orders,
+  SUM(o.total) AS revenue
+FROM customers c
+LEFT JOIN orders o ON o.customer_id = c.id
+GROUP BY c.name
+ORDER BY revenue DESC
+LIMIT 10;
+
+-- Edit in your $EDITOR (opens vim/nano with current buffer)
+\e
+
+-- Execute last command again
+\g
+```

@@ -1,6 +1,6 @@
 ---
-title: Playwright in CI/CD
-description: Run Playwright in GitHub Actions with sharding, retries, artifact upload, Docker, JUnit reporting, browser caching, environment variables, and flaky test detection.
+title: Running Playwright in CI/CD
+description: Configure Playwright for CI pipelines — GitHub Actions, Docker, test sharding, parallel workers, retries, reporters, artifact uploads, browser caching, and environment management.
 sidebar:
   order: 8
 tags: [testing, javascript]
@@ -8,9 +8,9 @@ tags: [testing, javascript]
 
 import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-Running Playwright in CI requires specific configuration to be fast, reliable, and observable. This guide covers GitHub Actions, sharding, parallelism, reporting, Docker, and strategies for managing flaky tests.
+Running Playwright reliably in CI requires the right configuration for parallelism, retries, artifact collection, and browser installation. This guide covers everything from basic GitHub Actions setup to advanced sharding across multiple runners.
 
-## GitHub Actions — Basic Setup
+## GitHub Actions — Complete Workflow
 
 ```yaml
 # .github/workflows/playwright.yml
@@ -20,60 +20,99 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
 
 jobs:
   playwright:
     name: 'Playwright Tests'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
           cache: 'npm'
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Playwright browsers with system dependencies
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            playwright-
+
+      - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps
 
-      - name: Run Playwright tests
-        run: npx playwright test
-        env:
-          BASE_URL: ${{ vars.STAGING_URL }}
-          CI: true
+      - name: Install OS dependencies (if browsers were cached)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps
 
-      - name: Upload HTML report on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-report
-          path: playwright-report/
-          retention-days: 30
+      - name: Run Playwright tests (shard ${{ matrix.shard }} of 4)
+        run: npx playwright test --shard=${{ matrix.shard }}/4
+        env:
+          CI: 'true'
+          BASE_URL: ${{ vars.STAGING_URL }}
+          AUTH_TOKEN: ${{ secrets.TEST_AUTH_TOKEN }}
 
       - name: Upload test results on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results
-          path: test-results/
-          retention-days: 7
-```
+          name: playwright-results-shard-${{ matrix.shard }}
+          path: |
+            test-results/
+            playwright-report/
+          retention-days: 14
 
-:::tip[Always Upload Reports on Failure]
-`if: failure()` ensures the HTML report is uploaded only when tests fail. This keeps your artifact storage clean while always having diagnostic information available when you need it.
-:::
+  merge-reports:
+    name: 'Merge Playwright Reports'
+    needs: playwright
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+
+      - name: Download all shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: playwright-results-shard-*
+          merge-multiple: true
+          path: playwright-results
+
+      - name: Merge reports
+        run: npx playwright merge-reports --reporter html,junit ./playwright-results
+
+      - name: Upload merged HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-merged
+          path: playwright-report/
+          retention-days: 30
+```
 
 ## Retries in CI
 
-Configure retries to handle transient failures:
+Playwright can automatically retry flaky tests before marking them as failed:
 
 ```typescript
 // playwright.config.ts
@@ -81,178 +120,126 @@ export default defineConfig({
   // Retry failed tests up to 2 times in CI
   retries: process.env.CI ? 2 : 0,
 
-  // Never retry in local development
-  // (retries in development hide flaky tests — fix them instead)
+  // Mark tests as "flaky" instead of "failed" if they pass on retry
+  // (reported in the HTML report for visibility)
 });
 ```
 
-With `retries: 2`, a test must fail 3 times consecutively to be reported as failed. Playwright marks tests that pass after retries as "flaky" in the report.
-
-## Test Sharding
-
-Sharding distributes tests across multiple parallel CI jobs, dramatically reducing total run time:
-
-```yaml
-# .github/workflows/playwright.yml
-jobs:
-  playwright:
-    name: 'Playwright Tests (${{ matrix.shardIndex }}/${{ matrix.shardTotal }})'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false  # don't cancel other shards if one fails
-      matrix:
-        shardIndex: [1, 2, 3, 4]
-        shardTotal: [4]
-
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - run: npm ci
-      - run: npx playwright install --with-deps
-
-      - name: Run Playwright tests (shard ${{ matrix.shardIndex }}/${{ matrix.shardTotal }})
-        run: npx playwright test --shard=${{ matrix.shardIndex }}/${{ matrix.shardTotal }}
-        env:
-          CI: true
-
-      - name: Upload blob report for merge
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: blob-report-${{ matrix.shardIndex }}
-          path: blob-report/
-          retention-days: 1
-
-  # Merge reports from all shards into one HTML report
-  merge-reports:
-    needs: playwright
-    if: always()
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-      - run: npm ci
-
-      - name: Download all blob reports
-        uses: actions/download-artifact@v4
-        with:
-          path: all-blob-reports
-          pattern: blob-report-*
-          merge-multiple: true
-
-      - name: Merge blob reports into HTML
-        run: npx playwright merge-reports --reporter html ./all-blob-reports
-
-      - name: Upload merged HTML report
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-report
-          path: playwright-report/
-          retention-days: 14
+```bash
+# Retry from command line
+npx playwright test --retries=2
 ```
 
-:::tip[Sharding Rule of Thumb]
-Start with 4 shards. If your suite takes >15 minutes per shard, add more. The optimal shard count balances test distribution time against worker spin-up overhead. Each shard runs approximately the same number of tests automatically.
+:::tip[Retries Mask Flakiness]
+Retries are a safety net, not a cure. Monitor the `playwright-report` for tests marked "flaky" — they indicate timing issues, race conditions, or missing await statements. Fix the root cause rather than increasing retries indefinitely.
 :::
 
-## Parallelism Configuration
+## Sharding — Parallelism Across Machines
+
+Sharding distributes your test suite across multiple CI runners, reducing total execution time:
+
+```bash
+# Run shard 1 of 4 on runner 1
+npx playwright test --shard=1/4
+
+# Run shard 2 of 4 on runner 2
+npx playwright test --shard=2/4
+
+# ... and so on for shards 3 and 4
+
+# Merge reports from all shards
+npx playwright merge-reports --reporter html ./all-blob-reports
+```
+
+Playwright distributes test files evenly across shards. With 40 test files and 4 shards, each runner gets 10 files.
+
+For GitHub Actions with a matrix strategy:
+
+```yaml
+strategy:
+  matrix:
+    shard: [1, 2, 3, 4]
+steps:
+  - run: npx playwright test --shard=${{ matrix.shard }}/4
+```
+
+## Worker Parallelism Within a Machine
+
+Within a single runner, Playwright uses worker processes for parallelism:
 
 ```typescript
 // playwright.config.ts
 export default defineConfig({
-  // Number of parallel workers
-  workers: process.env.CI ? 2 : undefined,
-  // undefined = auto-detect from CPU count (development)
-  // 2 = conservative for CI to avoid OOM (adjust based on machine size)
-  // 1 = fully serial (debugging only)
+  // Automatically determined (usually CPUs / 2)
+  workers: undefined,
 
-  // Tests within a file run serially by default
-  // Set fullyParallel: true to run each test in its own worker
-  fullyParallel: true,
+  // In CI with limited CPUs
+  workers: process.env.CI ? 2 : undefined,
+
+  // Half of available CPUs (percentage string)
+  workers: '50%',
+
+  // Fully serial execution (safest for shared state)
+  workers: 1,
 });
 ```
 
-### Worker Resource Guidelines
+```bash
+# Set workers from CLI
+npx playwright test --workers=4
+npx playwright test --workers=1  # equivalent to --serial (sort of)
+```
 
-| CI machine | Recommended workers |
-|---|---|
-| 2 CPU / 4 GB RAM | 1–2 workers |
-| 4 CPU / 8 GB RAM | 2–4 workers |
-| 8 CPU / 16 GB RAM | 4–6 workers |
-| GitHub Actions standard | 2 workers (2 CPUs) |
-| GitHub Actions large | 4–8 workers (8–16 CPUs) |
+:::caution[Parallel Tests Must Be Independent]
+Parallel workers run tests concurrently. Tests that share a database, modify global state, or depend on specific port availability will fail randomly. Each test should create its own data and clean up after itself, or use Playwright's storage state for authentication.
+:::
 
-## Reporters
+## Reporters for CI
 
-### HTML Reporter (Default)
+Configure reporters optimized for CI output:
 
 ```typescript
 // playwright.config.ts
-reporter: [
-  ['html', {
-    outputFolder: 'playwright-report',
-    open: 'never',  // don't auto-open in CI
-  }],
-],
-```
-
-### JUnit XML — For CI Feedback
-
-JUnit XML is consumed by Jenkins, GitLab CI, Azure DevOps, and GitHub Actions to display inline test results:
-
-```typescript
-reporter: [
-  ['html', { outputFolder: 'playwright-report' }],
-  ['junit', { outputFile: 'test-results/junit.xml' }],
-],
-```
-
-```yaml
-# Publish JUnit results in GitHub Actions
-- name: Publish test results
-  uses: EnricoMi/publish-unit-test-result-action@v2
-  if: always()
-  with:
-    files: test-results/junit.xml
-```
-
-### GitHub Actions Reporter
-
-Annotates PRs with inline test failure comments:
-
-```typescript
-reporter: process.env.CI
-  ? [['github'], ['html'], ['json', { outputFile: 'test-results/results.json' }]]
-  : [['list'], ['html']],
+export default defineConfig({
+  reporter: process.env.CI
+    ? [
+        // Minimal terminal output (one dot per test)
+        ['dot'],
+        // HTML report — saved to playwright-report/
+        ['html', { open: 'never', outputFolder: 'playwright-report' }],
+        // JUnit XML — consumed by GitHub Actions, Jenkins, GitLab CI
+        ['junit', { outputFile: 'test-results/junit.xml' }],
+        // Blob report — for merging shard results
+        ['blob', { outputDir: 'blob-report' }],
+      ]
+    : [
+        // Beautiful list output for local development
+        ['list'],
+        // HTML report that auto-opens on failure
+        ['html', { open: 'on-failure' }],
+      ],
+});
 ```
 
 ### Allure Reporter
-
-For rich, interactive test reports:
 
 ```bash
 npm install --save-dev allure-playwright
 ```
 
 ```typescript
+// playwright.config.ts
 reporter: [
   ['allure-playwright', {
-    detail: true,
     outputFolder: 'allure-results',
+    detail: true,
     suiteTitle: false,
   }],
 ],
 ```
 
 ```yaml
+# .github/workflows/playwright.yml
 - name: Generate Allure report
   run: npx allure generate allure-results --clean -o allure-report
   if: always()
@@ -265,206 +252,226 @@ reporter: [
     path: allure-report/
 ```
 
-## Docker Setup
+### JUnit XML for CI Feedback
 
-Use the official Playwright Docker image for reproducible CI environments:
+Most CI platforms natively parse JUnit XML to show test results inline:
 
 ```yaml
-# .github/workflows/playwright-docker.yml
+# GitHub Actions — publish test results as PR check
+- name: Publish test results
+  uses: EnricoMi/publish-unit-test-result-action@v2
+  if: always()
+  with:
+    files: test-results/junit.xml
+```
+
+## Docker — Official Playwright Image
+
+Use the official Playwright Docker image for a consistent, pre-installed environment:
+
+```dockerfile
+# Dockerfile.playwright
+FROM mcr.microsoft.com/playwright:v1.48.0-jammy
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+
+CMD ["npx", "playwright", "test"]
+```
+
+```yaml
+# .github/workflows/playwright.yml
 jobs:
   playwright:
     runs-on: ubuntu-latest
     container:
       image: mcr.microsoft.com/playwright:v1.48.0-jammy
-      options: --user 1001
-
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-
       - run: npm ci
-
-      - name: Run tests
-        run: npx playwright test
-        env:
-          HOME: /root  # required for Playwright in Docker
+      # No browser install needed — they're pre-installed in the image
+      - run: npx playwright test
 ```
 
-Available Docker images:
+Available image variants:
+- `mcr.microsoft.com/playwright:v1.48.0-jammy` — Ubuntu 22.04 LTS
+- `mcr.microsoft.com/playwright:v1.48.0-focal` — Ubuntu 20.04 LTS
+- `mcr.microsoft.com/playwright:v1.48.0-jammy-arm64` — ARM64
 
-```bash
-mcr.microsoft.com/playwright:v1.48.0-jammy     # Ubuntu 22.04 (recommended)
-mcr.microsoft.com/playwright:v1.48.0-focal     # Ubuntu 20.04
-mcr.microsoft.com/playwright:v1.48.0-alpine    # Alpine (experimental)
-```
-
-## Environment Variables and Secrets
+## Environment Variables
 
 ```typescript
-// playwright.config.ts — read from environment
+// playwright.config.ts
 export default defineConfig({
   use: {
     baseURL: process.env.BASE_URL ?? 'http://localhost:3000',
+    extraHTTPHeaders: {
+      'Authorization': `Bearer ${process.env.API_TOKEN ?? ''}`,
+    },
   },
 });
 ```
 
 ```yaml
-# .github/workflows/playwright.yml
+# GitHub Actions — secrets and variables
 - name: Run Playwright tests
   run: npx playwright test
   env:
-    BASE_URL: ${{ vars.STAGING_URL }}
-    TEST_USER_EMAIL: ${{ secrets.TEST_USER_EMAIL }}
-    TEST_USER_PASSWORD: ${{ secrets.TEST_USER_PASSWORD }}
-    API_TOKEN: ${{ secrets.API_TOKEN }}
+    BASE_URL: ${{ vars.STAGING_BASE_URL }}          # Repository variable (public)
+    API_TOKEN: ${{ secrets.TEST_API_TOKEN }}         # Repository secret (encrypted)
+    DATABASE_URL: ${{ secrets.TEST_DATABASE_URL }}
     CI: 'true'
 ```
 
-```typescript
-// tests/global-setup.ts — using environment variables
-export default async function globalSetup() {
-  if (!process.env.TEST_USER_EMAIL) {
-    throw new Error('TEST_USER_EMAIL environment variable is required');
-  }
-  // ...
-}
-```
+:::caution[Never hardcode secrets in test files]
+Test files in version control must never contain API keys, passwords, or tokens. Use environment variables accessed via `process.env`. In GitHub Actions, store sensitive values in Repository Secrets (Settings → Secrets and variables → Actions).
+:::
 
 ## Caching Browser Binaries
 
-Browser downloads are large (200–400MB each). Cache them in CI to avoid re-downloading on every run:
+Browser downloads are large (300-500 MB total) and slow. Cache them between CI runs:
 
 ```yaml
+- name: Get Playwright version
+  id: playwright-version
+  run: echo "version=$(node -e "console.log(require('./node_modules/@playwright/test/package.json').version)")" >> $GITHUB_OUTPUT
+
 - name: Cache Playwright browsers
   uses: actions/cache@v4
   id: playwright-cache
   with:
     path: ~/.cache/ms-playwright
-    key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
-    restore-keys: |
-      playwright-${{ runner.os }}-
+    key: playwright-browsers-${{ steps.playwright-version.outputs.version }}
 
 - name: Install Playwright browsers
-  # Only install if cache was not restored or package-lock.json changed
   if: steps.playwright-cache.outputs.cache-hit != 'true'
-  run: npx playwright install --with-deps
+  run: npx playwright install --with-deps chromium firefox webkit
 
-- name: Install system dependencies only (if cache hit)
+- name: Install system dependencies (if using cached browsers)
   if: steps.playwright-cache.outputs.cache-hit == 'true'
   run: npx playwright install-deps
 ```
 
-## Running Specific Projects or Tags
+:::tip[Cache Key Strategy]
+Use the Playwright version as the cache key. Playwright downloads new browser binaries with each version release, so version-keyed caches are automatically invalidated when you update Playwright.
+:::
+
+## Running Specific Projects and Tags
 
 ```bash
-# Run only Chromium tests in CI
+# Run only one browser in CI
 npx playwright test --project=chromium
 
-# Run smoke tests (fast subset for deployment verification)
-npx playwright test --grep @smoke
+# Run tests with a specific tag
+npx playwright test --grep "@smoke"
+npx playwright test --grep "@critical"
 
-# Run all tests except slow ones
-npx playwright test --grep-invert @slow
-
-# Run only tests in a specific directory
-npx playwright test tests/auth/
+# Exclude slow tests from the main pipeline
+npx playwright test --grep-invert "@slow"
 ```
 
-Tag tests in your test files:
+Tag tests in your code:
 
 ```typescript
-test('user can log in @smoke', async ({ page }) => { /* ... */ });
-test('bulk export works correctly @slow', async ({ page }) => { /* ... */ });
-test('payment flow @critical @smoke', async ({ page }) => { /* ... */ });
+test('critical checkout flow @smoke @critical', async ({ page }) => {
+  // ...
+});
+
+test.describe('@slow', () => {
+  test('loads thousands of records', async ({ page }) => {
+    // ...
+  });
+});
+```
+
+```yaml
+# Run smoke tests on every push, full suite nightly
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx playwright test --grep "@smoke" --project=chromium
+
+  full-suite:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx playwright test --shard=${{ matrix.shard }}/4
 ```
 
 ## Flaky Test Detection
 
-### Identifying Flaky Tests
-
-```yaml
+```bash
 # Run each test multiple times to detect flakiness
-- name: Run tests with repeat to detect flakiness
-  run: npx playwright test --repeat-each=3
-  if: github.event_name == 'schedule'  # run nightly
+npx playwright test --repeat-each=3
+
+# Use built-in flakiness report
+npx playwright test --reporter=html
+# Open the report and filter by "Flaky" status
 ```
 
-```typescript
-// playwright.config.ts — mark known flaky tests
-test.skip(process.env.CI === 'true', 'Skipped in CI due to known flakiness');
+Configure flaky test handling in `playwright.config.ts`:
 
-// Or use retries specifically for one test
-test('occasionally flaky network test', async ({ page }) => {
-  test.slow(); // triple the timeout for this test
-  // ...
+```typescript
+export default defineConfig({
+  retries: 2,         // Retry up to 2 times
+  // A test is marked "flaky" if it fails initially but passes on retry
+  // Flaky tests appear in the HTML report for investigation
 });
 ```
 
-### Quarantine Flaky Tests
+## Full CI Configuration Example
 
 ```typescript
-// tests/quarantine/flaky-test.spec.ts
-import { test } from '@playwright/test';
-
-// Tag and isolate known flaky tests
-test('flaky animation test @quarantine', async ({ page }) => {
-  // Work in progress — fix before removing quarantine tag
-  test.skip(); // temporarily disabled
-});
-```
-
-```yaml
-# Separate job for quarantined tests — does not block main pipeline
-playwright-quarantine:
-  runs-on: ubuntu-latest
-  continue-on-error: true  # never blocks the pipeline
-  steps:
-    - run: npx playwright test --grep @quarantine
-```
-
-:::caution[Never Ignore Flaky Tests Permanently]
-Flaky tests indicate real problems: race conditions, timing issues, or environmental instability. Create tickets for every quarantined test and fix them within one sprint. A growing quarantine list is a sign of test quality debt that will eventually bite you in production.
-:::
-
-## Playwright Config for CI vs Development
-
-```typescript
-// playwright.config.ts
-import { defineConfig } from '@playwright/test';
-import os from 'os';
+// playwright.config.ts — production-ready CI configuration
+import { defineConfig, devices } from '@playwright/test';
 
 const isCI = !!process.env.CI;
 
 export default defineConfig({
   testDir: './tests',
+  timeout: 30_000,
+  expect: { timeout: 5_000 },
+  retries: isCI ? 2 : 0,
+  workers: isCI ? 2 : undefined,
   fullyParallel: true,
 
-  // Strict mode in CI: test.only fails the build
-  forbidOnly: isCI,
-
-  // Retries: none in dev (see failures immediately), 2 in CI (handle flakiness)
-  retries: isCI ? 2 : 0,
-
-  // Workers: conservative in CI, auto in dev
-  workers: isCI ? Math.floor(os.cpus().length / 2) : undefined,
-
-  // Reporters
   reporter: isCI
-    ? [['html', { open: 'never' }], ['github'], ['junit', { outputFile: 'results.xml' }]]
-    : [['html', { open: 'on-failure' }], ['list']],
+    ? [
+        ['dot'],
+        ['html', { open: 'never' }],
+        ['junit', { outputFile: 'test-results/junit.xml' }],
+        ['blob', { outputDir: 'blob-report' }],
+      ]
+    : [['list'], ['html', { open: 'on-failure' }]],
 
   use: {
-    // Only record on first retry in CI, never in dev
-    trace: isCI ? 'on-first-retry' : 'off',
-    video: isCI ? 'retain-on-failure' : 'off',
-    screenshot: isCI ? 'only-on-failure' : 'off',
-
     baseURL: process.env.BASE_URL ?? 'http://localhost:3000',
+    trace: isCI ? 'on-first-retry' : 'off',
+    screenshot: isCI ? 'only-on-failure' : 'off',
+    video: isCI ? 'on-first-retry' : 'off',
     headless: isCI,
+  },
+
+  projects: isCI
+    ? [
+        { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+        { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
+        { name: 'webkit', use: { ...devices['Desktop Safari'] } },
+      ]
+    : [
+        { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+      ],
+
+  webServer: {
+    command: 'npm run start',
+    url: 'http://localhost:3000',
+    reuseExistingServer: !isCI,
+    timeout: 120_000,
   },
 });
 ```

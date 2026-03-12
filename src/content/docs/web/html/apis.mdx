@@ -1,6 +1,6 @@
 ---
-title: HTML Browser APIs
-description: Browser APIs available in the HTML context — Web Storage, Web Workers, Service Workers, Notifications, Geolocation, Clipboard, Drag and Drop, History, Broadcast Channel, Page Visibility, and Fullscreen.
+title: Browser APIs
+description: Explore browser APIs accessible from HTML context — Web Storage, Web Workers, Service Workers, Notifications, Geolocation, Clipboard, Drag and Drop, History, and more.
 sidebar:
   order: 8
 tags: [html, frontend]
@@ -8,277 +8,288 @@ tags: [html, frontend]
 
 import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-Modern browsers expose a rich set of APIs that extend what HTML pages can do. These APIs allow you to store data locally, run code in background threads, work offline, access device hardware, and communicate between tabs.
+Modern browsers expose a rich set of APIs that go far beyond rendering HTML. These APIs let you store data locally, run code off the main thread, enable offline experiences, and interact with hardware.
 
-## Web Storage
+## Web Storage API
 
-The Web Storage API provides key-value storage in the browser. It is simpler than cookies and has larger capacity (5–10 MB).
+Web Storage provides two simple key-value stores that persist data client-side:
 
-<Tabs>
-  <TabItem label="localStorage">
-    ```js
-    // Persists across browser sessions (survives page close)
+| Feature | `localStorage` | `sessionStorage` |
+|---|---|---|
+| Persistence | Until explicitly cleared | Until tab/window closes |
+| Scope | All tabs on same origin | Current tab only |
+| Storage limit | ~5–10MB | ~5MB |
+| Accessible from | Any page on same origin | Same tab only |
 
-    // Store a value
-    localStorage.setItem('theme', 'dark');
-    localStorage.setItem('user', JSON.stringify({ id: 42, name: 'Jane' }));
+```js
+// localStorage — persists across sessions
+localStorage.setItem('theme', 'dark');
+localStorage.setItem('user', JSON.stringify({ id: 1, name: 'Jane' }));
 
-    // Read a value
-    const theme = localStorage.getItem('theme');           // 'dark'
-    const user = JSON.parse(localStorage.getItem('user')); // { id: 42, name: 'Jane' }
+const theme = localStorage.getItem('theme');          // 'dark'
+const user = JSON.parse(localStorage.getItem('user')); // { id: 1, name: 'Jane' }
 
-    // Remove a specific key
-    localStorage.removeItem('theme');
+localStorage.removeItem('theme');
+localStorage.clear(); // Remove everything
 
-    // Clear all keys for this origin
-    localStorage.clear();
+// sessionStorage — same API, cleared when tab closes
+sessionStorage.setItem('cart-items', JSON.stringify([]));
 
-    // Iterate all keys
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      console.log(key, localStorage.getItem(key));
-    }
-
-    // Listen for changes in other tabs
-    window.addEventListener('storage', (event) => {
-      console.log('Key changed:', event.key);
-      console.log('Old value:', event.oldValue);
-      console.log('New value:', event.newValue);
-    });
-    ```
-  </TabItem>
-  <TabItem label="sessionStorage">
-    ```js
-    // Cleared when the browser tab/window is closed
-
-    // Exactly the same API as localStorage
-    sessionStorage.setItem('draft', JSON.stringify({ title: 'My Post', body: '...' }));
-
-    const draft = JSON.parse(sessionStorage.getItem('draft'));
-
-    sessionStorage.removeItem('draft');
-    sessionStorage.clear();
-    ```
-
-    Use `sessionStorage` for:
-    - Form state that should not persist across sessions
-    - Multi-step wizard data
-    - Scroll position or UI state during a single visit
-  </TabItem>
-</Tabs>
+// Listen for changes in other tabs
+window.addEventListener('storage', (e) => {
+  console.log('Key changed:', e.key);
+  console.log('Old value:', e.oldValue);
+  console.log('New value:', e.newValue);
+  console.log('Origin:', e.url);
+});
+```
 
 :::caution[Never Store Sensitive Data in Web Storage]
-`localStorage` and `sessionStorage` are accessible to any JavaScript on the same origin, including third-party scripts. Never store authentication tokens, passwords, credit card numbers, or other sensitive data there.
+Web Storage is accessible by any JavaScript on the page. Never store authentication tokens, passwords, or personal data. Use HTTP-only cookies for authentication tokens.
 :::
 
 ## Web Workers
 
-Web Workers let you run JavaScript on a background thread, keeping the main thread (and therefore the UI) responsive:
+Web Workers run JavaScript on a **background thread**, keeping the main thread free for UI updates:
 
 ```html
 <!-- index.html -->
-<button id="start-btn">Start Heavy Calculation</button>
+<button type="button" id="calculate">Calculate Fibonacci(45)</button>
 <p id="result"></p>
+
+<script>
+  const btn = document.getElementById('calculate');
+  const result = document.getElementById('result');
+
+  // Create a new worker from a separate JS file
+  const worker = new Worker('/workers/fibonacci.js');
+
+  btn.addEventListener('click', () => {
+    btn.disabled = true;
+    result.textContent = 'Calculating…';
+
+    // Send data to the worker
+    worker.postMessage({ n: 45 });
+  });
+
+  // Receive results from the worker
+  worker.addEventListener('message', (e) => {
+    result.textContent = `Fibonacci(45) = ${e.data.result}`;
+    btn.disabled = false;
+  });
+
+  worker.addEventListener('error', (e) => {
+    console.error('Worker error:', e.message);
+  });
+</script>
 ```
 
 ```js
-// main.js — runs on the main thread
-const worker = new Worker('/workers/calculator.js');
+// workers/fibonacci.js
+function fibonacci(n) {
+  if (n <= 1) return n;
+  return fibonacci(n - 1) + fibonacci(n - 2);
+}
 
-document.getElementById('start-btn').addEventListener('click', () => {
-  // Send data to the worker
-  worker.postMessage({ numbers: Array.from({ length: 1_000_000 }, (_, i) => i) });
-});
-
-// Receive result from worker
-worker.addEventListener('message', (event) => {
-  document.getElementById('result').textContent = `Sum: ${event.data.result}`;
-});
-
-// Handle worker errors
-worker.addEventListener('error', (event) => {
-  console.error('Worker error:', event.message);
-});
-
-// Terminate the worker when done
-// worker.terminate();
-```
-
-```js
-// /workers/calculator.js — runs on a background thread
-self.addEventListener('message', (event) => {
-  const { numbers } = event.data;
-
-  // This heavy computation won't block the UI
-  const sum = numbers.reduce((acc, n) => acc + n, 0);
+// Listen for messages from the main thread
+self.addEventListener('message', (e) => {
+  const { n } = e.data;
+  const result = fibonacci(n);
 
   // Send result back to main thread
-  self.postMessage({ result: sum });
+  self.postMessage({ result });
 });
 ```
 
-### Worker Types
+:::tip[Use Transferable Objects for Large Data]
+Transferring large `ArrayBuffer` data between threads copies the data by default. Use `postMessage(data, [data])` to *transfer* (not copy) ownership — this is O(1) regardless of data size.
 
-| Type | Description |
-|---|---|
-| `Worker` | Dedicated worker — one-to-one with the creating page |
-| `SharedWorker` | Shared between multiple pages/tabs from the same origin |
-| `ServiceWorker` | Acts as a network proxy — see below |
+```js
+const buffer = new ArrayBuffer(1024 * 1024 * 100); // 100MB
+worker.postMessage({ buffer }, [buffer]); // Transfer, not copy
+```
+:::
 
 ## Service Workers
 
-Service Workers are a special type of Web Worker that act as a programmable proxy between your page and the network. They enable offline functionality, push notifications, and background sync.
+Service Workers act as a **programmable network proxy** — intercepting requests to enable offline functionality, caching, and push notifications.
 
 <Steps>
-1. **Register the Service Worker**
+1. **Register** the service worker from your main thread:
 
-   ```js
-   // In your main JavaScript file
-   if ('serviceWorker' in navigator) {
-     navigator.serviceWorker.register('/sw.js', { scope: '/' })
-       .then(registration => {
-         console.log('SW registered:', registration.scope);
-       })
-       .catch(error => {
-         console.error('SW registration failed:', error);
-       });
-   }
-   ```
+```js
+// In your main app code
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', async () => {
+    try {
+      const registration = await navigator.serviceWorker.register('/sw.js', {
+        scope: '/',
+      });
+      console.log('Service Worker registered:', registration.scope);
+    } catch (error) {
+      console.error('Service Worker registration failed:', error);
+    }
+  });
+}
+```
 
-2. **Install — Cache Assets**
+2. **Handle the install event** — cache static assets:
 
-   ```js
-   // /sw.js
-   const CACHE_NAME = 'my-app-v1';
-   const ASSETS_TO_CACHE = [
-     '/',
-     '/index.html',
-     '/styles.css',
-     '/app.js',
-     '/images/logo.svg',
-   ];
+```js
+// sw.js
+const CACHE_NAME = 'my-app-v1';
+const STATIC_ASSETS = [
+  '/',
+  '/styles.css',
+  '/app.js',
+  '/offline.html',
+  '/logo.svg',
+];
 
-   self.addEventListener('install', (event) => {
-     event.waitUntil(
-       caches.open(CACHE_NAME).then(cache => {
-         return cache.addAll(ASSETS_TO_CACHE);
-       })
-     );
-   });
-   ```
+self.addEventListener('install', (event) => {
+  // Pre-cache static assets
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_ASSETS))
+  );
+  // Activate immediately without waiting for old SW to go away
+  self.skipWaiting();
+});
+```
 
-3. **Activate — Clean Old Caches**
+3. **Handle the activate event** — clean up old caches:
 
-   ```js
-   self.addEventListener('activate', (event) => {
-     event.waitUntil(
-       caches.keys().then(cacheNames => {
-         return Promise.all(
-           cacheNames
-             .filter(name => name !== CACHE_NAME)
-             .map(name => caches.delete(name))
-         );
-       })
-     );
-   });
-   ```
+```js
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys().then((cacheNames) =>
+      Promise.all(
+        cacheNames
+          .filter((name) => name !== CACHE_NAME)
+          .map((name) => caches.delete(name))
+      )
+    )
+  );
+  // Take control of all open clients immediately
+  self.clients.claim();
+});
+```
 
-4. **Fetch — Serve from Cache (Offline Support)**
+4. **Handle fetch events** — serve from cache, fall back to network:
 
-   ```js
-   self.addEventListener('fetch', (event) => {
-     event.respondWith(
-       caches.match(event.request).then(cachedResponse => {
-         // Cache hit — return cached response
-         if (cachedResponse) return cachedResponse;
+```js
+self.addEventListener('fetch', (event) => {
+  // Skip non-GET requests
+  if (event.request.method !== 'GET') return;
 
-         // Not in cache — fetch from network and cache it
-         return fetch(event.request).then(response => {
-           // Clone the response (it can only be consumed once)
-           const responseClone = response.clone();
-           caches.open(CACHE_NAME).then(cache => {
-             cache.put(event.request, responseClone);
-           });
-           return response;
-         });
-       }).catch(() => {
-         // Offline fallback
-         return caches.match('/offline.html');
-       })
-     );
-   });
-   ```
+  event.respondWith(
+    caches.match(event.request).then((cachedResponse) => {
+      // Return cached version if available
+      if (cachedResponse) return cachedResponse;
+
+      // Otherwise fetch from network and cache the response
+      return fetch(event.request).then((response) => {
+        if (!response || response.status !== 200 || response.type !== 'basic') {
+          return response;
+        }
+
+        const responseToCache = response.clone();
+        caches.open(CACHE_NAME).then((cache) => {
+          cache.put(event.request, responseToCache);
+        });
+
+        return response;
+      }).catch(() => {
+        // Network failed — show offline page
+        return caches.match('/offline.html');
+      });
+    })
+  );
+});
+```
 </Steps>
 
 ## Notifications API
 
 ```js
-// Request permission
 async function requestNotificationPermission() {
-  const permission = await Notification.requestPermission();
-  return permission; // 'granted', 'denied', or 'default'
-}
-
-// Show a notification
-async function showNotification() {
-  const permission = await requestNotificationPermission();
-
-  if (permission === 'granted') {
-    const notification = new Notification('New Message', {
-      body: 'Jane sent you a message: "Hello!"',
-      icon: '/images/icon-192.png',
-      badge: '/images/badge-72.png',
-      tag: 'message-1', // Replaces existing notification with same tag
-      requireInteraction: false,
-      silent: false,
-    });
-
-    notification.addEventListener('click', () => {
-      window.focus();
-      notification.close();
-    });
+  if (!('Notification' in window)) {
+    console.warn('This browser does not support notifications');
+    return false;
   }
-}
-```
 
-:::tip[Request Permission Only on User Gesture]
-Browsers block automatic permission prompts. Always trigger `Notification.requestPermission()` from a direct user action like a button click, not on page load.
-:::
+  if (Notification.permission === 'granted') return true;
+  if (Notification.permission === 'denied') return false;
+
+  const permission = await Notification.requestPermission();
+  return permission === 'granted';
+}
+
+async function showNotification(title, options = {}) {
+  const granted = await requestNotificationPermission();
+  if (!granted) return;
+
+  const notification = new Notification(title, {
+    body: options.body ?? '',
+    icon: options.icon ?? '/icon-192.png',
+    badge: '/badge.png',
+    tag: options.tag ?? 'default',        // Replace existing notification with same tag
+    renotify: options.renotify ?? false,   // Vibrate even if replacing existing
+    silent: options.silent ?? false,
+    data: options.data ?? {},
+  });
+
+  notification.addEventListener('click', () => {
+    window.focus();
+    notification.close();
+  });
+}
+
+// Usage
+showNotification('New message', {
+  body: 'Jane Smith sent you a message',
+  icon: '/avatars/jane.jpg',
+  tag: 'chat-message',
+  data: { chatId: 'abc123' },
+});
+```
 
 ## Geolocation API
 
 ```js
-// One-time position
-navigator.geolocation.getCurrentPosition(
-  (position) => {
-    const { latitude, longitude, accuracy } = position.coords;
-    console.log(`Location: ${latitude}, ${longitude} (±${accuracy}m)`);
-  },
-  (error) => {
-    switch (error.code) {
-      case error.PERMISSION_DENIED:
-        console.error('User denied geolocation');
-        break;
-      case error.POSITION_UNAVAILABLE:
-        console.error('Position unavailable');
-        break;
-      case error.TIMEOUT:
-        console.error('Request timed out');
-        break;
+function getCurrentPosition() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error('Geolocation not supported'));
+      return;
     }
-  },
-  {
-    enableHighAccuracy: true, // GPS vs network-based (more battery drain)
-    timeout: 10000,           // ms before error
-    maximumAge: 60000,        // ms to accept cached position
-  }
-);
 
-// Watch continuous position updates
+    navigator.geolocation.getCurrentPosition(resolve, reject, {
+      enableHighAccuracy: true,  // Use GPS if available (slower, more battery)
+      timeout: 5000,             // Fail after 5 seconds
+      maximumAge: 60000,         // Accept cached position up to 1 minute old
+    });
+  });
+}
+
+async function showUserLocation() {
+  try {
+    const position = await getCurrentPosition();
+    const { latitude, longitude, accuracy } = position.coords;
+    console.log(`Lat: ${latitude}, Lng: ${longitude}, Accuracy: ±${accuracy}m`);
+  } catch (error) {
+    if (error.code === error.PERMISSION_DENIED) {
+      console.error('User denied geolocation');
+    } else if (error.code === error.POSITION_UNAVAILABLE) {
+      console.error('Location unavailable');
+    } else if (error.code === error.TIMEOUT) {
+      console.error('Geolocation timed out');
+    }
+  }
+}
+
+// Watch for ongoing position updates
 const watchId = navigator.geolocation.watchPosition(
-  (position) => {
-    updateMapMarker(position.coords.latitude, position.coords.longitude);
-  },
+  (position) => console.log('Updated:', position.coords),
   (error) => console.error(error),
   { enableHighAccuracy: true }
 );
@@ -290,139 +301,154 @@ navigator.geolocation.clearWatch(watchId);
 ## Clipboard API
 
 ```js
-// Write to clipboard
+// Write text to clipboard
 async function copyToClipboard(text) {
   try {
     await navigator.clipboard.writeText(text);
-    console.log('Copied to clipboard');
-  } catch (error) {
-    console.error('Failed to copy:', error);
+    console.log('Copied to clipboard!');
+  } catch (err) {
+    console.error('Clipboard write failed:', err);
   }
 }
 
-// Read from clipboard (requires user gesture + 'clipboard-read' permission)
-async function pasteFromClipboard() {
+// Read text from clipboard
+async function readFromClipboard() {
   try {
     const text = await navigator.clipboard.readText();
-    document.getElementById('target').value = text;
-  } catch (error) {
-    console.error('Failed to paste:', error);
+    return text;
+  } catch (err) {
+    console.error('Clipboard read failed:', err);
+    return null;
   }
 }
 
-// Copy rich content (HTML)
-async function copyHTML(htmlString) {
-  const blob = new Blob([htmlString], { type: 'text/html' });
-  const item = new ClipboardItem({ 'text/html': blob });
-  await navigator.clipboard.write([item]);
+// Copy image to clipboard
+async function copyImageToClipboard(imageUrl) {
+  const response = await fetch(imageUrl);
+  const blob = await response.blob();
+  await navigator.clipboard.write([
+    new ClipboardItem({ [blob.type]: blob }),
+  ]);
 }
+
+// Usage with UI feedback
+document.querySelectorAll('[data-copy]').forEach((btn) => {
+  btn.addEventListener('click', async () => {
+    await copyToClipboard(btn.dataset.copy);
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 2000);
+  });
+});
 ```
 
 ## Drag and Drop API
 
 ```html
-<!-- Draggable element -->
-<div
-  draggable="true"
-  id="drag-item"
-  class="card"
->
-  Drag me!
-</div>
+<!-- Draggable items -->
+<ul id="task-list">
+  <li draggable="true" data-id="1">Task One</li>
+  <li draggable="true" data-id="2">Task Two</li>
+  <li draggable="true" data-id="3">Task Three</li>
+</ul>
 
-<!-- Drop target -->
-<div
-  id="drop-zone"
-  class="drop-zone"
->
-  Drop here
-</div>
+<!-- Drop zones -->
+<div class="drop-zone" id="zone-todo" aria-label="To Do">To Do</div>
+<div class="drop-zone" id="zone-doing" aria-label="In Progress">In Progress</div>
+<div class="drop-zone" id="zone-done" aria-label="Done">Done</div>
 ```
 
 ```js
-const dragItem = document.getElementById('drag-item');
-const dropZone = document.getElementById('drop-zone');
+let draggedItem = null;
 
-// Source events
-dragItem.addEventListener('dragstart', (event) => {
-  event.dataTransfer.setData('text/plain', dragItem.id);
-  event.dataTransfer.effectAllowed = 'move';
-  dragItem.classList.add('dragging');
+document.querySelectorAll('[draggable]').forEach((item) => {
+  item.addEventListener('dragstart', (e) => {
+    draggedItem = item;
+    e.dataTransfer.setData('text/plain', item.dataset.id);
+    e.dataTransfer.effectAllowed = 'move';
+    item.classList.add('dragging');
+  });
+
+  item.addEventListener('dragend', () => {
+    item.classList.remove('dragging');
+    draggedItem = null;
+  });
 });
 
-dragItem.addEventListener('dragend', () => {
-  dragItem.classList.remove('dragging');
-});
+document.querySelectorAll('.drop-zone').forEach((zone) => {
+  zone.addEventListener('dragover', (e) => {
+    e.preventDefault();              // Allow drop
+    e.dataTransfer.dropEffect = 'move';
+    zone.classList.add('drag-over');
+  });
 
-// Target events
-dropZone.addEventListener('dragover', (event) => {
-  event.preventDefault(); // Required to allow drop
-  event.dataTransfer.dropEffect = 'move';
-  dropZone.classList.add('drag-over');
-});
+  zone.addEventListener('dragleave', () => {
+    zone.classList.remove('drag-over');
+  });
 
-dropZone.addEventListener('dragleave', () => {
-  dropZone.classList.remove('drag-over');
-});
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    zone.classList.remove('drag-over');
 
-dropZone.addEventListener('drop', (event) => {
-  event.preventDefault();
-  const id = event.dataTransfer.getData('text/plain');
-  const droppedElement = document.getElementById(id);
-  dropZone.appendChild(droppedElement);
-  dropZone.classList.remove('drag-over');
+    if (draggedItem) {
+      zone.appendChild(draggedItem);
+    }
+  });
 });
 ```
 
 ## History API
 
-Navigate programmatically without full page reloads — the foundation of single-page application routing:
-
 ```js
-// Push a new entry to the history stack
-history.pushState({ page: 'about', id: 42 }, 'About Us', '/about');
+// pushState: add entry to history without page reload
+history.pushState(
+  { page: 'products', filter: 'shoes' },   // State object
+  '',                                        // Title (mostly ignored)
+  '/products?category=shoes'                // URL
+);
 
-// Replace the current history entry (no back button entry)
-history.replaceState({ page: 'home' }, 'Home', '/');
+// replaceState: update current entry (no new history entry)
+history.replaceState(
+  { page: 'products', filter: 'boots' },
+  '',
+  '/products?category=boots'
+);
 
-// Navigate backwards
-history.back();
-history.go(-1); // Same as back()
-
-// Navigate forwards
-history.forward();
-history.go(1);
-
-// Navigate N steps
-history.go(-3);
-
-// Respond to back/forward button navigation
-window.addEventListener('popstate', (event) => {
-  const state = event.state;
-  if (state) {
-    console.log('Navigated to:', state.page);
-    // Re-render the appropriate content
-    renderPage(state.page);
+// Listen for back/forward navigation
+window.addEventListener('popstate', (e) => {
+  if (e.state) {
+    console.log('Navigated to:', e.state.page, 'with filter:', e.state.filter);
+    // Re-render your UI based on state
+    renderPage(e.state);
   }
 });
+
+// Navigate programmatically
+history.back();    // Same as clicking Back
+history.forward(); // Same as clicking Forward
+history.go(-2);    // Go back 2 entries
 ```
 
 ## Broadcast Channel API
 
-Send messages between tabs, windows, and workers from the same origin:
+Communicate between browser tabs / windows on the same origin:
 
 ```js
-// In each tab / page
+// In every tab that needs to communicate
 const channel = new BroadcastChannel('app-sync');
 
-// Send a message to all other contexts
-channel.postMessage({ type: 'USER_LOGGED_OUT' });
+// Send a message to all other tabs
+channel.postMessage({ type: 'THEME_CHANGED', theme: 'dark' });
 
-// Receive messages from other contexts
-channel.addEventListener('message', (event) => {
-  if (event.data.type === 'USER_LOGGED_OUT') {
-    // Redirect to login page in this tab too
-    window.location.href = '/login';
+// Listen for messages from other tabs
+channel.addEventListener('message', (e) => {
+  const { type, ...data } = e.data;
+
+  if (type === 'THEME_CHANGED') {
+    applyTheme(data.theme);
+  }
+
+  if (type === 'USER_LOGGED_OUT') {
+    redirectToLogin();
   }
 });
 
@@ -432,84 +458,60 @@ channel.close();
 
 ## Page Visibility API
 
-React to the user switching tabs or minimising the window:
+Detect when users switch tabs or minimise the window:
 
 ```js
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
-    // Page is hidden — pause video, stop animations, reduce polling
-    document.title = 'Come back! 👋';
+    // Tab is hidden — pause non-essential work
     pauseVideoPlayback();
     stopPolling();
+    document.title = '⏸ Paused | My App';
   } else {
-    // Page is visible again — resume
+    // Tab is visible again — resume
+    resumeVideoPlayback();
+    startPolling();
     document.title = 'My App';
-    resumePolling();
   }
 });
 
 // Check current state
-console.log(document.visibilityState); // 'visible' or 'hidden'
-console.log(document.hidden);          // true or false
+console.log(document.visibilityState); // 'visible' | 'hidden'
 ```
 
 ## Fullscreen API
 
 ```js
-// Enter fullscreen
 async function enterFullscreen(element = document.documentElement) {
   try {
     if (element.requestFullscreen) {
       await element.requestFullscreen();
     } else if (element.webkitRequestFullscreen) {
-      // Safari
-      element.webkitRequestFullscreen();
+      await element.webkitRequestFullscreen(); // Safari
     }
-  } catch (error) {
-    console.error('Could not enter fullscreen:', error);
+  } catch (err) {
+    console.error('Fullscreen failed:', err);
   }
 }
 
-// Exit fullscreen
 async function exitFullscreen() {
   if (document.exitFullscreen) {
     await document.exitFullscreen();
   }
 }
 
-// Toggle fullscreen
-async function toggleFullscreen(element) {
+function toggleFullscreen(element) {
   if (!document.fullscreenElement) {
-    await enterFullscreen(element);
+    enterFullscreen(element);
   } else {
-    await exitFullscreen();
+    exitFullscreen();
   }
 }
 
-// Respond to fullscreen changes
+// Listen for fullscreen changes
 document.addEventListener('fullscreenchange', () => {
   const isFullscreen = !!document.fullscreenElement;
-  updateFullscreenButton(isFullscreen);
+  btn.setAttribute('aria-label', isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen');
+  btn.textContent = isFullscreen ? '⛶ Exit' : '⛶ Fullscreen';
 });
 ```
-
-```css
-/* Style elements differently when in fullscreen */
-:fullscreen {
-  background: #000;
-}
-
-/* Prefix for Safari */
-:-webkit-full-screen {
-  background: #000;
-}
-
-/* Style the backdrop behind a fullscreen element */
-::backdrop {
-  background: rgba(0, 0, 0, 0.8);
-}
-```
-
-:::tip[API Feature Detection]
-Always check for API availability before using it. Features like Geolocation, Notifications, and Clipboard require explicit user permission and may be blocked in iframes or insecure (non-HTTPS) contexts.
-:::

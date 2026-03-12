@@ -1,0 +1,378 @@
+---
+title: Bash Files & I/O
+description: File descriptors, redirection, pipes, process substitution, find, xargs, awk, and sed in Bash.
+sidebar:
+  order: 6
+tags: [cli, shell, scripting]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Bash Files & I/O
+
+## File Descriptors
+
+Every process has three standard file descriptors:
+
+| FD | Name | Default | Description |
+|----|------|---------|-------------|
+| 0 | stdin | keyboard | Standard input |
+| 1 | stdout | terminal | Standard output |
+| 2 | stderr | terminal | Standard error |
+
+```bash
+# Check open file descriptors
+ls -la /proc/$$/fd
+
+# Create custom file descriptors
+exec 3>/tmp/logfile.txt    # open FD 3 for writing
+echo "log message" >&3     # write to FD 3
+exec 3>&-                  # close FD 3
+
+exec 4</etc/hosts          # open FD 4 for reading
+read -r line <&4           # read from FD 4
+exec 4<&-                  # close FD 4
+```
+
+## Redirection
+
+```bash
+# ─── Output Redirection ───────────────────────────────────
+command > file.txt          # redirect stdout, truncate file
+command >> file.txt         # redirect stdout, append to file
+command 2> error.txt        # redirect stderr only
+command 2>> error.txt       # append stderr
+command 2>&1                # redirect stderr TO stdout (merge)
+command > file.txt 2>&1     # both stdout and stderr to file
+command &> file.txt         # shorthand for > file 2>&1 (bash 4+)
+command &>> file.txt        # append both to file
+
+# Discard output
+command > /dev/null         # discard stdout
+command 2>/dev/null         # discard stderr
+command &>/dev/null         # discard both
+command > /dev/null 2>&1    # older equivalent, works in sh too
+
+# Write stderr to terminal even when stdout is redirected
+echo "Error message" >&2   # write this message to stderr
+
+# ─── Input Redirection ────────────────────────────────────
+command < file.txt          # redirect file to stdin
+command << EOF              # here-doc as stdin
+content here
+EOF
+command <<< "string"        # here-string as stdin
+
+# ─── Order Matters! ──────────────────────────────────────
+# 2>&1 > file  ≠  > file 2>&1
+command 2>&1 > file   # stderr to current stdout (terminal), then stdout to file
+command > file 2>&1   # stdout to file, stderr to (new) stdout (also file) — CORRECT
+```
+
+:::caution[2>&1 Order Matters]
+`command > file 2>&1` redirects stdout to file first, then stderr to wherever stdout points (the file). Reversing to `command 2>&1 > file` sends stderr to the terminal and stdout to the file — almost never what you want.
+:::
+
+## exec for Permanent Redirection
+
+```bash
+# Redirect all subsequent output in the script
+exec > /var/log/myscript.log 2>&1   # all output goes to log file
+echo "This goes to the log"
+echo "Error here too" >&2           # stderr also goes to log
+
+# Useful pattern: tee output to both terminal and log
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+# Redirect stdin from a file for the whole script
+exec 0< input_data.txt
+
+# Save and restore
+exec 3>&1 4>&2         # save stdout(3) and stderr(4)
+exec > /tmp/output.log 2>&1  # redirect
+do_work
+exec 1>&3 2>&4         # restore
+exec 3>&- 4>&-         # close saved FDs
+```
+
+## Pipes
+
+```bash
+# Basic pipe: stdout of left → stdin of right
+cat /etc/passwd | grep alice
+ls -la | head -20
+ps aux | grep nginx | grep -v grep
+
+# Exit code of a pipeline (without pipefail)
+# is the exit code of the LAST command
+# With set -o pipefail: is exit code of FIRST failed command
+
+# Check individual pipeline exit codes with PIPESTATUS
+command1 | command2 | command3
+echo "${PIPESTATUS[@]}"  # e.g. "0 0 0" or "1 0 0"
+
+# tee: write to file AND pass through to next pipe stage
+cat big_file.txt | tee /tmp/copy.txt | wc -l
+command | tee >(gzip > output.gz) | other_command   # tee with process substitution
+
+# Named pipes (FIFO)
+mkfifo /tmp/mypipe
+producer_command > /tmp/mypipe &    # background producer
+consumer_command < /tmp/mypipe      # consumer reads
+rm /tmp/mypipe
+```
+
+## Process Substitution
+
+```bash
+# <(command) — treat command output as a file (for reading)
+diff <(sort file1.txt) <(sort file2.txt)   # diff sorted versions
+comm <(sort list1) <(sort list2)           # compare sorted lists
+
+while IFS= read -r line; do
+  echo "Line: $line"
+done < <(find . -name "*.log")   # process each line from find
+
+# >(command) — treat command input as a file (for writing)
+tee >(gzip > output.gz) > /dev/null <<< "data to compress"
+command | tee >(grep ERROR > errors.txt) >(grep WARN > warnings.txt) > /dev/null
+
+# Compare two command outputs side by side
+diff <(command1 --output1) <(command1 --output2)
+
+# Use with mapfile to avoid subshell issues
+# WRONG: command | while read ... done  # loop runs in subshell
+# RIGHT: while read ... done < <(command)  # loop in same shell
+while IFS= read -r line; do
+  processed_count=$(( processed_count + 1 ))  # THIS works (same shell)
+done < <(cat large_file.txt)
+echo "Processed: $processed_count"  # accessible here
+```
+
+## find Command
+
+```bash
+# Basic syntax: find [path] [expression]
+find /var/log -name "*.log"              # by name
+find . -type f -name "*.sh"             # regular files only
+find . -type d -name "node_modules"     # directories only
+find . -type l                          # symbolic links only
+
+# Time-based
+find /tmp -mtime -1                     # modified in last 1 day
+find /tmp -mtime +7                     # modified more than 7 days ago
+find /tmp -mmin -60                     # modified in last 60 minutes
+find /var/log -newer /etc/passwd        # newer than passwd file
+
+# Size-based
+find . -size +1M                        # larger than 1 megabyte
+find . -size -100k                      # smaller than 100 kilobytes
+find . -size +100k -size -1M            # between 100k and 1MB
+find . -empty                           # empty files or directories
+
+# Permission-based
+find . -perm 644                        # exact permissions
+find . -perm /755                       # any of these bits set
+find . -user alice                      # owned by alice
+find . -group developers               # owned by group
+
+# Execute action on results
+find . -name "*.pyc" -delete            # delete matching files
+find . -name "*.sh" -exec chmod +x {} \;     # run command for each
+find . -name "*.sh" -exec chmod +x {} +      # batch (more efficient)
+find . -type f -print0 | xargs -0 grep "TODO"  # with xargs (handles spaces)
+
+# Complex expressions
+find . \( -name "*.jpg" -o -name "*.png" \) -size +500k  # OR
+find . -not -name "*.log" -type f       # NOT
+find . -name "test_*" -prune -o -type f -print  # exclude test_ directories
+
+# Find and act conditionally
+find . -name "*.log" -size +100M | while IFS= read -r file; do
+  echo "Large log found: $file ($(du -sh "$file" | cut -f1))"
+  read -r -p "Delete? (y/n): " answer
+  [[ "$answer" == "y" ]] && rm "$file" && echo "Deleted"
+done
+```
+
+## xargs
+
+```bash
+# xargs: build and execute commands from stdin
+
+# Basic usage
+find . -name "*.txt" | xargs wc -l          # word count all txt files
+
+# Handle files with spaces (-0 with find -print0)
+find . -name "*.txt" -print0 | xargs -0 grep "search term"
+
+# Replace {} with filename (-I {})
+find . -name "*.jpg" | xargs -I {} convert {} {}.png
+
+# Parallel execution (-P)
+find . -name "*.gz" -print0 | xargs -0 -P4 -I {} gunzip {}  # 4 parallel
+
+# Limit arguments per invocation (-n)
+echo {1..100} | xargs -n 10 echo   # 10 arguments at a time
+
+# Show commands before executing (-t)
+find . -name "*.bak" | xargs -t rm
+
+# Dry run — print what would run
+find . -name "*.tmp" | xargs -t -I {} echo rm {}
+
+# With multiple commands (bash -c)
+find . -name "*.log" -print0 | xargs -0 -I {} bash -c '
+  size=$(wc -c < "$1")
+  echo "File: $1, Size: $size bytes"
+' -- {}
+```
+
+## awk
+
+```bash
+# awk: pattern scanning and processing language
+# awk 'pattern { action }' file
+
+# Basic field printing
+awk '{print $1, $3}' file.txt           # print columns 1 and 3
+awk -F: '{print $1}' /etc/passwd        # colon-delimited, print first field
+awk -F',' '{print $2}' data.csv         # CSV, second column
+
+# NR (Number of Records/lines), NF (Number of Fields)
+awk '{print NR, NF, $0}' file           # line num, field count, line
+awk 'NR==5' file                         # print line 5
+awk 'NR>=2 && NR<=5' file               # print lines 2-5
+awk 'NF>0' file                          # skip empty lines
+
+# Pattern matching
+awk '/error/' logfile                    # print lines matching /error/
+awk '!/^#/' config.txt                   # skip comment lines
+awk '$3 > 100' data.txt                  # print if 3rd field > 100
+awk '$2 ~ /^alice/' /etc/passwd          # field 2 matches regex
+
+# BEGIN and END blocks
+awk 'BEGIN {FS=","; OFS="\t"} {print $1,$2}' data.csv
+awk 'BEGIN {total=0} {total+=$3} END {print "Total:", total}' data.txt
+
+# Compute statistics
+awk '{sum+=$1; count++} END {printf "Average: %.2f\n", sum/count}' nums.txt
+
+# printf in awk
+awk '{printf "%-20s %8.2f\n", $1, $2}' data.txt
+
+# Multiple patterns
+awk '
+  /START/ { recording=1; next }
+  /END/   { recording=0; next }
+  recording { print }
+' file
+
+# Process CSV with header
+awk -F, 'NR==1 {for(i=1;i<=NF;i++) header[i]=$i; next}
+         {for(i=1;i<=NF;i++) data[header[i]]=$i; print data["name"], data["age"]}' data.csv
+
+# Sum a column
+awk -F: '{sum += $3} END {print sum}' /etc/passwd   # sum all UIDs
+```
+
+## sed
+
+```bash
+# sed: stream editor for text transformation
+
+# ─── Substitution ────────────────────────────────────────
+sed 's/old/new/'        file   # replace first occurrence per line
+sed 's/old/new/g'       file   # replace all occurrences (global)
+sed 's/old/new/i'       file   # case-insensitive
+sed 's/old/new/2'       file   # replace only 2nd occurrence
+sed 's/old/new/gI'      file   # all + case-insensitive
+sed -i 's/old/new/g'    file   # edit file IN PLACE (be careful!)
+sed -i.bak 's/old/new/g' file  # in-place with backup
+
+# Capture groups
+sed 's/\(first\) \(last\)/\2, \1/'  # "John Smith" → "Smith, John"
+sed -E 's/(first) (last)/\2, \1/'   # extended regex (same result)
+
+# ─── Deletion ────────────────────────────────────────────
+sed '/pattern/d'      file   # delete lines matching pattern
+sed '3d'              file   # delete line 3
+sed '3,7d'            file   # delete lines 3 through 7
+sed '/^#/d'           file   # delete comment lines
+sed '/^$/d'           file   # delete empty lines
+sed 's/[[:space:]]*$//' file  # trim trailing whitespace
+
+# ─── Print (with -n) ─────────────────────────────────────
+sed -n '5p'           file   # print only line 5
+sed -n '1,10p'        file   # print lines 1-10
+sed -n '/pattern/p'   file   # print matching lines (like grep)
+sed -n '/START/,/END/p' file # print between patterns (inclusive)
+
+# ─── Insert and Append ───────────────────────────────────
+sed '3i\New line before line 3'  file  # insert before line 3
+sed '3a\New line after line 3'   file  # append after line 3
+sed '/pattern/i\Line before match' file  # insert before matching lines
+
+# ─── Address Ranges ──────────────────────────────────────
+sed '2,5s/old/new/g' file        # substitute on lines 2-5
+sed '/start/,/end/s/foo/bar/g' file  # substitute between patterns
+
+# ─── Multiple commands (-e) ──────────────────────────────
+sed -e 's/foo/bar/g' -e 's/baz/qux/g' file
+
+# ─── Practical examples ──────────────────────────────────
+# Remove HTML tags
+sed 's/<[^>]*>//g' page.html
+
+# Extract between XML/HTML tags
+sed -n 's/.*<title>\(.*\)<\/title>.*/\1/p' page.html
+
+# Add line numbers
+sed = file | sed 'N; s/\n/\t/'
+
+# Convert Windows line endings to Unix
+sed 's/\r$//' file.txt
+
+# Extract config values
+sed -n "s/^DB_HOST=//p" .env   # extract DB_HOST value from .env
+
+# Double-space a file (add blank line after each line)
+sed 'G' file
+
+# Remove duplicate blank lines
+sed '/^$/N; /^\n$/d' file
+```
+
+## Practical I/O Patterns
+
+```bash
+# ─── Read file line by line (correct way) ────────────────
+while IFS= read -r line || [[ -n "$line" ]]; do
+  # IFS= preserves leading/trailing whitespace
+  # -r prevents backslash interpretation
+  # || [[ -n "$line" ]] handles missing final newline
+  process "$line"
+done < /path/to/file
+
+# ─── Process CSV correctly ───────────────────────────────
+while IFS=',' read -r col1 col2 col3; do
+  echo "Col1: $col1, Col2: $col2, Col3: $col3"
+done < data.csv
+
+# ─── Write to file atomically ────────────────────────────
+# Write to temp file then move (prevents partial writes)
+tmpfile=$(mktemp)
+generate_output > "$tmpfile"
+mv "$tmpfile" /etc/myapp/config.txt   # atomic on same filesystem
+
+# ─── Tee output to log and stdout ────────────────────────
+LOGFILE="/var/log/myscript.log"
+exec > >(tee -a "$LOGFILE") 2>&1
+
+# ─── Process substitution diff ───────────────────────────
+# Compare sorted outputs without creating temp files
+diff \
+  <(find /etc -type f | sort) \
+  <(find /etc.bak -type f | sort) \
+  | grep '^[<>]'
+```

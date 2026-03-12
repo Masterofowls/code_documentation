@@ -1,0 +1,322 @@
+---
+title: SQLite Operations
+description: SQLite data types and type affinity, ROWID, WITHOUT ROWID tables, AUTOINCREMENT, transactions, prepared statements, ATTACH DATABASE, JSON functions, and FTS5.
+sidebar:
+  order: 3
+tags: [database, sql]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+## Data Types and Type Affinity
+
+SQLite uses **dynamic typing** — any column can store any type of value, regardless of the declared type. The declared type is a hint that determines **affinity** (how values are stored and compared):
+
+| Affinity | Storage | Declared Type Keywords |
+|---|---|---|
+| `TEXT` | UTF-8/UTF-16 string | `TEXT`, `CHAR`, `CLOB`, `VARCHAR` |
+| `NUMERIC` | Integer or real | `NUMERIC`, `DECIMAL`, `BOOLEAN`, `DATE`, `DATETIME` |
+| `INTEGER` | Signed integer (1–8 bytes) | `INT`, `INTEGER`, `TINYINT`, `BIGINT` |
+| `REAL` | 8-byte IEEE float | `REAL`, `FLOAT`, `DOUBLE` |
+| `BLOB` / NONE | No conversion | `BLOB`, unrecognized types |
+
+```sql
+-- SQLite allows this (dynamic typing):
+CREATE TABLE demo (col TEXT);
+INSERT INTO demo VALUES (42);      -- stores as INTEGER
+INSERT INTO demo VALUES (3.14);    -- stores as REAL
+INSERT INTO demo VALUES ('hello'); -- stores as TEXT
+INSERT INTO demo VALUES (NULL);    -- stores as NULL
+INSERT INTO demo VALUES (X'CAFE'); -- stores as BLOB
+
+-- typeof() reveals the actual stored type
+SELECT typeof(col) FROM demo;
+-- integer, real, text, null, blob
+```
+
+:::caution[Type affinity gotchas]
+String `'123'` is TEXT, but `123` is INTEGER. Comparisons between TEXT and INTEGER may not behave as expected. Always ensure your application inserts the correct type and use explicit `CAST()` when needed.
+:::
+
+### Comparison Rules
+
+```sql
+-- SQLite comparison order: NULL < INTEGER/REAL < TEXT < BLOB
+SELECT 1 < 'a';   -- returns 1 (TRUE): integer < text
+SELECT 'abc' < X'41';  -- returns 1 (TRUE): text < blob
+
+-- CAST for explicit conversion
+SELECT CAST('123' AS INTEGER) + 1;  -- 124
+SELECT CAST(123 AS TEXT);           -- '123'
+```
+
+## ROWID and INTEGER PRIMARY KEY
+
+Every SQLite table (unless declared `WITHOUT ROWID`) has a hidden `rowid` column — a 64-bit signed integer that uniquely identifies each row:
+
+```sql
+-- rowid is accessible
+SELECT rowid, * FROM users;
+
+-- INTEGER PRIMARY KEY is an ALIAS for rowid (not a separate column)
+CREATE TABLE users (
+  id    INTEGER PRIMARY KEY,   -- alias for rowid
+  email TEXT NOT NULL
+);
+-- id and rowid refer to the same value
+
+-- Accessing rowid aliases
+SELECT rowid, oid, _rowid_, id FROM users;  -- all four return the same value
+
+-- Non-alias primary key (creates a separate B-tree index)
+CREATE TABLE users (
+  id    TEXT PRIMARY KEY,   -- TEXT PK is NOT an alias for rowid
+  email TEXT NOT NULL
+);
+```
+
+## WITHOUT ROWID Tables
+
+Declare `WITHOUT ROWID` to store the table as a B-tree ordered by the primary key — eliminates the separate rowid B-tree. Best for tables with composite primary keys accessed primarily by PK:
+
+```sql
+-- Good candidate: many-to-many join table with composite PK
+CREATE TABLE user_roles (
+  user_id INTEGER NOT NULL,
+  role_id INTEGER NOT NULL,
+  granted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (user_id, role_id)
+) WITHOUT ROWID;
+
+-- Without ROWID benefits: smaller, faster PK lookups, no secondary rowid index
+-- Drawback: slower when accessing rows not by PK, cannot use rowid
+```
+
+## AUTOINCREMENT
+
+`AUTOINCREMENT` guarantees that a rowid is never reused — even after deletes:
+
+```sql
+-- Without AUTOINCREMENT: next id = max(existing rowid) + 1
+CREATE TABLE events (
+  id INTEGER PRIMARY KEY,  -- reuses IDs if max row was deleted
+  name TEXT
+);
+
+-- With AUTOINCREMENT: next id > max(ever used rowid)
+CREATE TABLE events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,  -- never reuses IDs
+  name TEXT
+);
+```
+
+:::tip[AUTOINCREMENT overhead]
+`AUTOINCREMENT` adds a small overhead (reads/writes to `sqlite_sequence` table). Use plain `INTEGER PRIMARY KEY` unless you specifically need to prevent ID reuse (e.g., for audit trails).
+:::
+
+## Transactions
+
+SQLite supports three transaction modes:
+
+```sql
+-- DEFERRED (default): acquires locks lazily
+BEGIN;                    -- or BEGIN DEFERRED;
+-- ... operations
+COMMIT;
+
+-- IMMEDIATE: acquires a write lock immediately, preventing other writers
+BEGIN IMMEDIATE;
+-- ... ensures no other writer can start during your transaction
+COMMIT;
+
+-- EXCLUSIVE: acquires the strongest lock — prevents all other connections
+BEGIN EXCLUSIVE;
+-- ... no other connection (even readers) can access the database
+COMMIT;
+```
+
+| Mode | Writers blocked? | Readers blocked? | Use When |
+|---|---|---|---|
+| `DEFERRED` | No (until first write) | No | Default; most reads |
+| `IMMEDIATE` | Yes | No | You know you'll write; WAL mode |
+| `EXCLUSIVE` | Yes | Yes | Upgrading schema; bulk import |
+
+### Savepoints
+
+```sql
+BEGIN;
+
+INSERT INTO orders (customer_id, total) VALUES (1, 100.00);
+
+SAVEPOINT sp1;
+
+INSERT INTO order_items (order_id, product_id, qty) VALUES (last_insert_rowid(), 5, 2);
+-- Suppose this fails...
+
+ROLLBACK TO SAVEPOINT sp1;  -- undo last insert, keep order
+
+INSERT INTO order_items (order_id, product_id, qty) VALUES (last_insert_rowid(), 7, 1);
+
+RELEASE SAVEPOINT sp1;
+COMMIT;
+```
+
+## Prepared Statements and Parameter Binding
+
+SQLite supports five parameter binding styles:
+
+```sql
+-- Positional (?)
+SELECT * FROM users WHERE email = ? AND status = ?
+
+-- Positional by index (?N)
+SELECT * FROM users WHERE email = ?1 AND status = ?2 AND email != ?1
+
+-- Named with colon (:name)
+SELECT * FROM users WHERE email = :email AND status = :status
+
+-- Named with @ (@name) — same as :name
+SELECT * FROM users WHERE email = @email
+
+-- Named with $ ($name) — same as :name, common in Tcl
+SELECT * FROM users WHERE id = $id
+```
+
+```python
+# Python: all binding styles work
+cursor.execute('SELECT * FROM users WHERE email = ?', ('alice@example.com',))
+cursor.execute('SELECT * FROM users WHERE email = :email', {'email': 'alice@example.com'})
+cursor.execute('SELECT * FROM users WHERE email = @email', {'email': 'alice@example.com'})
+```
+
+## ATTACH DATABASE
+
+ATTACH allows querying multiple SQLite databases in one session:
+
+```sql
+-- Attach a second database
+ATTACH DATABASE '/path/to/analytics.db' AS analytics;
+
+-- Now both databases are accessible
+SELECT u.name, a.page_views
+FROM main.users u
+JOIN analytics.user_stats a ON a.user_id = u.id;
+
+-- Cross-database insert
+INSERT INTO analytics.user_events (user_id, event)
+SELECT id, 'imported' FROM main.users;
+
+-- List attached databases
+PRAGMA database_list;
+
+-- Detach
+DETACH DATABASE analytics;
+```
+
+## JSON Functions (SQLite 3.38+)
+
+```sql
+-- json_object: construct a JSON object
+SELECT json_object('name', 'Alice', 'age', 30);
+-- {"name":"Alice","age":30}
+
+-- json_array: construct a JSON array
+SELECT json_array(1, 'two', 3.0, NULL);
+-- [1,"two",3.0,null]
+
+-- json_extract: extract a value (returns native SQLite type)
+SELECT json_extract('{"user":{"name":"Alice","age":30}}', '$.user.name');
+-- Alice
+
+-- Shorthand: ->> operator (SQLite 3.38+)
+SELECT '{"name":"Alice"}'->>'$.name';
+-- Alice
+
+-- json_patch: merge/update JSON
+SELECT json_patch('{"a":1,"b":2}', '{"b":99,"c":3}');
+-- {"a":1,"b":99,"c":3}
+
+-- json_each: expand JSON array to rows
+SELECT value FROM json_each('["red","green","blue"]');
+-- red / green / blue
+
+-- json_tree: expand nested JSON to rows
+SELECT key, value, type, path
+FROM json_tree('{"a":{"b":[1,2,3]}}');
+
+-- Store and query JSON in a column
+CREATE TABLE events (
+  id      INTEGER PRIMARY KEY,
+  payload TEXT NOT NULL  -- JSON stored as TEXT
+);
+
+INSERT INTO events (payload) VALUES ('{"type":"click","x":100,"y":200}');
+
+-- Index a JSON field with an expression index
+CREATE INDEX idx_events_type ON events (json_extract(payload, '$.type'));
+
+SELECT * FROM events WHERE json_extract(payload, '$.type') = 'click';
+```
+
+## FTS5 — Full-Text Search
+
+FTS5 is a virtual table extension for full-text search:
+
+```sql
+-- Create an FTS5 virtual table
+CREATE VIRTUAL TABLE articles_fts USING fts5(
+  title,
+  body,
+  content='articles',    -- external content table (optional)
+  content_rowid='id'
+);
+
+-- Simple FTS5 table (standalone, no external content)
+CREATE VIRTUAL TABLE articles_search USING fts5(title, body);
+
+-- Insert data
+INSERT INTO articles_search (title, body) VALUES
+  ('SQLite Performance', 'Tips for optimizing SQLite queries and indexes'),
+  ('PostgreSQL vs SQLite', 'Comparing embedded and server databases');
+
+-- Basic search
+SELECT * FROM articles_search WHERE articles_search MATCH 'sqlite';
+
+-- Phrase search
+SELECT * FROM articles_search WHERE articles_search MATCH '"sqlite performance"';
+
+-- Boolean operators
+SELECT * FROM articles_search WHERE articles_search MATCH 'sqlite AND performance';
+SELECT * FROM articles_search WHERE articles_search MATCH 'sqlite OR postgres';
+SELECT * FROM articles_search WHERE articles_search MATCH 'sqlite NOT postgres';
+
+-- Column-specific search
+SELECT * FROM articles_search WHERE articles_search MATCH 'title:sqlite';
+
+-- Prefix search
+SELECT * FROM articles_search WHERE articles_search MATCH 'optim*';
+
+-- Ranked results using BM25
+SELECT *, bm25(articles_search) AS rank
+FROM articles_search
+WHERE articles_search MATCH 'database'
+ORDER BY rank;
+
+-- Highlighted snippets
+SELECT
+  title,
+  highlight(articles_search, 1, '<b>', '</b>') AS highlighted_body,
+  snippet(articles_search, 1, '<b>', '</b>', '...', 10) AS snippet
+FROM articles_search
+WHERE articles_search MATCH 'sqlite';
+
+-- Rebuild FTS index
+INSERT INTO articles_search(articles_search) VALUES('rebuild');
+
+-- Optimize FTS index
+INSERT INTO articles_search(articles_search) VALUES('optimize');
+```
+
+:::tip[FTS5 vs FTS3/FTS4]
+Always use FTS5 — it's faster, has better ranking with `bm25()`, supports phrase search, and is the actively maintained version. FTS3 and FTS4 exist only for backwards compatibility.
+:::

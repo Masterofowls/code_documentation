@@ -1,0 +1,186 @@
+---
+title: SQLite Overview
+description: What is SQLite, serverless embedded design, comparison with server databases, use cases, file format, language bindings, and WAL mode overview.
+sidebar:
+  order: 1
+tags: [database, sql]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+SQLite is the world's most widely deployed database engine. Unlike PostgreSQL, MySQL, or SQL Server, SQLite is **serverless** — the entire database is a single file on disk, and the database engine is a C library linked directly into the application.
+
+## Serverless, Embedded Design
+
+SQLite requires:
+- No server process to start, manage, or monitor
+- No configuration files
+- No authentication or network setup
+- No installation (the library is often bundled with the language runtime)
+
+The entire database — schema, data, indexes, WAL files — lives in one or two files:
+
+```bash
+myapp.db        # main database file
+myapp.db-wal    # write-ahead log (when WAL mode is active)
+myapp.db-shm    # shared memory file (when WAL mode is active)
+```
+
+## SQLite vs PostgreSQL vs MySQL — When to Use Which
+
+| | SQLite | PostgreSQL | MySQL |
+|---|---|---|---|
+| **Architecture** | Embedded library | Client-server | Client-server |
+| **Setup** | Zero — just a file | Install + configure | Install + configure |
+| **Concurrent writes** | One writer at a time | Many concurrent writers | Many concurrent writers |
+| **Concurrent reads (WAL)** | Unlimited | Unlimited | Unlimited |
+| **Max database size** | 281 TB (theoretical) | Unlimited | 64 TB |
+| **Max row size** | 1 GB | 1.6 TB | 65,535 bytes |
+| **User management** | None (filesystem) | Full RBAC | Full RBAC |
+| **Network access** | Local file only | TCP/IP | TCP/IP |
+| **Replication** | Via Litestream / LiteFS | Streaming/logical | Binary log |
+| **JSON support** | Functions (3.38+) | JSONB (binary, indexed) | JSON (text) |
+| **Full-text search** | FTS5 extension | Built-in tsvector | Built-in FULLTEXT |
+| **Extensions** | Limited (loadable) | Extensive (PostGIS, etc.) | Limited |
+
+### When to Choose SQLite
+
+- **Mobile apps** — Android, iOS: each user has their own private database
+- **Desktop apps** — Electron, Tauri: local data store without requiring a server
+- **Development and testing** — in-memory SQLite replaces PostgreSQL/MySQL in tests
+- **Edge and serverless** — Cloudflare D1, Turso, Fly.io LiteFS run SQLite at the edge
+- **Small to medium web apps** — apps with infrequent writes and modest traffic (e.g., personal projects, internal tools)
+- **Application file format** — SQLite as the native file format for user data (like Photoshop .psd but queryable)
+- **Read-heavy workloads** — SQLite with WAL mode handles thousands of concurrent reads
+
+:::caution[When NOT to choose SQLite]
+Avoid SQLite when you need: high concurrent writes, multi-host access, row-level locking, advanced user/role management, replication to multiple read replicas, or PostgreSQL-specific features (JSONB, arrays, PostGIS).
+:::
+
+## SQLite Versions
+
+SQLite follows a single-version numbering scheme. As of 2024, the current stable version is **3.46.x** (released 2024). Key milestones:
+
+| Version | Feature |
+|---|---|
+| 3.7.0 (2010) | WAL mode |
+| 3.8.3 (2014) | WITH (CTEs), RECURSIVE |
+| 3.8.9 (2015) | Partial indexes |
+| 3.25.0 (2018) | Window functions |
+| 3.31.0 (2020) | Generated columns |
+| 3.35.0 (2021) | RETURNING clause, DROP COLUMN |
+| 3.38.0 (2022) | Built-in JSON functions (`json_extract` etc. no longer need extension) |
+| 3.39.0 (2022) | RIGHT and FULL OUTER JOIN |
+| 3.40.0 (2022) | WASM build, incremental blob |
+
+## File Format
+
+SQLite stores everything in a single cross-platform binary file:
+
+```bash
+# Common file extensions (all identical format)
+myapp.db
+myapp.sqlite
+myapp.sqlite3
+
+# Inspect the file
+sqlite3 myapp.db .schema
+
+# Check file integrity
+sqlite3 myapp.db "PRAGMA integrity_check;"
+
+# Compact the database file
+sqlite3 myapp.db "VACUUM;"
+```
+
+The SQLite file format is stable — databases created in 2004 open in 2024 without conversion.
+
+## SQLite in Popular Languages
+
+### Python
+
+```python
+import sqlite3
+
+conn = sqlite3.connect('myapp.db')
+cursor = conn.cursor()
+cursor.execute("SELECT * FROM users WHERE id = ?", (42,))
+row = cursor.fetchone()
+conn.close()
+```
+
+### Node.js (better-sqlite3)
+
+```javascript
+const Database = require('better-sqlite3');
+const db = new Database('myapp.db');
+const user = db.prepare('SELECT * FROM users WHERE id = ?').get(42);
+```
+
+### Rust (rusqlite)
+
+```rust
+use rusqlite::{Connection, Result};
+
+let conn = Connection::open("myapp.db")?;
+let user: String = conn.query_row(
+    "SELECT name FROM users WHERE id = ?1",
+    [42],
+    |row| row.get(0),
+)?;
+```
+
+### Go (database/sql + go-sqlite3)
+
+```go
+import (
+    "database/sql"
+    _ "github.com/mattn/go-sqlite3"
+)
+
+db, err := sql.Open("sqlite3", "./myapp.db")
+row := db.QueryRow("SELECT name FROM users WHERE id = ?", 42)
+```
+
+## WAL Mode Overview
+
+By default, SQLite uses **rollback journal** mode — all writes are exclusive. **WAL mode** (Write-Ahead Logging) dramatically improves concurrency:
+
+```sql
+PRAGMA journal_mode = WAL;
+-- Returns: wal
+
+-- Verify
+PRAGMA journal_mode;
+```
+
+WAL mode benefits:
+- **Readers don't block writers** and writers don't block readers
+- **Faster writes** — appending to WAL is faster than overwriting original pages
+- **Better crash recovery** — atomic commit without fsync on every write
+- Still only **one writer at a time** — multiple concurrent writers still serialize
+
+:::tip[Set WAL mode immediately after opening]
+Set `PRAGMA journal_mode = WAL` as the first operation on any SQLite database that will have concurrent readers. It persists to the database file — you only need to set it once.
+:::
+
+## Explore SQLite
+
+<CardGrid>
+  <Card title="Getting Started" icon="rocket">
+    SQLite CLI, Python sqlite3, Node.js better-sqlite3, WAL mode, and foreign keys.
+    [Getting Started →](/db/sqlite/getting-started)
+</Card>
+  <Card title="Operations" icon="list-format">
+    Data types, ROWID, transactions, JSON functions, and FTS5 full-text search.
+    [Operations →](/db/sqlite/operations)
+</Card>
+  <Card title="Optimization" icon="magnifier">
+    PRAGMAs, EXPLAIN QUERY PLAN, indexes, batch inserts, and concurrency.
+    [Optimization →](/db/sqlite/optimization)
+</Card>
+  <Card title="Use Cases" icon="approve-check-circle">
+    Python, Node.js, mobile, testing, edge deployments, Litestream, and WASM.
+    [Use Cases →](/db/sqlite/use-cases)
+</Card>
+</CardGrid>

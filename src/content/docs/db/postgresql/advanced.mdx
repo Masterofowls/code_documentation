@@ -1,0 +1,360 @@
+---
+title: Advanced PostgreSQL Features
+description: Window functions, CTEs, LATERAL joins, table partitioning, LISTEN/NOTIFY, advisory locks, sequences, writable CTEs, MERGE, PL/pgSQL, triggers, and pg_cron.
+sidebar:
+  order: 5
+tags: [database, sql]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+## CTEs with Materialization Control
+
+PostgreSQL 12+ allows explicit control over CTE materialization:
+
+```sql
+-- NOT MATERIALIZED: inline the CTE (optimizer can push down predicates)
+WITH active_orders AS NOT MATERIALIZED (
+  SELECT * FROM orders WHERE status = 'active'
+)
+SELECT * FROM active_orders WHERE customer_id = 42;
+-- Becomes: SELECT * FROM orders WHERE status='active' AND customer_id=42
+
+-- MATERIALIZED: force evaluation once (useful to prevent repeated expensive work)
+WITH expensive_calc AS MATERIALIZED (
+  SELECT customer_id, SUM(total) AS total_spend
+  FROM orders
+  GROUP BY customer_id
+)
+SELECT c.name, ec.total_spend
+FROM customers c
+JOIN expensive_calc ec ON ec.customer_id = c.id;
+```
+
+## LATERAL Joins
+
+`LATERAL` lets a subquery in `FROM` reference columns from preceding `FROM` entries:
+
+```sql
+-- Top-N per group: 3 most recent orders per customer
+SELECT c.id, c.name, o.id AS order_id, o.total, o.placed_at
+FROM customers c
+CROSS JOIN LATERAL (
+  SELECT id, total, placed_at
+  FROM orders
+  WHERE customer_id = c.id
+  ORDER BY placed_at DESC
+  LIMIT 3
+) o
+ORDER BY c.name, o.placed_at DESC;
+
+-- Apply a function to each row
+SELECT p.id, p.name, stats.*
+FROM products p
+CROSS JOIN LATERAL (
+  SELECT
+    COUNT(oi.id) AS times_ordered,
+    SUM(oi.quantity) AS units_sold,
+    AVG(oi.unit_price) AS avg_sell_price
+  FROM order_items oi
+  WHERE oi.product_id = p.id
+) stats
+ORDER BY stats.units_sold DESC;
+```
+
+## Table Partitioning
+
+Declarative partitioning splits a large table into smaller physical pieces (partitions):
+
+### RANGE Partitioning
+
+```sql
+-- Parent table
+CREATE TABLE events (
+  id         BIGSERIAL,
+  occurred_at TIMESTAMPTZ NOT NULL,
+  type        TEXT NOT NULL,
+  payload     JSONB,
+  PRIMARY KEY (id, occurred_at)   -- partition key must be in PK
+) PARTITION BY RANGE (occurred_at);
+
+-- Create partitions
+CREATE TABLE events_2024_q1 PARTITION OF events
+  FOR VALUES FROM ('2024-01-01') TO ('2024-04-01');
+
+CREATE TABLE events_2024_q2 PARTITION OF events
+  FOR VALUES FROM ('2024-04-01') TO ('2024-07-01');
+
+-- Default partition catches rows not in any range
+CREATE TABLE events_default PARTITION OF events DEFAULT;
+
+-- Create index on parent — automatically applies to all partitions
+CREATE INDEX ON events (occurred_at);
+CREATE INDEX ON events (type, occurred_at);
+```
+
+### LIST Partitioning
+
+```sql
+CREATE TABLE orders (
+  id          BIGSERIAL,
+  region      TEXT NOT NULL,
+  total       NUMERIC(12, 2),
+  PRIMARY KEY (id, region)
+) PARTITION BY LIST (region);
+
+CREATE TABLE orders_us   PARTITION OF orders FOR VALUES IN ('US', 'CA');
+CREATE TABLE orders_eu   PARTITION OF orders FOR VALUES IN ('GB', 'DE', 'FR', 'NL');
+CREATE TABLE orders_apac PARTITION OF orders FOR VALUES IN ('JP', 'AU', 'SG');
+CREATE TABLE orders_rest PARTITION OF orders DEFAULT;
+```
+
+### HASH Partitioning
+
+```sql
+-- Distribute evenly across N partitions
+CREATE TABLE users (
+  id    BIGSERIAL PRIMARY KEY,
+  email TEXT NOT NULL
+) PARTITION BY HASH (id);
+
+CREATE TABLE users_0 PARTITION OF users FOR VALUES WITH (MODULUS 4, REMAINDER 0);
+CREATE TABLE users_1 PARTITION OF users FOR VALUES WITH (MODULUS 4, REMAINDER 1);
+CREATE TABLE users_2 PARTITION OF users FOR VALUES WITH (MODULUS 4, REMAINDER 2);
+CREATE TABLE users_3 PARTITION OF users FOR VALUES WITH (MODULUS 4, REMAINDER 3);
+```
+
+### Partition Pruning
+
+```sql
+-- PostgreSQL automatically excludes irrelevant partitions
+EXPLAIN SELECT * FROM events
+WHERE occurred_at BETWEEN '2024-01-01' AND '2024-03-31';
+-- Only events_2024_q1 is scanned (partition pruning)
+
+-- Verify pruning in EXPLAIN output:
+-- "Partitions selected: 1 out of 8"
+```
+
+## LISTEN / NOTIFY
+
+LISTEN/NOTIFY implements pub/sub messaging between database connections:
+
+```sql
+-- In connection 1 (listener)
+LISTEN user_events;
+-- Now waiting...
+
+-- In connection 2 (publisher)
+NOTIFY user_events, '{"user_id": 42, "event": "signup", "timestamp": "2024-01-15T10:00:00Z"}';
+-- Connection 1 receives the notification with the payload
+
+-- Trigger-based notification
+CREATE OR REPLACE FUNCTION notify_order_change()
+RETURNS TRIGGER AS $$
+BEGIN
+  PERFORM pg_notify(
+    'order_updates',
+    json_build_object(
+      'operation', TG_OP,
+      'id', NEW.id,
+      'status', NEW.status
+    )::TEXT
+  );
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER order_change_notify
+  AFTER INSERT OR UPDATE ON orders
+  FOR EACH ROW
+  EXECUTE FUNCTION notify_order_change();
+```
+
+## Advisory Locks
+
+Advisory locks are application-level locks managed by PostgreSQL — useful for distributed mutual exclusion:
+
+```sql
+-- Session-level advisory lock (released when session ends or explicitly)
+SELECT pg_advisory_lock(12345);        -- blocks until acquired
+SELECT pg_try_advisory_lock(12345);    -- returns FALSE immediately if not available
+SELECT pg_advisory_unlock(12345);
+
+-- Transaction-level advisory lock (auto-released at end of transaction)
+BEGIN;
+SELECT pg_advisory_xact_lock(42);
+-- ... do work exclusively
+COMMIT;   -- lock released automatically
+
+-- Lock with two int4 arguments (useful for type + id combinations)
+SELECT pg_advisory_lock(1, 42);   -- lock type=1, id=42
+
+-- Use case: prevent concurrent job processing
+BEGIN;
+SELECT pg_advisory_xact_lock(hashtext('process-queue-worker'));
+SELECT * FROM job_queue WHERE status = 'pending' LIMIT 1 FOR UPDATE SKIP LOCKED;
+-- Process the job...
+UPDATE job_queue SET status = 'processing' WHERE id = :job_id;
+COMMIT;
+```
+
+## Sequences
+
+```sql
+-- Create a custom sequence
+CREATE SEQUENCE invoice_number_seq
+  START 100000
+  INCREMENT 1
+  MINVALUE 100000
+  MAXVALUE 999999
+  CYCLE;    -- restart from MINVALUE when MAXVALUE is reached
+
+-- Use the sequence
+SELECT nextval('invoice_number_seq');   -- get next value
+SELECT currval('invoice_number_seq');   -- current value (in this session)
+SELECT lastval();                        -- last value returned by any sequence in session
+
+-- Reset / set
+SELECT setval('invoice_number_seq', 200000);
+SELECT setval('invoice_number_seq', 200000, false);  -- next call returns 200000
+
+-- View all sequences
+SELECT * FROM information_schema.sequences WHERE sequence_schema = 'public';
+```
+
+## Writable CTEs
+
+CTEs can contain INSERT/UPDATE/DELETE — enabling complex multi-step mutations in one statement:
+
+```sql
+-- Move rows between tables atomically
+WITH deleted_rows AS (
+  DELETE FROM active_sessions
+  WHERE last_seen < now() - INTERVAL '24 hours'
+  RETURNING *
+)
+INSERT INTO archived_sessions
+SELECT *, now() AS archived_at FROM deleted_rows;
+
+-- Upsert with logging
+WITH upsert AS (
+  INSERT INTO user_stats (user_id, login_count)
+  VALUES (42, 1)
+  ON CONFLICT (user_id)
+  DO UPDATE SET login_count = user_stats.login_count + 1
+  RETURNING user_id, login_count, (xmax <> 0) AS was_updated
+)
+INSERT INTO audit_log (user_id, action, detail)
+SELECT user_id, CASE WHEN was_updated THEN 'increment' ELSE 'create' END, login_count::TEXT
+FROM upsert;
+```
+
+## MERGE Statement (PostgreSQL 15+)
+
+```sql
+MERGE INTO target_inventory AS t
+USING source_shipment AS s ON t.product_id = s.product_id
+WHEN MATCHED AND s.quantity > 0 THEN
+  UPDATE SET
+    quantity   = t.quantity + s.quantity,
+    updated_at = now()
+WHEN MATCHED AND s.quantity = 0 THEN
+  DELETE
+WHEN NOT MATCHED THEN
+  INSERT (product_id, quantity, created_at)
+  VALUES (s.product_id, s.quantity, now());
+```
+
+## PL/pgSQL Functions and Procedures
+
+```sql
+-- Function returning a table
+CREATE OR REPLACE FUNCTION get_customer_orders(p_customer_id INTEGER, p_limit INTEGER DEFAULT 10)
+RETURNS TABLE(order_id INTEGER, total NUMERIC, status TEXT, placed_at TIMESTAMPTZ)
+LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN QUERY
+    SELECT o.id, o.total, o.status, o.placed_at
+    FROM orders o
+    WHERE o.customer_id = p_customer_id
+    ORDER BY o.placed_at DESC
+    LIMIT p_limit;
+END;
+$$;
+
+-- Usage
+SELECT * FROM get_customer_orders(42, 5);
+
+-- PL/pgSQL with control flow
+CREATE OR REPLACE FUNCTION tier_discount(total NUMERIC)
+RETURNS NUMERIC LANGUAGE plpgsql AS $$
+DECLARE
+  v_discount NUMERIC;
+BEGIN
+  IF total >= 1000 THEN
+    v_discount := 0.15;
+  ELSIF total >= 500 THEN
+    v_discount := 0.10;
+  ELSIF total >= 100 THEN
+    v_discount := 0.05;
+  ELSE
+    v_discount := 0;
+  END IF;
+  RETURN total * (1 - v_discount);
+EXCEPTION
+  WHEN OTHERS THEN
+    RAISE NOTICE 'Error in tier_discount: %', SQLERRM;
+    RETURN total;
+END;
+$$;
+
+-- Loop example
+CREATE OR REPLACE PROCEDURE process_pending_orders()
+LANGUAGE plpgsql AS $$
+DECLARE
+  r orders%ROWTYPE;
+BEGIN
+  FOR r IN
+    SELECT * FROM orders WHERE status = 'pending' ORDER BY placed_at
+  LOOP
+    -- Process each order
+    UPDATE orders SET status = 'processing' WHERE id = r.id;
+    RAISE NOTICE 'Processed order %', r.id;
+  END LOOP;
+END;
+$$;
+```
+
+## pg_cron Extension
+
+```sql
+-- Install pg_cron (requires superuser, add to shared_preload_libraries)
+CREATE EXTENSION pg_cron;
+
+-- Schedule a job
+SELECT cron.schedule(
+  'vacuum-orders',                   -- job name
+  '0 3 * * *',                       -- cron expression (3 AM daily)
+  'VACUUM ANALYZE orders'
+);
+
+-- Schedule with a database
+SELECT cron.schedule_in_database(
+  'cleanup-sessions',
+  '*/15 * * * *',
+  'DELETE FROM sessions WHERE expires_at < now()',
+  'mydb'
+);
+
+-- List scheduled jobs
+SELECT * FROM cron.job;
+
+-- View recent run history
+SELECT * FROM cron.job_run_details
+ORDER BY start_time DESC
+LIMIT 20;
+
+-- Unschedule a job
+SELECT cron.unschedule('vacuum-orders');
+```

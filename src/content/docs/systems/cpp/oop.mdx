@@ -1,0 +1,409 @@
+---
+title: Object-Oriented Programming in C++
+description: Classes, constructors, RAII, Rule of 0/3/5, copy and move semantics, operator overloading, inheritance, virtual functions, and CRTP.
+sidebar:
+  order: 3
+tags: [systems, cpp, c]
+---
+
+import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Object-Oriented Programming in C++
+
+## Classes in Depth
+
+```cpp
+#include <iostream>
+#include <string>
+
+class BankAccount {
+public:
+    // Constructors
+    BankAccount(std::string owner, double initial_balance)
+        : owner_(std::move(owner)), balance_(initial_balance)
+    {}
+
+    // Const member function — cannot modify members (except mutable)
+    [[nodiscard]] double balance() const { return balance_; }
+    [[nodiscard]] const std::string& owner() const { return owner_; }
+
+    // Mutating member function
+    bool deposit(double amount) {
+        if (amount <= 0) return false;
+        balance_ += amount;
+        ++transaction_count_;
+        return true;
+    }
+
+    bool withdraw(double amount) {
+        if (amount <= 0 || amount > balance_) return false;
+        balance_ -= amount;
+        ++transaction_count_;
+        return true;
+    }
+
+    // this pointer — pointer to current object
+    BankAccount& transfer_to(BankAccount& other, double amount) {
+        if (withdraw(amount)) {
+            other.deposit(amount);
+        }
+        return *this;   // return reference for chaining
+    }
+
+    // mutable — can be modified in const functions
+    mutable int debug_access_count_ = 0;
+    int transactions() const {
+        ++debug_access_count_;  // allowed in const function because mutable
+        return transaction_count_;
+    }
+
+    // friend — grants access to private members from another class/function
+    friend std::ostream& operator<<(std::ostream& os, const BankAccount& acct);
+    friend class Auditor;   // Auditor can access private members
+
+    // static member — belongs to class, not instance
+    static int total_accounts;
+    static int get_total() { return total_accounts; }
+
+private:
+    std::string owner_;
+    double      balance_;
+    int         transaction_count_ = 0;
+};
+
+int BankAccount::total_accounts = 0;  // static member definition
+
+std::ostream& operator<<(std::ostream& os, const BankAccount& acct) {
+    return os << "Account[" << acct.owner_ << ": $" << acct.balance_ << "]";
+}
+```
+
+## Constructors — All Variants
+
+```cpp
+#include <string>
+#include <vector>
+#include <iostream>
+
+class MyString {
+public:
+    // Default constructor
+    MyString() : data_(nullptr), size_(0) {}
+
+    // Parameterized constructor
+    explicit MyString(const char* str);
+
+    // Delegating constructor (C++11) — call another constructor
+    MyString(size_t count, char ch)
+        : MyString()   // delegate to default
+    {
+        size_ = count;
+        data_ = new char[size_ + 1];
+        for (size_t i = 0; i < size_; i++) data_[i] = ch;
+        data_[size_] = '\0';
+    }
+
+    // Copy constructor
+    MyString(const MyString& other)
+        : size_(other.size_), data_(new char[other.size_ + 1])
+    {
+        memcpy(data_, other.data_, size_ + 1);
+    }
+
+    // Move constructor (C++11) — steal resources from temporary
+    MyString(MyString&& other) noexcept
+        : data_(other.data_), size_(other.size_)
+    {
+        other.data_ = nullptr;  // leave other in valid but unspecified state
+        other.size_ = 0;
+    }
+
+    // Copy assignment
+    MyString& operator=(const MyString& other) {
+        if (this != &other) {           // self-assignment check
+            delete[] data_;
+            size_ = other.size_;
+            data_ = new char[size_ + 1];
+            memcpy(data_, other.data_, size_ + 1);
+        }
+        return *this;
+    }
+
+    // Move assignment (C++11)
+    MyString& operator=(MyString&& other) noexcept {
+        if (this != &other) {
+            delete[] data_;
+            data_       = other.data_;
+            size_       = other.size_;
+            other.data_ = nullptr;
+            other.size_ = 0;
+        }
+        return *this;
+    }
+
+    // Destructor
+    ~MyString() { delete[] data_; }
+
+    [[nodiscard]] size_t size() const { return size_; }
+    [[nodiscard]] const char* c_str() const { return data_ ? data_ : ""; }
+
+private:
+    char*  data_;
+    size_t size_;
+};
+```
+
+## Rule of 0, 3, and 5
+
+:::tip[Rule of Zero (Preferred)]
+If your class manages no resources directly (uses RAII types like `std::unique_ptr`, `std::string`, `std::vector`), declare **no** destructor, copy constructor, or copy assignment. The compiler-generated versions are correct.
+:::
+
+```cpp
+// Rule of Zero — let RAII members handle everything
+class Good {
+    std::string name_;           // manages its own memory
+    std::vector<int> data_;      // manages its own memory
+    std::unique_ptr<Foo> ptr_;   // manages its own memory
+    // No destructor, copy/move ops needed! All auto-generated are correct.
+};
+
+// Rule of Three — if you define one of these, define all three
+// (pre-C++11, or when Rule of Zero isn't applicable)
+class RuleOfThree {
+    char* buffer_;
+public:
+    ~RuleOfThree()                          { delete[] buffer_; }
+    RuleOfThree(const RuleOfThree& other)   { /* deep copy */ }
+    RuleOfThree& operator=(const RuleOfThree& other) { /* deep copy */ return *this; }
+};
+
+// Rule of Five — C++11: if you define any of these, define all five
+class RuleOfFive {
+    char* buffer_;
+    size_t size_;
+public:
+    ~RuleOfFive()                               { delete[] buffer_; }
+    RuleOfFive(const RuleOfFive&)               { /* deep copy */ }
+    RuleOfFive& operator=(const RuleOfFive&)    { /* deep copy */ return *this; }
+    RuleOfFive(RuleOfFive&& o) noexcept         { buffer_=o.buffer_; o.buffer_=nullptr; size_=o.size_; o.size_=0; }
+    RuleOfFive& operator=(RuleOfFive&& o) noexcept {
+        if (this != &o) { delete[] buffer_; buffer_=o.buffer_; o.buffer_=nullptr; size_=o.size_; o.size_=0; }
+        return *this;
+    }
+};
+```
+
+## Operator Overloading
+
+```cpp
+#include <iostream>
+#include <compare>   // C++20 spaceship
+
+struct Vec2 {
+    float x, y;
+
+    // Arithmetic operators
+    Vec2 operator+(const Vec2& o) const { return {x+o.x, y+o.y}; }
+    Vec2 operator-(const Vec2& o) const { return {x-o.x, y-o.y}; }
+    Vec2 operator*(float s)       const { return {x*s, y*s}; }
+    Vec2& operator+=(const Vec2& o) { x+=o.x; y+=o.y; return *this; }
+
+    // Unary
+    Vec2 operator-() const { return {-x, -y}; }
+
+    // Subscript operator
+    float& operator[](int i) { return i == 0 ? x : y; }
+    const float& operator[](int i) const { return i == 0 ? x : y; }
+
+    // Function call operator
+    float operator()(float t) const { return x + (y - x) * t; }  // lerp
+
+    // Spaceship operator (C++20) — generates ==, !=, <, <=, >, >=
+    auto operator<=>(const Vec2&) const = default;
+
+    // Stream output (friend, non-member)
+    friend std::ostream& operator<<(std::ostream& os, const Vec2& v) {
+        return os << '(' << v.x << ", " << v.y << ')';
+    }
+
+    // Conversion operator
+    explicit operator bool() const { return x != 0.0f || y != 0.0f; }
+};
+
+// Binary operator as free function (preferred when symmetric)
+Vec2 operator*(float s, const Vec2& v) { return {s*v.x, s*v.y}; }
+
+// Prefix and postfix increment
+struct Counter {
+    int value = 0;
+    Counter& operator++() { ++value; return *this; }    // prefix ++c
+    Counter  operator++(int) { Counter tmp=*this; ++value; return tmp; }  // postfix c++
+};
+
+int main()
+{
+    Vec2 a{1, 2}, b{3, 4};
+    std::cout << a + b << '\n';    // (4, 6)
+    std::cout << 2.0f * a << '\n'; // (2, 4)
+
+    if (a) std::cout << "a is non-zero\n";
+
+    std::cout << (a < b) << '\n';  // 1 (from spaceship <=>)
+    return 0;
+}
+```
+
+## Inheritance and Virtual Functions
+
+```cpp
+#include <iostream>
+#include <memory>
+#include <vector>
+#include <string>
+
+// Abstract base class
+class Shape {
+public:
+    Shape(std::string name) : name_(std::move(name)) {}
+
+    // Pure virtual — must be overridden (makes class abstract)
+    [[nodiscard]] virtual double area()      const = 0;
+    [[nodiscard]] virtual double perimeter() const = 0;
+
+    // Virtual with default implementation
+    virtual void describe() const {
+        std::cout << name_ << ": area=" << area()
+                  << " perimeter=" << perimeter() << '\n';
+    }
+
+    // Non-virtual — not overridable (no overhead)
+    [[nodiscard]] const std::string& name() const { return name_; }
+
+    // CRITICAL: virtual destructor for polymorphic base classes
+    virtual ~Shape() = default;
+
+protected:
+    std::string name_;
+};
+
+class Circle final : public Shape {
+public:
+    explicit Circle(double radius)
+        : Shape("Circle"), radius_(radius) {}
+
+    [[nodiscard]] double area()      const override { return 3.14159 * radius_ * radius_; }
+    [[nodiscard]] double perimeter() const override { return 2.0 * 3.14159 * radius_; }
+
+private:
+    double radius_;
+};
+
+class Rectangle : public Shape {
+public:
+    Rectangle(double w, double h)
+        : Shape("Rectangle"), width_(w), height_(h) {}
+
+    [[nodiscard]] double area()      const override { return width_ * height_; }
+    [[nodiscard]] double perimeter() const override { return 2.0 * (width_ + height_); }
+
+private:
+    double width_, height_;
+};
+
+// Virtual dispatch: vtable lookup at runtime
+void polymorphic_demo()
+{
+    std::vector<std::unique_ptr<Shape>> shapes;
+    shapes.push_back(std::make_unique<Circle>(5.0));
+    shapes.push_back(std::make_unique<Rectangle>(4.0, 6.0));
+    shapes.push_back(std::make_unique<Circle>(2.5));
+
+    for (const auto& s : shapes) {
+        s->describe();    // virtual dispatch — correct subclass method called
+    }
+}
+```
+
+## Multiple Inheritance and Diamond Problem
+
+```cpp
+// Diamond problem — B and C both inherit A; D inherits B and C
+// Without virtual inheritance: D has TWO copies of A
+struct A { int value = 0; };
+struct B :         public A {};   // B has A::value
+struct C :         public A {};   // C has A::value
+struct D : public B, public C {}; // D has B::A::value AND C::A::value (ambiguous!)
+
+// With virtual inheritance — D has ONE shared copy of A
+struct A2 { int value = 0; void f() {} };
+struct B2 : virtual public A2 {};
+struct C2 : virtual public A2 {};
+struct D2 : public B2, public C2 {};  // single A2::value (the "diamond fix")
+
+void diamond_demo()
+{
+    D2 d;
+    d.value = 42;   // unambiguous — only one copy
+    d.f();          // unambiguous
+}
+```
+
+## CRTP — Curiously Recurring Template Pattern
+
+```cpp
+// CRTP: base class parameterized by derived class
+// Enables static polymorphism (no vtable overhead)
+template<typename Derived>
+class Printable {
+public:
+    void print() const {
+        // Cast to derived type — static dispatch, not virtual
+        static_cast<const Derived*>(this)->do_print();
+    }
+    void println() const { print(); std::cout << '\n'; }
+};
+
+class Foo : public Printable<Foo> {
+public:
+    void do_print() const { std::cout << "Foo(value=" << value_ << ")"; }
+    int value_ = 42;
+};
+
+class Bar : public Printable<Bar> {
+public:
+    void do_print() const { std::cout << "Bar(name=" << name_ << ")"; }
+    std::string name_ = "hello";
+};
+
+// CRTP for adding operators automatically
+template<typename T>
+struct Comparable {
+    bool operator!=(const T& o) const { return !(*static_cast<const T*>(this) == o); }
+    bool operator>(const T& o)  const { return o < *static_cast<const T*>(this); }
+    bool operator<=(const T& o) const { return !(o < *static_cast<const T*>(this)); }
+    bool operator>=(const T& o) const { return !(*static_cast<const T*>(this) < o); }
+    // Only need to define operator== and operator< in Derived
+};
+
+struct Point : Comparable<Point> {
+    int x, y;
+    bool operator==(const Point& o) const { return x==o.x && y==o.y; }
+    bool operator< (const Point& o) const { return x==o.x ? y<o.y : x<o.x; }
+};
+
+int main()
+{
+    Foo f; f.println();   // Foo(value=42)
+    Bar b; b.println();   // Bar(name=hello)
+
+    Point p1{1,2}, p2{1,3};
+    std::cout << (p1 < p2) << ' ' << (p1 != p2) << '\n';  // 1 1
+    polymorphic_demo();
+    return 0;
+}
+```
+
+:::tip[CRTP vs Virtual Dispatch]
+CRTP eliminates vtable overhead but requires knowing the concrete type at compile time. Virtual dispatch works with runtime-polymorphic collections (`vector<unique_ptr<Base>>`). Use CRTP for performance-critical hot paths; virtual dispatch for plugin/extensible architectures.
+:::

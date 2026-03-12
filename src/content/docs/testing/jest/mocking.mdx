@@ -1,6 +1,6 @@
 ---
 title: Mocking in Jest
-description: Master Jest's mocking system — jest.fn(), jest.spyOn(), jest.mock() for modules, timer mocking, ES module mocking, and strategies for clearing and resetting mocks between tests.
+description: Master Jest's mocking system — jest.fn(), jest.spyOn(), jest.mock() for modules, timer mocking, ES module mocking, and strategies for clearing and resetting mock state.
 sidebar:
   order: 4
 tags: [testing, javascript]
@@ -8,166 +8,217 @@ tags: [testing, javascript]
 
 import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-Mocking is the practice of replacing real dependencies with controlled substitutes during tests. Jest provides a complete, built-in mocking system that requires no external libraries.
+Mocking is the practice of replacing real dependencies with controlled substitutes during testing. Jest provides a rich, integrated mocking system that covers functions, modules, timers, and the system clock.
 
-## `jest.fn()` — Mock Functions
+## jest.fn() — Mock Functions
 
-`jest.fn()` creates a standalone mock function that records every call made to it.
-
-### Basic Usage
+`jest.fn()` creates a mock function that records all calls, arguments, and return values. Use it to replace callbacks, event handlers, or injected dependencies.
 
 ```typescript
-const mockAdd = jest.fn();
+// Create a basic mock function
+const mockCallback = jest.fn();
 
-mockAdd(1, 2);
-mockAdd(3, 4);
+// Call it
+mockCallback('hello', 42);
+mockCallback('world');
 
-expect(mockAdd).toHaveBeenCalledTimes(2);
-expect(mockAdd).toHaveBeenCalledWith(1, 2);
-expect(mockAdd).toHaveBeenLastCalledWith(3, 4);
-expect(mockAdd).toHaveBeenNthCalledWith(1, 1, 2);
+// Inspect the call record
+expect(mockCallback).toHaveBeenCalledTimes(2);
+expect(mockCallback).toHaveBeenCalledWith('hello', 42);
+expect(mockCallback).toHaveBeenLastCalledWith('world');
+expect(mockCallback).toHaveBeenNthCalledWith(1, 'hello', 42);
+
+// Access raw call data
+console.log(mockCallback.mock.calls);
+// [['hello', 42], ['world']]
+console.log(mockCallback.mock.results);
+// [{ type: 'return', value: undefined }, ...]
 ```
 
 ### Controlling Return Values
 
 ```typescript
-const mockFetch = jest.fn();
+const mockFn = jest.fn();
 
-// Return the same value on every call
-mockFetch.mockReturnValue({ status: 200, data: 'ok' });
+// Always return the same value
+mockFn.mockReturnValue(42);
+mockFn(); // → 42
+mockFn(); // → 42
 
-// Return different values on successive calls
-mockFetch
-  .mockReturnValueOnce({ status: 200 })
-  .mockReturnValueOnce({ status: 404 })
-  .mockReturnValue({ status: 500 }); // default for all remaining calls
-```
+// Return a sequence of values, then fall back to default
+mockFn
+  .mockReturnValueOnce('first')
+  .mockReturnValueOnce('second')
+  .mockReturnValue('default');
 
-### Controlling Resolved / Rejected Promises
+mockFn(); // → 'first'
+mockFn(); // → 'second'
+mockFn(); // → 'default'
+mockFn(); // → 'default'
 
-```typescript
-const mockGetUser = jest.fn();
+// Return a resolved Promise (for async functions)
+const mockAsync = jest.fn().mockResolvedValue({ data: [] });
+await mockAsync(); // → { data: [] }
 
-// Resolve with a value
-mockGetUser.mockResolvedValue({ id: 1, name: 'Alice' });
+// Return a rejected Promise
+const mockFailing = jest.fn().mockRejectedValue(new Error('Network error'));
+await expect(mockFailing()).rejects.toThrow('Network error');
 
-// Reject with an error
-mockGetUser.mockRejectedValue(new Error('Network error'));
-
-// Once variants
-mockGetUser
-  .mockResolvedValueOnce({ id: 1, name: 'Alice' })
-  .mockRejectedValueOnce(new Error('Rate limited'));
+// Sequence with async values
+mockAsync
+  .mockResolvedValueOnce({ data: ['item1'] })
+  .mockRejectedValueOnce(new Error('timeout'))
+  .mockResolvedValue({ data: [] });
 ```
 
 ### Custom Implementations
 
 ```typescript
+// mockImplementation — full custom logic
 const mockMultiply = jest.fn().mockImplementation((a: number, b: number) => a * b);
-expect(mockMultiply(3, 4)).toBe(12);
+mockMultiply(3, 4); // → 12
 
-// One-time implementation — reverts to default after one call
-const mockRandom = jest.fn()
-  .mockImplementationOnce(() => 0.5)
-  .mockImplementation(() => Math.random());
+// mockImplementationOnce — custom logic for the next call only
+const mockFn = jest.fn()
+  .mockImplementationOnce(() => 'special first call')
+  .mockImplementation(() => 'default');
 
-expect(mockRandom()).toBe(0.5);    // first call
-expect(mockRandom()).not.toBe(0.5); // subsequent calls use Math.random
+mockFn(); // → 'special first call'
+mockFn(); // → 'default'
+
+// Pass through to original implementation
+const original = (x: number) => x * 2;
+const spy = jest.fn(original); // wraps the original
+spy(5); // → 10, but call is still recorded
 ```
 
-### Inspecting Call History
+### Practical Example: Testing a Service
 
 ```typescript
-const mockSave = jest.fn();
+// services/notification.service.ts
+export interface NotificationService {
+  send(userId: string, message: string): Promise<void>;
+}
 
-mockSave({ id: 1 });
-mockSave({ id: 2 });
+// services/order.service.ts
+export class OrderService {
+  constructor(private notifications: NotificationService) {}
 
-// Access call arguments
-console.log(mockSave.mock.calls);
-// [[{ id: 1 }], [{ id: 2 }]]
+  async placeOrder(userId: string, items: string[]) {
+    // ... process order
+    await this.notifications.send(userId, `Order confirmed: ${items.length} items`);
+    return { orderId: 'ord-123', status: 'confirmed' };
+  }
+}
 
-// Access return values
-console.log(mockSave.mock.results);
-// [{ type: 'return', value: undefined }, ...]
+// services/order.service.test.ts
+describe('OrderService', () => {
+  it('sends a confirmation notification after placing an order', async () => {
+    const mockNotify = jest.fn<() => Promise<void>>().mockResolvedValue();
+    const service = new OrderService({ send: mockNotify });
 
-// Access instances (when used as a constructor)
-console.log(mockSave.mock.instances);
+    await service.placeOrder('user-1', ['shirt', 'pants']);
+
+    expect(mockNotify).toHaveBeenCalledOnce();
+    expect(mockNotify).toHaveBeenCalledWith(
+      'user-1',
+      'Order confirmed: 2 items'
+    );
+  });
+});
 ```
 
----
+## jest.spyOn() — Spying on Existing Methods
 
-## `jest.spyOn` — Non-Replacing Spies
-
-`jest.spyOn` creates a spy on an _existing_ method without replacing its implementation. It lets you observe calls while the real function continues to execute.
+`jest.spyOn()` creates a mock function that wraps an existing method, recording calls while optionally changing the behavior. Unlike `jest.fn()`, spies can be easily restored.
 
 ```typescript
-const mathObj = {
-  add: (a: number, b: number) => a + b,
-};
+// Spy without replacing behavior
+const warnSpy = jest.spyOn(console, 'warn');
 
-const spy = jest.spyOn(mathObj, 'add');
+someFunction(); // internally calls console.warn('...')
 
-const result = mathObj.add(2, 3);
+expect(warnSpy).toHaveBeenCalled();
+expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('deprecated'));
 
-expect(result).toBe(5);               // real implementation ran
-expect(spy).toHaveBeenCalledWith(2, 3);
-expect(spy).toHaveBeenCalledTimes(1);
+// Restore original implementation
+warnSpy.mockRestore();
 ```
-
-### Overriding the Implementation
-
-You can replace the spy's implementation temporarily:
 
 ```typescript
-const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+// Spy and replace behavior
+const mathSpy = jest.spyOn(Math, 'random').mockReturnValue(0.5);
 
-// Code under test calls console.error internally
-runSomethingThatLogsErrors();
+const result = generateRandomId(); // uses Math.random internally
+expect(result).toBe('id-0.5'); // deterministic output
 
-expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Warning'));
-
-// Restore the real console.error
-consoleSpy.mockRestore();
+mathSpy.mockRestore(); // cleanup
 ```
-
-### Spying on Class Methods
 
 ```typescript
-import { UserService } from './UserService';
+// Spy on a class method
+import { UserRepository } from './UserRepository';
 
-const service = new UserService();
-const spy = jest.spyOn(service, 'findById').mockResolvedValue({ id: 1, name: 'Alice' });
+const findByIdSpy = jest
+  .spyOn(UserRepository.prototype, 'findById')
+  .mockResolvedValue({ id: 1, name: 'Alice' });
 
-const user = await service.findById(1);
+const user = await new UserRepository().findById(1);
+expect(user.name).toBe('Alice');
 
-expect(user).toEqual({ id: 1, name: 'Alice' });
-expect(spy).toHaveBeenCalledWith(1);
-
-spy.mockRestore();
+findByIdSpy.mockRestore();
 ```
 
-:::tip[spyOn vs fn()]
-Use `jest.spyOn` when you want to observe calls to an existing method on a real object, optionally overriding its behaviour. Use `jest.fn()` for standalone mock functions that don't replace an existing implementation.
+:::tip[jest.spyOn vs jest.fn()]
+Use `jest.spyOn()` when you want to monitor calls to an existing method without fully replacing it, and when you need clean `mockRestore()` behavior. Use `jest.fn()` when creating a dependency from scratch (constructor injection, callbacks).
 :::
 
----
+## jest.mock() — Module Mocking
 
-## `jest.mock()` — Module Mocking
-
-`jest.mock()` replaces an entire module with an automatically-generated mock. Jest hoists `jest.mock()` calls to the top of the file (before imports), so they work even with ES module syntax.
+`jest.mock()` replaces an entire module with a mock version for the duration of the test file. It is hoisted to the top of the file by Babel/Jest transforms.
 
 ### Auto-Mock
 
-Auto-mocking replaces every exported function with a `jest.fn()`:
+```typescript
+// Jest infers the shape of the module and replaces all exports with jest.fn()
+jest.mock('./database');
+
+import { findUser, createUser } from './database';
+
+// findUser and createUser are now jest.fn() — return undefined by default
+(findUser as jest.Mock).mockResolvedValue({ id: 1, name: 'Alice' });
+
+const user = await findUser(1);
+expect(user.name).toBe('Alice');
+```
+
+### Partial Mock with `jest.requireActual`
+
+Keep the real implementation for most exports, override only what you need:
 
 ```typescript
-jest.mock('./emailService');
+jest.mock('./config', () => ({
+  ...jest.requireActual('./config'),   // keep real exports
+  DATABASE_URL: 'sqlite::memory:',    // override just this one
+  LOG_LEVEL: 'silent',
+}));
+```
 
-import { sendEmail } from './emailService';
+### Factory Function Mock
 
-it('calls sendEmail with correct arguments', async () => {
-  await registerUser({ name: 'Alice', email: 'alice@example.com' });
+Provide a complete replacement implementation:
+
+```typescript
+jest.mock('./email-client', () => ({
+  sendEmail: jest.fn().mockResolvedValue({ messageId: 'msg-123', success: true }),
+  validateEmail: jest.fn().mockReturnValue(true),
+  getDeliveryStatus: jest.fn().mockResolvedValue('delivered'),
+}));
+
+import { sendEmail } from './email-client';
+
+it('sends a welcome email after registration', async () => {
+  await registerUser({ email: 'alice@example.com', name: 'Alice' });
 
   expect(sendEmail).toHaveBeenCalledWith({
     to: 'alice@example.com',
@@ -177,256 +228,242 @@ it('calls sendEmail with correct arguments', async () => {
 });
 ```
 
-### Manual Mock with Factory Function
-
-Provide a factory to control what the mock exports:
-
-```typescript
-jest.mock('./database', () => ({
-  query: jest.fn(),
-  connect: jest.fn().mockResolvedValue(true),
-  disconnect: jest.fn().mockResolvedValue(true),
-}));
-
-import { query } from './database';
-
-it('queries the database', async () => {
-  (query as jest.Mock).mockResolvedValueOnce([{ id: 1, name: 'Alice' }]);
-
-  const result = await getUsers();
-
-  expect(result).toHaveLength(1);
-  expect(query).toHaveBeenCalledWith('SELECT * FROM users');
-});
-```
-
-### Partial Mock with `jest.requireActual`
-
-Keep some real exports while mocking others:
-
-```typescript
-jest.mock('./config', () => ({
-  ...jest.requireActual('./config'),   // keep all real exports
-  API_URL: 'http://localhost:3000',    // override just this one
-  DEBUG: false,
-}));
-```
-
 ### Mocking Default Exports
 
 ```typescript
-// axios has a default export
-jest.mock('axios', () => ({
-  default: {
-    get: jest.fn(),
-    post: jest.fn(),
-  },
-  get: jest.fn(),
-  post: jest.fn(),
-}));
-
-import axios from 'axios';
-
-it('fetches users', async () => {
-  (axios.get as jest.Mock).mockResolvedValueOnce({
-    data: [{ id: 1, name: 'Alice' }],
-  });
-
-  const users = await fetchUsers();
-  expect(users).toHaveLength(1);
+// When the module exports a default class or function:
+jest.mock('./Logger', () => {
+  return jest.fn().mockImplementation(() => ({
+    log: jest.fn(),
+    error: jest.fn(),
+    warn: jest.fn(),
+  }));
 });
+
+import Logger from './Logger';
+// Logger is a mock constructor
+const instance = new Logger();
+expect(instance.log).toBeDefined();
 ```
 
-### Mocking Named Exports
+### Mocking Named and Default Exports Together
 
 ```typescript
-// Module: ./validators.ts
-// export function isEmail(s: string): boolean { ... }
-// export function isPhone(s: string): boolean { ... }
-
-jest.mock('./validators', () => ({
-  isEmail: jest.fn().mockReturnValue(true),
-  isPhone: jest.fn().mockReturnValue(false),
+jest.mock('./analytics', () => ({
+  __esModule: true,              // Required for ES module default exports
+  default: jest.fn(),            // Mock the default export
+  trackEvent: jest.fn(),         // Mock a named export
+  setUserId: jest.fn(),
 }));
 ```
 
----
+## `__mocks__` Directory — Manual Mocks
 
-## `__mocks__` Directory
-
-Place manual mock implementations in a `__mocks__` folder adjacent to the module:
+For modules that need complex mock implementations reused across multiple test files, create manual mocks in a `__mocks__` directory.
 
 ```
 src/
 ├── services/
-│   ├── __mocks__/
-│   │   └── emailService.ts   ← manual mock for emailService.ts
-│   └── emailService.ts
+│   ├── email.service.ts
+│   └── __mocks__/
+│       └── email.service.ts    ← manual mock
+├── utils/
+│   └── logger.ts
 └── __mocks__/
-    └── axios.ts              ← manual mock for node_modules/axios
+    └── fs.ts                   ← Node.js built-in mock
 ```
 
 ```typescript
-// src/services/__mocks__/emailService.ts
-export const sendEmail = jest.fn().mockResolvedValue({ messageId: 'mock-id' });
-export const sendBulkEmail = jest.fn().mockResolvedValue({ sent: 0, failed: 0 });
-```
-
-For node_modules mocks, place the file in the root-level `__mocks__` directory. It is used **automatically** (without calling `jest.mock('axios')`):
-
-```typescript
-// __mocks__/axios.ts
-const axiosMock = {
-  get: jest.fn(),
-  post: jest.fn(),
-  put: jest.fn(),
-  delete: jest.fn(),
-  create: jest.fn().mockReturnThis(),
-  defaults: { headers: { common: {} } },
-};
-
-export default axiosMock;
-```
-
-:::caution[Automock vs Manual Mock]
-For modules in `node_modules`, placing a file in `__mocks__` at the project root makes it the automatic mock. For local modules, you still need to call `jest.mock('./path/to/module')` — the `__mocks__` file is only used when that call is made.
-:::
-
----
-
-## Mocking ES Modules
-
-When your project uses native ESM (`"type": "module"` in `package.json`), Jest requires additional setup:
-
-```typescript
-// jest.config.ts
-export default {
-  extensionsToTreatAsEsm: ['.ts'],
-  transform: {
-    '^.+\\.tsx?$': ['ts-jest', { useESM: true }],
-  },
-};
-```
-
-With `unstable_mockModule` for dynamic ES module mocking:
-
-```typescript
-const mockSendEmail = jest.fn();
-
-// Must use unstable_mockModule for ES modules
-jest.unstable_mockModule('./emailService.js', () => ({
-  sendEmail: mockSendEmail,
+// src/services/__mocks__/email.service.ts
+const EmailService = jest.fn().mockImplementation(() => ({
+  send: jest.fn().mockResolvedValue({ success: true }),
+  verify: jest.fn().mockResolvedValue(true),
+  getTemplate: jest.fn().mockReturnValue('<p>{{body}}</p>'),
 }));
 
-// Import AFTER mocking
-const { registerUser } = await import('./userService.js');
+export default EmailService;
+export const sendTransactionalEmail = jest.fn().mockResolvedValue({ id: 'msg-1' });
 ```
 
----
+Activate the manual mock in tests:
+
+```typescript
+jest.mock('../services/email.service'); // auto-uses __mocks__/email.service.ts
+
+import EmailService from '../services/email.service';
+const instance = new EmailService();
+// instance.send is already a jest.fn()
+```
+
+For Node.js built-in modules, place the mock in `<rootDir>/__mocks__/`:
+
+```typescript
+// __mocks__/fs.ts
+const fs = jest.createMockFromModule('fs') as typeof import('fs');
+fs.readFileSync = jest.fn().mockReturnValue('mocked file content');
+module.exports = fs;
+```
+
+:::caution[Automatic vs Manual Mocks]
+Manual mocks in `__mocks__/` are **not** activated automatically for user modules — you must still call `jest.mock('./path/to/module')`. For Node.js built-ins (`fs`, `path`, `crypto`), manual mocks in the root `__mocks__/` **are** activated automatically.
+:::
 
 ## Mocking Timers
 
-Jest can take control of `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval`, `Date`, and `queueMicrotask`.
-
-### Basic Timer Control
+Jest can replace `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval`, `Date`, `queueMicrotask`, and `setImmediate` with controllable fakes.
 
 ```typescript
-jest.useFakeTimers();
+describe('polling mechanism', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
 
-it('calls callback after 1 second', () => {
-  const callback = jest.fn();
+  afterEach(() => {
+    jest.useRealTimers();
+  });
 
-  setTimeout(callback, 1000);
+  it('retries 3 times before giving up', () => {
+    const mockFn = jest.fn();
 
-  expect(callback).not.toHaveBeenCalled();
+    startPolling(mockFn, { interval: 1000, maxRetries: 3 });
 
-  jest.advanceTimersByTime(1000); // advance clock by 1s
+    // Immediately: no calls yet
+    expect(mockFn).not.toHaveBeenCalled();
 
-  expect(callback).toHaveBeenCalledTimes(1);
+    // Advance by 1 second
+    jest.advanceTimersByTime(1000);
+    expect(mockFn).toHaveBeenCalledTimes(1);
+
+    // Advance another 2 seconds
+    jest.advanceTimersByTime(2000);
+    expect(mockFn).toHaveBeenCalledTimes(3);
+  });
+
+  it('clears all pending timers', () => {
+    const mockCallback = jest.fn();
+    setTimeout(mockCallback, 5000);
+
+    jest.runAllTimers(); // executes all pending timers
+    expect(mockCallback).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs only currently-pending timers (not those they schedule)', () => {
+    const outer = jest.fn();
+    const inner = jest.fn();
+
+    setTimeout(() => {
+      outer();
+      setTimeout(inner, 1000); // scheduled by outer
+    }, 500);
+
+    jest.runOnlyPendingTimers(); // runs outer, but not inner
+    expect(outer).toHaveBeenCalledTimes(1);
+    expect(inner).not.toHaveBeenCalled();
+  });
 });
+```
 
-afterEach(() => {
-  jest.useRealTimers(); // restore real timers
+### Mocking the Date
+
+```typescript
+describe('session expiration', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2024-01-15T10:00:00.000Z'));
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('expires sessions after 30 minutes', () => {
+    const session = createSession('user-1');
+    expect(session.isExpired()).toBe(false);
+
+    // Advance time by 31 minutes
+    jest.advanceTimersByTime(31 * 60 * 1000);
+
+    expect(session.isExpired()).toBe(true);
+  });
 });
 ```
 
-### Timer Helpers
+## Clearing and Resetting Mocks
 
-```typescript
-jest.useFakeTimers();
+Jest provides four methods for managing mock state. Understanding the differences prevents state leaks between tests.
 
-const callback = jest.fn();
-setTimeout(callback, 100);
-setTimeout(callback, 200);
-setTimeout(callback, 300);
-
-// Run all pending timers regardless of delay
-jest.runAllTimers();
-expect(callback).toHaveBeenCalledTimes(3);
-
-// Run only currently-pending timers (not those added by callbacks)
-jest.runOnlyPendingTimers();
-
-// Advance by a specific number of milliseconds
-jest.advanceTimersByTime(150);  // runs the 100ms timer only
-
-// Advance until no more timers are pending
-jest.runAllTimersAsync(); // async variant for Promises
-```
-
-### Mocking `Date`
-
-```typescript
-jest.useFakeTimers();
-jest.setSystemTime(new Date('2024-01-15T10:00:00.000Z'));
-
-const result = getCurrentTimestamp();
-expect(result).toBe('2024-01-15T10:00:00.000Z');
-
-jest.useRealTimers();
-```
-
----
-
-## Clearing, Resetting, and Restoring Mocks
-
-Understanding the difference between these three operations is essential:
-
-| Method | Effect |
-|--------|--------|
-| `mockFn.mockClear()` | Clears call history and instances; **keeps** implementation |
-| `mockFn.mockReset()` | Clears everything + **removes** implementation (returns `undefined`) |
-| `mockFn.mockRestore()` | Only works on `jest.spyOn` — restores the original function |
-| `jest.clearAllMocks()` | `mockClear()` on every mock in the test file |
-| `jest.resetAllMocks()` | `mockReset()` on every mock in the test file |
-| `jest.restoreAllMocks()` | `mockRestore()` on every spy in the test file |
+| Method | Clears calls/results | Resets implementation | Restores original |
+|---|---|---|---|
+| `mockFn.mockClear()` | ✅ | ❌ | ❌ |
+| `mockFn.mockReset()` | ✅ | ✅ (returns undefined) | ❌ |
+| `mockFn.mockRestore()` | ✅ | ✅ | ✅ (spyOn only) |
+| `jest.clearAllMocks()` | ✅ (all mocks) | ❌ | ❌ |
+| `jest.resetAllMocks()` | ✅ (all mocks) | ✅ (all mocks) | ❌ |
+| `jest.restoreAllMocks()` | ✅ (all mocks) | ✅ (all mocks) | ✅ (all spies) |
 
 ```typescript
 const mockFn = jest.fn().mockReturnValue(42);
 
-mockFn();
-mockFn();
+mockFn(); // call it once
 
+// mockClear — reset call history, keep implementation
 mockFn.mockClear();
-expect(mockFn).not.toHaveBeenCalled();  // call history cleared
-expect(mockFn()).toBe(42);               // implementation still works
+expect(mockFn).not.toHaveBeenCalled(); // call history cleared
+mockFn(); // still returns 42
 
+// mockReset — reset call history AND remove implementation
 mockFn.mockReset();
-expect(mockFn()).toBeUndefined();        // implementation also cleared
+expect(mockFn).not.toHaveBeenCalled();
+mockFn(); // returns undefined — implementation removed
+
+// mockRestore — only works on jest.spyOn() — also restores original method
+const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+consoleSpy.mockRestore();
+// console.log is back to normal
 ```
 
-### Automating Cleanup
-
-Configure Jest to automatically clear/reset mocks after each test in `jest.config.ts`:
+Configure automatic cleanup in `jest.config.ts`:
 
 ```typescript
 const config: Config = {
-  clearMocks: true,      // jest.clearAllMocks() after each test
-  resetMocks: false,     // jest.resetAllMocks() after each test
-  restoreMocks: true,    // jest.restoreAllMocks() after each test
+  clearMocks: true,     // equivalent to jest.clearAllMocks() in afterEach
+  resetMocks: false,    // equivalent to jest.resetAllMocks() in afterEach
+  restoreMocks: false,  // equivalent to jest.restoreAllMocks() in afterEach
 };
 ```
 
-:::tip[Recommended Setup]
-Enable `clearMocks: true` and `restoreMocks: true` in your config. This ensures each test starts with a clean mock state while keeping mock implementations (so you don't have to re-declare them in every test).
+:::tip[Recommended Config]
+Enable `clearMocks: true` in your Jest config to automatically clear call counts between tests. Only enable `restoreMocks: true` if you use `jest.spyOn()` heavily and want automatic cleanup. Avoid `resetMocks: true` as it silently wipes mock implementations set during module loading.
 :::
+
+## Inspecting Mock Calls
+
+The `.mock` property on every mock function contains the full call history:
+
+```typescript
+const mockFn = jest.fn();
+mockFn('a', 1);
+mockFn('b', 2);
+mockFn('c', 3);
+
+// All calls
+console.log(mockFn.mock.calls);
+// [['a', 1], ['b', 2], ['c', 3]]
+
+// All return values
+console.log(mockFn.mock.results);
+// [
+//   { type: 'return', value: undefined },
+//   { type: 'return', value: undefined },
+//   { type: 'return', value: undefined },
+// ]
+
+// All `this` contexts
+console.log(mockFn.mock.contexts);
+
+// Number of calls
+console.log(mockFn.mock.calls.length); // 3
+
+// Last call arguments
+console.log(mockFn.mock.lastCall); // ['c', 3]
+```

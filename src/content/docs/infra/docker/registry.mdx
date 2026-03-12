@@ -1,6 +1,6 @@
 ---
 title: Docker Registry
-description: Push and pull images from Docker Hub, GHCR, ECR, and private registries. Multi-arch builds, image scanning, and signing.
+description: Push and pull images from Docker Hub, GitHub Container Registry, AWS ECR, Google Artifact Registry, and private registries. Multi-arch builds, image scanning, and signing.
 sidebar:
   order: 7
 tags: [devops, docker]
@@ -10,143 +10,147 @@ import { Steps, Aside, Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/
 
 # Docker Registry
 
-A Docker registry stores and distributes container images. Docker Hub is the default public registry, but most production teams use private registries for security, performance, and compliance.
+A Docker registry is a storage and distribution system for container images. Understanding registries, image tagging conventions, and multi-architecture builds is essential for CI/CD pipelines and production deployments.
 
 ---
 
-## Image Naming Convention
+## Image Naming and Tagging Convention
 
-Understanding the full image name format is essential for working with multiple registries.
+Docker image names follow a consistent pattern:
 
 ```
 [registry/][namespace/]name[:tag][@digest]
 
 Examples:
-  nginx:1.25-alpine
-  ↑ implicit docker.io/library/nginx:1.25-alpine
-
-  myuser/myapp:1.2.3
-  ↑ implicit docker.io/myuser/myapp:1.2.3
-
-  ghcr.io/myorg/myapp:latest
-  ↑ GitHub Container Registry
-
-  123456789.dkr.ecr.us-east-1.amazonaws.com/myapp:v1.2.3
-  ↑ AWS ECR
-
-  europe-west1-docker.pkg.dev/myproject/myrepo/myapp:prod
-  ↑ Google Artifact Registry
-```
-
----
-
-## Docker Hub
-
-Docker Hub is the default public registry at `docker.io`. Free accounts get unlimited public repositories and one private repository.
-
-### Authentication
-
-```bash
-# Log in (prompts for username and password)
-docker login
-
-# Log in to Docker Hub explicitly
-docker login docker.io
-
-# Log in with credentials (avoid — password visible in shell history)
-docker login -u myusername -p mypassword
-
-# Log in with stdin (safer in CI)
-echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
-
-# Verify login
-cat ~/.docker/config.json
-
-# Log out
-docker logout
-```
-
-### Push and Pull
-
-```bash
-# Tag an image for Docker Hub
-docker build -t myusername/myapp:1.2.3 .
-docker tag myusername/myapp:1.2.3 myusername/myapp:latest
-
-# Push to Docker Hub
-docker push myusername/myapp:1.2.3
-docker push myusername/myapp:latest
-
-# Push all tags at once
-docker push --all-tags myusername/myapp
-
-# Pull from Docker Hub
-docker pull myusername/myapp:1.2.3
-
-# Pull with digest (fully immutable reference)
-docker pull myusername/myapp@sha256:abc123def456...
+nginx                               # Docker Hub official image, latest tag
+nginx:1.25-alpine                   # Docker Hub official, specific tag
+library/nginx:1.25                  # Fully qualified Docker Hub official
+myuser/myapp:v1.2.3                 # Docker Hub user image
+myuser/myapp:latest                 # Docker Hub, latest tag
+ghcr.io/org/myapp:main              # GitHub Container Registry
+123456789.dkr.ecr.us-east-1.amazonaws.com/myapp:v2  # AWS ECR
+europe-west1-docker.pkg.dev/project/repo/app:1.0    # Google Artifact Registry
+registry.example.com:5000/myapp:dev # Private registry
 ```
 
 ### Tagging Best Practices
 
 ```bash
-# Semantic versioning tags
-docker tag myapp:build myusername/myapp:2.1.3
-docker tag myapp:build myusername/myapp:2.1
-docker tag myapp:build myusername/myapp:2
-docker tag myapp:build myusername/myapp:latest
+# Build and tag simultaneously
+docker build -t myapp:1.2.3 .
+docker build -t myapp:1.2.3 -t myapp:latest .
 
-# Git SHA tag for traceability
-GIT_SHA=$(git rev-parse --short HEAD)
-docker tag myapp:build myusername/myapp:$GIT_SHA
+# Tag an existing image with a new name
+docker tag myapp:1.2.3 myuser/myapp:1.2.3
+docker tag myapp:1.2.3 myuser/myapp:latest
+docker tag myapp:1.2.3 ghcr.io/myorg/myapp:1.2.3
+docker tag myapp:1.2.3 myapp:stable
+```
 
-# Environment + version tag
-docker tag myapp:build myusername/myapp:prod-2.1.3
+**Recommended tagging strategy:**
+- `myapp:1.2.3` — exact semantic version (immutable)
+- `myapp:1.2` — minor version (updated with patches)
+- `myapp:1` — major version (updated with minor/patches)
+- `myapp:latest` — latest stable (updated with each release)
+- `myapp:main` or `myapp:edge` — latest from default branch (dev/unstable)
+- `myapp:sha-a1b2c3d` — git commit SHA for traceability
+
+:::caution[Never use `latest` in production]
+`latest` is just a convention — it's not automatically the newest image. Using `:latest` in production deployments means you can't tell which version is running and rollbacks are unreliable. Always pin to a specific version tag.
+:::
+
+---
+
+## Docker Hub
+
+[Docker Hub](https://hub.docker.com) is the default public registry. It hosts official images, public repositories, and private repositories.
+
+### Authentication
+
+```bash
+# Login to Docker Hub
+docker login
+# Enter your Docker Hub username and password (or access token)
+
+# Login with credentials (for scripts)
+echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin
+
+# Logout
+docker logout
+```
+
+:::tip[Use Access Tokens]
+Generate a Docker Hub Access Token (Account Settings → Security → New Access Token) instead of using your password. Access tokens can be scoped and revoked independently.
+:::
+
+### Pushing and Pulling
+
+```bash
+# Pull a public image
+docker pull nginx:alpine
+docker pull ubuntu:22.04
+
+# Push to your Docker Hub namespace
+docker build -t myusername/myapp:1.0.0 .
+docker push myusername/myapp:1.0.0
+
+# Push multiple tags
+docker push myusername/myapp:1.0.0
+docker push myusername/myapp:latest
+
+# Pull your image on another machine
+docker pull myusername/myapp:1.0.0
+
+# Make a repository private (from Docker Hub web UI or CLI)
+# In docker-compose pull with auth:
+docker compose pull
+```
+
+### Docker Hub Rate Limits
+
+Anonymous pulls: 100 pulls per 6 hours per IP
+Authenticated free accounts: 200 pulls per 6 hours
+Paid subscriptions: higher limits
+
+```bash
+# Check your remaining rate limit
+TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ratelimitpreview/test:pull" | jq -r .token)
+curl -s --head -H "Authorization: Bearer $TOKEN" https://registry-1.docker.io/v2/ratelimitpreview/test/manifests/latest \
+  | grep -i ratelimit
 ```
 
 ---
 
 ## GitHub Container Registry (GHCR)
 
-GHCR (`ghcr.io`) is tightly integrated with GitHub repositories and Actions. Images inherit repository permissions.
-
-### Authentication
+GHCR is tightly integrated with GitHub Actions and uses GitHub's permission model.
 
 ```bash
 # Authenticate with a Personal Access Token (PAT)
 # Required scopes: read:packages, write:packages, delete:packages
-echo "$GITHUB_TOKEN" | docker login ghcr.io -u USERNAME --password-stdin
+echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
 
-# In GitHub Actions, use the built-in GITHUB_TOKEN
-echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-```
-
-### Push and Pull
-
-```bash
-# Build and tag for GHCR
-docker build -t ghcr.io/myorg/myapp:1.2.3 .
-
-# Push
-docker push ghcr.io/myorg/myapp:1.2.3
+# Build and push
+docker build -t ghcr.io/myorg/myapp:latest .
+docker push ghcr.io/myorg/myapp:latest
 
 # Pull
-docker pull ghcr.io/myorg/myapp:1.2.3
+docker pull ghcr.io/myorg/myapp:latest
 ```
 
-### GitHub Actions Workflow
+### GitHub Actions Integration
 
 ```yaml
-# .github/workflows/docker.yml
-name: Build and Push
+# .github/workflows/publish.yml
+name: Publish Docker Image
 
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    tags: ["v*"]
 
 jobs:
-  build:
+  publish:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -160,7 +164,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}  # No extra secret needed!
 
       - name: Extract metadata
         id: meta
@@ -168,6 +172,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
+            type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
@@ -187,59 +192,41 @@ jobs:
 
 ## AWS Elastic Container Registry (ECR)
 
-ECR is the AWS-native private registry. Authentication uses the AWS CLI to generate a temporary token.
+ECR is a fully managed private container registry integrated with AWS IAM.
 
 ```bash
-# Authenticate (valid for 12 hours)
+# Authenticate (requires AWS CLI configured)
 aws ecr get-login-password --region us-east-1 \
-  | docker login --username AWS \
-    --password-stdin 123456789.dkr.ecr.us-east-1.amazonaws.com
+  | docker login --username AWS --password-stdin \
+    123456789.dkr.ecr.us-east-1.amazonaws.com
 
-# Create a repository (one-time)
-aws ecr create-repository \
-  --repository-name myapp \
-  --region us-east-1
+# Create a repository
+aws ecr create-repository --repository-name myapp --region us-east-1
 
-# Tag and push
-ECR_URI="123456789.dkr.ecr.us-east-1.amazonaws.com/myapp"
-docker build -t $ECR_URI:1.2.3 .
-docker push $ECR_URI:1.2.3
+# Build and push
+docker build -t 123456789.dkr.ecr.us-east-1.amazonaws.com/myapp:latest .
+docker push 123456789.dkr.ecr.us-east-1.amazonaws.com/myapp:latest
 
 # Pull
-docker pull $ECR_URI:1.2.3
-
-# Enable image scanning on push
-aws ecr put-image-scanning-configuration \
-  --repository-name myapp \
-  --image-scanning-configuration scanOnPush=true
+docker pull 123456789.dkr.ecr.us-east-1.amazonaws.com/myapp:latest
 ```
 
-### ECR Lifecycle Policy (Cost Management)
+ECR supports **lifecycle policies** to automatically clean up old images:
 
 ```json
 {
   "rules": [
     {
       "rulePriority": 1,
-      "description": "Keep only last 10 images per tag prefix",
+      "description": "Keep last 10 images",
       "selection": {
-        "tagStatus": "tagged",
-        "tagPrefixList": ["dev-"],
+        "tagStatus": "any",
         "countType": "imageCountMoreThan",
         "countNumber": 10
       },
-      "action": { "type": "expire" }
-    },
-    {
-      "rulePriority": 2,
-      "description": "Expire untagged images after 7 days",
-      "selection": {
-        "tagStatus": "untagged",
-        "countType": "sinceImagePushed",
-        "countUnit": "days",
-        "countNumber": 7
-      },
-      "action": { "type": "expire" }
+      "action": {
+        "type": "expire"
+      }
     }
   ]
 }
@@ -250,32 +237,31 @@ aws ecr put-image-scanning-configuration \
 ## Google Artifact Registry
 
 ```bash
-# Configure gcloud authentication
+# Configure Docker authentication
 gcloud auth configure-docker europe-west1-docker.pkg.dev
 
-# Create repository
-gcloud artifacts repositories create myrepo \
-  --repository-format=docker \
-  --location=europe-west1
+# Or use a service account key
+cat key.json | docker login -u _json_key --password-stdin \
+  https://europe-west1-docker.pkg.dev
 
-# Build, tag, push
-REPO="europe-west1-docker.pkg.dev/myproject/myrepo/myapp"
-docker build -t $REPO:1.2.3 .
-docker push $REPO:1.2.3
+# Push
+docker tag myapp:latest europe-west1-docker.pkg.dev/my-project/my-repo/myapp:latest
+docker push europe-west1-docker.pkg.dev/my-project/my-repo/myapp:latest
 ```
 
 ---
 
-## Private Registry (Self-Hosted)
+## Private Registry
 
-Run your own registry using the official `registry:2` image.
+Run your own registry using the official `registry` image.
 
 ```bash
-# Start a basic private registry on port 5000
+# Start a local private registry on port 5000
 docker run -d \
   --name registry \
   -p 5000:5000 \
-  -v regdata:/var/lib/registry \
+  --restart unless-stopped \
+  -v registry-data:/var/lib/registry \
   registry:2
 
 # Push to local registry
@@ -285,100 +271,83 @@ docker push localhost:5000/myapp:latest
 # Pull from local registry
 docker pull localhost:5000/myapp:latest
 
-# List repositories
+# List images in the registry
 curl http://localhost:5000/v2/_catalog
-# {"repositories":["myapp"]}
-
-# List tags for a repository
 curl http://localhost:5000/v2/myapp/tags/list
 ```
 
-### Registry with TLS and Authentication
+### Secured Private Registry
 
 ```yaml
-# compose.yml for a production-grade self-hosted registry
+# compose.yml for production registry
 services:
   registry:
     image: registry:2
     ports:
       - "5000:5000"
     environment:
-      REGISTRY_HTTP_TLS_CERTIFICATE: /certs/domain.crt
-      REGISTRY_HTTP_TLS_KEY: /certs/domain.key
       REGISTRY_AUTH: htpasswd
       REGISTRY_AUTH_HTPASSWD_PATH: /auth/htpasswd
       REGISTRY_AUTH_HTPASSWD_REALM: "Registry Realm"
+      REGISTRY_HTTP_TLS_CERTIFICATE: /certs/domain.crt
+      REGISTRY_HTTP_TLS_KEY: /certs/domain.key
     volumes:
-      - regdata:/var/lib/registry
-      - ./certs:/certs:ro
-      - ./auth:/auth:ro
+      - registry-data:/var/lib/registry
+      - ./auth:/auth
+      - ./certs:/certs
+    restart: unless-stopped
 
 volumes:
-  regdata:
+  registry-data:
+```
+
+```bash
+# Create htpasswd file
+docker run --rm httpd htpasswd -Bbn username password > auth/htpasswd
+
+# Login to secured registry
+docker login myregistry.example.com:5000
 ```
 
 ---
 
 ## Image Scanning
 
+Scan images for vulnerabilities before pushing to production.
+
 ### Docker Scout
 
 ```bash
-# Scan a local image
+# Docker's built-in scanner (integrated into Docker Desktop)
+docker scout quickview myapp:latest
 docker scout cves myapp:latest
-
-# Scan with policy check
-docker scout policy myapp:latest
-
-# Compare two images
-docker scout compare myapp:1.2.2 --to myapp:1.2.3
-
-# Show SBOMs
-docker scout sbom myapp:latest
+docker scout cves --only-fixed myapp:latest       # Only show patchable CVEs
+docker scout recommendations myapp:latest
+docker scout compare myapp:v1 myapp:v2            # Compare two images
 ```
 
-### Trivy (Open Source Scanner)
+### Trivy
 
 ```bash
 # Install trivy
-brew install aquasecurity/trivy/trivy   # macOS
-apt-get install -y trivy                 # Debian/Ubuntu
+brew install aquasecurity/trivy/trivy
 
-# Scan a local image
-trivy image myapp:latest
+# Scan an image
+trivy image nginx:latest
+trivy image --severity HIGH,CRITICAL myapp:latest
 
-# Scan and fail on CRITICAL and HIGH vulnerabilities
-trivy image --exit-code 1 --severity CRITICAL,HIGH myapp:latest
+# Scan and exit with error code on HIGH/CRITICAL
+trivy image --exit-code 1 --severity HIGH,CRITICAL myapp:latest
 
-# Scan a remote image
-trivy image ghcr.io/myorg/myapp:1.2.3
-
-# Output as JSON for CI processing
-trivy image --format json --output trivy-results.json myapp:latest
-
-# Scan filesystem (for use in multi-stage Dockerfiles)
-trivy fs --security-checks vuln,secret .
-```
-
-In CI:
-
-```yaml
-# GitHub Actions step
-- name: Scan image with Trivy
-  uses: aquasecurity/trivy-action@master
-  with:
-    image-ref: myapp:${{ github.sha }}
-    format: sarif
-    output: trivy-results.sarif
-    severity: CRITICAL,HIGH
-    exit-code: '1'
+# Scan in CI
+docker run --rm aquasec/trivy image myapp:latest
 ```
 
 ---
 
-## Image Signing (cosign)
+## Image Signing with Cosign
 
-Image signing ensures the images you pull are exactly what was built and signed by your CI system.
+[Cosign](https://github.com/sigstore/cosign) is part of the Sigstore project for supply chain security.
 
 ```bash
 # Install cosign
@@ -387,106 +356,113 @@ brew install cosign
 # Generate a key pair
 cosign generate-key-pair
 
-# Sign an image (after pushing)
-cosign sign --key cosign.key ghcr.io/myorg/myapp:1.2.3
+# Sign an image after pushing
+cosign sign --key cosign.key myregistry/myapp:1.0.0
 
-# Verify a signature
-cosign verify \
-  --key cosign.pub \
-  ghcr.io/myorg/myapp:1.2.3
+# Verify the signature
+cosign verify --key cosign.pub myregistry/myapp:1.0.0
 
-# Keyless signing with Sigstore (OIDC-based, no key management)
-cosign sign ghcr.io/myorg/myapp:1.2.3   # Uses OIDC identity
-
-# Attach SBOM
-cosign attach sbom \
-  --sbom sbom.spdx \
-  ghcr.io/myorg/myapp:1.2.3
+# Keyless signing (uses OIDC identity — works in GitHub Actions)
+cosign sign ghcr.io/myorg/myapp:latest
 ```
 
 ---
 
 ## Multi-Architecture Builds
 
-Build images for multiple CPU architectures (amd64, arm64, armv7) from a single build command.
+Build images for multiple CPU architectures (amd64 for servers, arm64 for Apple Silicon/Graviton).
 
 ```bash
-# Create a new builder with multi-platform support
-docker buildx create \
-  --name multibuilder \
-  --driver docker-container \
-  --use
-
-# Inspect the builder (bootstrap downloads BuildKit)
+# Set up a multi-platform builder
+docker buildx create --name multiarch --driver docker-container --use
 docker buildx inspect --bootstrap
-
-# List available platforms
-docker buildx ls
 
 # Build for multiple platforms and push
 docker buildx build \
   --platform linux/amd64,linux/arm64,linux/arm/v7 \
-  --tag myregistry/myapp:1.2.3 \
   --tag myregistry/myapp:latest \
   --push \
   .
 
-# Build for multiple platforms without pushing (local cache)
+# Build for local testing (single platform)
 docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  --tag myapp:local \
-  --load \
+  --platform linux/arm64 \
+  --tag myapp:arm64 \
+  --load \      # Load into local docker images
   .
 
-# Inspect the manifest list
-docker buildx imagetools inspect myregistry/myapp:1.2.3
+# Inspect the manifest
+docker buildx imagetools inspect myregistry/myapp:latest
+
+# List available platforms for an image
+docker manifest inspect myregistry/myapp:latest | jq '.manifests[].platform'
 ```
 
-:::tip[QEMU for cross-compilation]
-When building for ARM on an x86 host (or vice versa), Docker uses QEMU emulation. Enable it with:
-```bash
-docker run --rm --privileged tonistiigi/binfmt --install all
+### Multi-Arch in GitHub Actions
+
+```yaml
+- name: Set up QEMU (for cross-platform emulation)
+  uses: docker/setup-qemu-action@v3
+
+- name: Set up Docker Buildx
+  uses: docker/setup-buildx-action@v3
+
+- name: Build and push multi-arch
+  uses: docker/build-push-action@v5
+  with:
+    platforms: linux/amd64,linux/arm64
+    push: true
+    tags: ghcr.io/myorg/myapp:latest
 ```
-Cross-compilation is slower than native; consider using AWS Graviton or Apple M-series runners for native ARM builds.
-:::
 
 ---
 
-## Analyzing Image Size with dive
+## Image Size Optimization
 
-`dive` is a tool for exploring a Docker image's layers and finding wasted space.
+### Analyze with `dive`
 
 ```bash
-# Install
+# Install dive
 brew install dive
 
-# Analyze an image
+# Analyze an image's layers
 dive myapp:latest
 
-# Run in CI mode (fails if wasted space exceeds threshold)
+# CI-friendly check for wasted space
 dive --ci myapp:latest
 ```
 
-In the dive interactive UI:
-- Arrow keys navigate layers
-- Tab switches between layer view and file tree
-- Space bar toggle file changes per layer
-- Ctrl+U shows unmodified files
+### Size Reduction Techniques
 
-### Layer Squashing
+```dockerfile
+# 1. Use minimal base images
+FROM node:20-alpine        # ~60 MB vs node:20 (~1 GB)
+FROM python:3.12-slim      # ~150 MB vs python:3.12 (~900 MB)
 
-```bash
-# Using docker export/import (flattens all layers into one)
-docker create --name temp myapp:latest
-docker export temp | docker import - myapp:squashed
-docker rm temp
+# 2. Combine RUN commands to avoid extra layers
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# Multi-stage build naturally squashes by only copying what you need
-FROM builder AS final
-COPY --from=builder /app/dist /dist
-# Only the final COPY creates a layer — no build tools included
+# 3. Multi-stage builds — only ship what's needed at runtime
+FROM node:20-alpine AS builder
+RUN npm ci && npm run build
+
+FROM node:20-alpine AS runner
+COPY --from=builder /app/dist ./dist
+
+# 4. Use .dockerignore to reduce build context
+# 5. Remove dev dependencies
+RUN npm ci --only=production
+
+# 6. Clear package manager cache
+RUN pip install -r requirements.txt && pip cache purge
 ```
 
-:::caution[Squashing breaks layer sharing]
-Squashing layers saves disk space for a single image but breaks layer sharing between images that would otherwise share base layers. For most use cases, a well-constructed multi-stage Dockerfile is better than post-build squashing.
-:::
+```bash
+# Check image sizes
+docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}"
+
+# Inspect each layer's contribution
+docker history --no-trunc myapp:latest
+```
